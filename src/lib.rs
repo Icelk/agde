@@ -1,21 +1,34 @@
+//! A general decentralized sync library supporting text and binary.
+
 #![deny(
     clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
     missing_docs
 )]
+// `TODO`: remove
+#![allow(clippy::missing_panics_doc)]
+
+mod log;
+
+use std::collections::HashMap;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+/// Describes the capabilities of the client. Sent in the initial [`Message`] exchange.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct Capabilities {
     version: semver::Version,
     /// The client is striving to be persistent. These will regularly do [`Message::HashCheck`]
     persistent: bool,
-    uuid: u64,
+    uuid: Uuid,
 }
 
+/// A modification to a resource.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct ModifyEvent {
     resource: String,
     section: Section,
@@ -29,9 +42,13 @@ impl ModifyEvent {
         Self { resource, section }
     }
 }
+/// A deletion of a resource.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct DeleteEvent;
+/// A move of a resource. Changes the resource path.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct MoveEvent;
 
 macro_rules! into_event {
@@ -45,15 +62,29 @@ macro_rules! into_event {
 }
 
 into_event!(ModifyEvent, Modify);
+impl<T: Into<Event>> From<T> for EventMessage {
+    fn from(ev: T) -> Self {
+        EventMessage::new(vec![ev.into()])
+    }
+}
 
+/// A change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
 pub enum Event {
+    /// Modification.
     Modify(ModifyEvent),
+    /// Deletion.
     Delete(DeleteEvent),
+    /// Move.
     Move(MoveEvent),
 }
 
+/// A selection of data in a document.
+///
+/// Comparable to `slice` functions in various languages (e.g. [JS](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/splice)).
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct Section {
     /// The start of the previous data in the resource.
     start: usize,
@@ -63,33 +94,74 @@ pub struct Section {
     data: Vec<u8>,
 }
 impl Section {
+    /// Assembles a new selection using `start` as the start of the original data, `end` as the
+    /// terminator, and `data` to fill the space between `start` and `end`.
+    ///
+    /// If `data` is longer than `end-start`, the buffer is grown. If it's shorter, the buffer will
+    /// be truncated.
+    ///
+    /// # Panics
+    ///
+    /// `start` must be less than or equal to `end`.
     pub fn new(start: usize, end: usize, data: Vec<u8>) -> Self {
+        assert!(start > end, "passed the start of data after the end of it");
         Self { start, end, data }
     }
 }
 
+/// The data of [`MessageKind`] corresponding to a list of [`Event`]s.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct EventMessage {
     events: Vec<Event>,
-    uuid: u64,
+    timestamp: SystemTime,
 }
 impl EventMessage {
+    /// Creates a new event message with the timestamp [`SystemTime::now`] and `events`.
     pub fn new(events: Vec<Event>) -> Self {
-        Self::with_uuid(events, rand::random())
+        Self::with_timestamp(events, SystemTime::now())
     }
-    pub fn with_uuid(events: Vec<Event>, uuid: u64) -> Self {
-        Self { events, uuid }
+    /// Assembles from `timestamp` and `events`.
+    pub fn with_timestamp(events: Vec<Event>, timestamp: SystemTime) -> Self {
+        Self { events, timestamp }
     }
-    pub fn with_rng(events: Vec<Event>, rng: impl rand::Rng) -> Self {
-        Self::with_uuid(events, rng.gen())
-    }
+    /// Gets an iterator of the internal events.
     pub fn event_iter(&self) -> impl Iterator<Item = &Event> {
         self.events.iter()
     }
 }
 
+/// A UUID.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+#[must_use]
+pub struct Uuid(u64);
+impl Uuid {
+    /// Creates a new UUID.
+    ///
+    /// Uses [`rand::random()`]. Use [`Self::with_rng`] for a faster method.
+    pub fn new() -> Self {
+        Self(rand::random())
+    }
+    /// Uses `rng` to create a UUID.
+    pub fn with_rng(mut rng: impl rand::Rng) -> Self {
+        Self(rng.gen())
+    }
+    /// Gets the inner data.
+    #[must_use]
+    pub fn inner(&self) -> u64 {
+        self.0
+    }
+}
+impl Default for Uuid {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The kinds of messages with their data. Part of a [`Message`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub enum Message {
+#[must_use]
+pub enum MessageKind {
     /// The client sending this is connecting to the network.
     ///
     /// Will declare it's capabilities.
@@ -98,11 +170,18 @@ pub enum Message {
     Hello(Capabilities),
     /// Response to the [`Self::Hello`] message.
     Welcome(Capabilities),
-    /// The [`Message::Hello`] uses an occupied UUID.
+    /// The [`MessageKind::Hello`] uses an occupied UUID.
     InvalidUuid,
+    /// The [`Capabilities::version()`] is not compatible.
+    ///
+    /// The sending client will not add UUID of the [`Self::Hello`] message to the known clients.
+    /// The sender of the Hello should ignore all future messages from this client.
+    MismatchingVersions,
     /// A client has new data to share.
     Event(EventMessage),
     /// A client tries to get the most recent data.
+    /// Contains the list of which documents were edited and size at last session.
+    /// `TODO`: Don't send the one's that's been modified locally; we only want their changes.
     ///
     /// You should respond with a [`Self::FastForwardReply`].
     FastForward,
@@ -116,23 +195,116 @@ pub enum Message {
     HashCheck,
     /// A reply with all the hashes of all the requested files.
     HashCheckReply,
+    /// Checks the internal message UUID log.
+    ///
+    /// `TODO`: specify last x messages. Sort them before sending; we have a sorted events
+    /// guaranteed, so now we ignore order of messages.
+    MessageUuidLogCheck,
+    /// The target client cancelled the request.
+    ///
+    /// This may be the result of too many requests.
+    /// Should not be sent as a signal of not supporting the feature.
+    Canceled,
+}
+/// A message to be communicated between clients.
+///
+/// Contains a [`MessageKind`], sender UUID, and message UUID.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct Message {
+    kind: MessageKind,
+    sender: Uuid,
+    uuid: Uuid,
+}
+impl Message {
+    /// Creates a new message.
+    #[inline]
+    pub fn new(inner: MessageKind, sender: Uuid, uuid: Uuid) -> Self {
+        Self {
+            kind: inner,
+            sender,
+            uuid,
+        }
+    }
+    /// Gets the sender UUID.
+    #[inline]
+    pub fn sender(&self) -> Uuid {
+        self.sender
+    }
+    /// Gets the message UUID.
+    #[inline]
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+    /// Gets the inner [`MessageKind`].
+    ///
+    /// This contains all the data of the message.
+    #[inline]
+    pub fn inner(&self) -> &MessageKind {
+        &self.kind
+    }
+
+    /// Converts the message to bytes.
+    ///
+    /// You can also use [`bincode`] or any other [`serde`]-based library to serialize the message.
+    pub fn bin(self) -> Vec<u8> {
+        // this should be good; we only use objects from ::std and our own derived
+        bincode::encode_to_vec(self, bincode::config::Configuration::standard()).unwrap()
+    }
 }
 
+/// The main manager of a client.
+///
+/// The `process_*` methods are for creating [`Message`]s.
+/// The `apply_*` methods are for accepting and evaluating [`Message`]s.
+#[derive(Debug)]
+#[must_use]
 pub struct Manager {
     rng: rand::rngs::ThreadRng,
+    uuid: Uuid,
+    clients: HashMap<Uuid, Capabilities>,
+
+    event_log: log::EventLog,
+    message_uuid_log: log::MessageUuidLog,
 }
 impl Manager {
+    /// Creates a empty manager.
+    ///
+    /// Call [`Self::process_hello()`] to get a hello message.
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn process<'a>(&mut self, event: Event) -> EventMessage {
-        EventMessage::with_rng(vec![event], &mut self.rng)
+    /// Gets the UUID of this client.
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+    /// Generates a UUID using the internal [`rand::Rng`].
+    #[inline]
+    pub(crate) fn generate_uuid(&mut self) -> Uuid {
+        Uuid::with_rng(&mut self.rng)
+    }
+    /// Trims down the internal logs.
+    ///
+    /// This should mostly not be called. Only in high-volume steams of [`Messages`] might these
+    /// take up any noticeable difference.
+    pub fn clear_logs(&mut self) {
+        self.event_log.trim();
+        self.message_uuid_log.trim()
+    }
+    /// Takes a [`EventMessage`] and returns a [`Message`].
+    #[inline]
+    pub fn process_event(&mut self, event: EventMessage) -> Message {
+        Message::new(MessageKind::Event(event), self.uuid, self.generate_uuid())
     }
 }
 impl Default for Manager {
     fn default() -> Self {
+        let mut rng = rand::thread_rng();
+        let uuid = Uuid::with_rng(&mut rng);
         Self {
-            rng: rand::thread_rng(),
+            rng,
+            uuid,
+            ..Default::default()
         }
     }
 }
@@ -150,21 +322,30 @@ mod tests {
             None,
         );
 
-        let mut message = manager.process(event.clone().into());
+        let sender_uuid = manager.uuid();
+
+        let mut message = manager.process_event(event.clone().into());
 
         // The message are sent to a different client.
 
-        match message {}
+        assert_eq!(message.sender(), sender_uuid);
 
         let mut receiver = Manager::default();
 
-        let mut events = actions
-            .into_iter()
-            .map(|action| receiver.apply(action))
-            .flatten();
+        match message.inner() {
+            MessageKind::Event(ev) => {
+                let mut events = ev
+                    .event_iter()
+                    .map(|action| receiver.apply(action))
+                    .flatten();
 
-        assert_eq!(events.next(), Some(event));
-        assert_eq!(events.next(), None);
+                assert_eq!(events.next(), Some(event));
+                assert_eq!(events.next(), None);
+            }
+            kind => {
+                panic!("Got {:?}, but expected a Event!", kind);
+            }
+        }
 
         // receive action...
         // assert the only action is to modify `test.txt` with the same section as before.
