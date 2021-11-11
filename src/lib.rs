@@ -8,24 +8,35 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct ModifyEvent<'a> {
-    resource: &'a str,
-    section: Section<'a>,
-    source: Option<&'a [u8]>,
+pub struct Capabilities {
+    version: semver::Version,
+    /// The client is striving to be persistent. These will regularly do [`Message::HashCheck`]
+    persistent: bool,
+    uuid: u64,
 }
-impl<'a> ModifyEvent<'a> {
-    pub fn new(resource: &'a str, section: Section<'a>, source: Option<&'a [u8]>) -> Self {
-        Self {
-            resource,
-            section,
-            source,
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct ModifyEvent {
+    resource: String,
+    section: Section,
+}
+impl ModifyEvent {
+    /// Calculates the diff if `source` is [`Some`].
+    pub fn new(resource: String, section: Section, source: Option<&[u8]>) -> Self {
+        if source.is_some() {
+            unimplemented!("Implement diff");
         }
+        Self { resource, section }
     }
 }
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct DeleteEvent;
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub struct MoveEvent;
 
 macro_rules! into_event {
     ($type:ty, $enum_name:ident) => {
-        impl<'a> From<$type> for Event<'a> {
+        impl<'a> From<$type> for Event {
             fn from(event: $type) -> Self {
                 Self::$enum_name(event)
             }
@@ -33,48 +44,78 @@ macro_rules! into_event {
     };
 }
 
-into_event!(ModifyEvent<'a>, Modify);
+into_event!(ModifyEvent, Modify);
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub enum Event<'a> {
-    Modify(ModifyEvent<'a>),
+pub enum Event {
+    Modify(ModifyEvent),
     Delete(DeleteEvent),
     Move(MoveEvent),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct Section<'a> {
+pub struct Section {
     /// The start of the previous data in the resource.
     start: usize,
     /// The end of the previous data in the resource.
     end: usize,
     /// A reference to the data.
-    data: &'a [u8],
+    data: Vec<u8>,
 }
-impl<'a> Section<'a> {
-    pub fn new(start: usize, end: usize, data: &'a [u8]) -> Self {
+impl Section {
+    pub fn new(start: usize, end: usize, data: Vec<u8>) -> Self {
         Self { start, end, data }
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct Message<'a> {
-    events: Vec<Event<'a>>,
+pub struct EventMessage {
+    events: Vec<Event>,
     uuid: u64,
 }
-impl<'a> Message<'a> {
-    pub fn new(events: Vec<Event<'a>>) -> Self {
+impl EventMessage {
+    pub fn new(events: Vec<Event>) -> Self {
         Self::with_uuid(events, rand::random())
     }
-    pub fn with_uuid(events: Vec<Event<'a>>, uuid: u64) -> Self {
+    pub fn with_uuid(events: Vec<Event>, uuid: u64) -> Self {
         Self { events, uuid }
     }
-    pub fn with_rng(events: Vec<Event<'a>>, rng: impl rand::Rng) -> Self {
+    pub fn with_rng(events: Vec<Event>, rng: impl rand::Rng) -> Self {
         Self::with_uuid(events, rng.gen())
     }
     pub fn event_iter(&self) -> impl Iterator<Item = &Event> {
         self.events.iter()
     }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+pub enum Message {
+    /// The client sending this is connecting to the network.
+    ///
+    /// Will declare it's capabilities.
+    ///
+    /// Expects a [`Self::Welcome`] or [`Self::InvalidUuid`].
+    Hello(Capabilities),
+    /// Response to the [`Self::Hello`] message.
+    Welcome(Capabilities),
+    /// The [`Message::Hello`] uses an occupied UUID.
+    InvalidUuid,
+    /// A client has new data to share.
+    Event(EventMessage),
+    /// A client tries to get the most recent data.
+    ///
+    /// You should respond with a [`Self::FastForwardReply`].
+    FastForward,
+    /// A reply to a [`Self::FastForward`] request.
+    FastForwardReply,
+    /// A request to get the diffs and sync the specified resources.
+    Sync,
+    /// The response with hashes of the specified resources.
+    SyncReply,
+    /// Requests all the hashes of all the resources specified in the regex.
+    HashCheck,
+    /// A reply with all the hashes of all the requested files.
+    HashCheckReply,
 }
 
 pub struct Manager {
@@ -84,8 +125,8 @@ impl Manager {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn process<'a>(&mut self, event: Event<'a>) -> Message<'a> {
-        Message::with_rng(vec![event], &mut self.rng)
+    pub fn process<'a>(&mut self, event: Event) -> EventMessage {
+        EventMessage::with_rng(vec![event], &mut self.rng)
     }
 }
 impl Default for Manager {
@@ -103,13 +144,17 @@ mod tests {
     fn send_diff() {
         let mut manager = Manager::default();
 
-        let event = ModifyEvent::new("test.txt", Section::new(0, 0, b"Some test data."), None);
+        let event = ModifyEvent::new(
+            "test.txt".into(),
+            Section::new(0, 0, b"Some test data.".to_vec()),
+            None,
+        );
 
         let mut message = manager.process(event.clone().into());
 
-        let actions: Vec<_> = message.event_iter().collect();
+        // The message are sent to a different client.
 
-        // The actions are sent to a different client.
+        match message {}
 
         let mut receiver = Manager::default();
 
