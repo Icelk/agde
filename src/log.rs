@@ -167,6 +167,9 @@ impl<'a> EventApplier<'a> {
 
         // How will the revert and implement functions on modify work?
         // Can revert be a inverse and just call implement?
+        // We need to modify the whole buffer when reverting
+        // Directly modify `resource` as the buffer.
+        // Have a `PartiallyUnknown` data type for the Sections which have removed data.
     }
 }
 
