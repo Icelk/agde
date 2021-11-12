@@ -3,9 +3,10 @@
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{EmptySection, Event, Section, Uuid};
+use crate::{EmptySection, Event, Section, SliceBuf, Uuid};
 
 #[derive(Debug)]
+#[must_use]
 struct ReceivedEvent {
     event: Event<EmptySection>,
     /// A [`Duration`] of time after UNIX_EPOCH.
@@ -18,6 +19,8 @@ struct ReceivedEvent {
 pub enum Error {
     /// The given [`Event`] has occurred in the future!
     EventInFuture,
+    /// The guarantees of [`Section`] don't hold up.
+    SectionInvalid,
 }
 
 #[derive(Debug)]
@@ -140,6 +143,7 @@ impl EventLog {
     }
 }
 #[derive(Debug)]
+#[must_use]
 pub struct EventApplier<'a> {
     /// Ordered from last (temporally).
     events: &'a [ReceivedEvent],
@@ -154,7 +158,7 @@ impl<'a> EventApplier<'a> {
     }
     /// `resource` must be at least `current_resource.len() + (new_event.len() - (new_event.end() -
     /// new_event.start()))`
-    pub fn apply(&self, resource: &mut [u8]) {
+    pub fn apply(&self, resource: &mut SliceBuf) {
         // Create a stack of the data of the reverted things.
         // Match only for the current resource.
         // On move events, only change resource.

@@ -26,13 +26,109 @@ pub struct Capabilities {
     uuid: Uuid,
 }
 
+#[derive(Debug)]
+#[must_use]
+pub struct SliceBuf<'a> {
+    slice: &'a mut [u8],
+    len: usize,
+}
+impl<'a> SliceBuf<'a> {
+    pub fn new(slice: &'a mut [u8]) -> Self {
+        Self { slice, len: 0 }
+    }
+    /// Sets the size of the filled region of the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n > self.capacity()`.
+    pub fn set_filled(&mut self, n: usize) {
+        self.len = n;
+        assert!(self.len <= self.slice.len());
+    }
+    /// Advances the size of the filled region of the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.len() + n > self.capacity()`.
+    pub fn advance(&mut self, n: usize) {
+        self.set_filled(self.len + n);
+    }
+    /// The filled region of the buffer.
+    #[must_use]
+    pub fn filled(&self) -> usize {
+        self.len
+    }
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.slice.len()
+    }
+}
+
+#[derive(Debug)]
+pub enum ApplyError {
+    /// [`SliceBuf::capacity`] is too small.
+    BufTooSmall,
+}
+
+/// [`Section::end`] must always be after [`Section::start`].
 pub trait Section {
     fn start(&self) -> usize;
     fn end(&self) -> usize;
+    fn resource_replace_len(&self) -> usize {
+        self.end() - self.start()
+    }
+    /// Difference between old and new length of resource.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the end is before the start.
+    /// This guarantee should be upheld by the implementer of [`Section`].
+    fn len_difference(&self) -> isize {
+        self.len() as isize - (self.resource_replace_len() as isize)
+    }
+    /// Length of new data to fill between [`Section::start`] and [`Section::end`].
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 pub trait DataSection: Section {
     fn data(&self) -> &[u8];
+    /// Applies `self` to `resource`.
+    ///
+    /// Returns [`SliceBuf::filled`] if successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
+    fn apply(&self, resource: &mut SliceBuf) -> Result<usize, ApplyError> {
+        let new_size = resource.filled() as isize + self.len_difference();
+        if new_size > resource.capacity() as isize {
+            return Err(ApplyError::BufTooSmall);
+        }
+        // Copy the old data that's in the way of the new.
+        // SAFETY: We guarantee above that we can offset the bytes by `self.len_difference()`.
+        unsafe {
+            std::ptr::copy(
+                &resource.slice[self.start()],
+                &mut resource.slice[(self.start() as isize + self.len_difference()) as usize],
+                resource.filled() - self.start(),
+            )
+        }
+        // Copy data from `Section` to `resource`.
+        // SAFETY: The write is guaranteed to have the space left, see `unsafe` block above.
+        // They will never overlap, as the [`SliceBuf`] contains a mutable reference to the bytes,
+        // they are exclusive.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &self.data()[0],
+                &mut resource.slice[self.start()],
+                self.len(),
+            )
+        }
+        resource.set_filled((resource.filled() as isize - self.len_difference()) as usize);
+        Ok(resource.filled())
+    }
 }
 impl<S: Section> Section for &S {
     fn start(&self) -> usize {
@@ -59,6 +155,43 @@ impl EmptySection {
             end: section.end(),
             len: section.len(),
         }
+    }
+    pub(crate) fn revert(&self, resource: &mut SliceBuf) -> VecSection {
+        assert!(resource.filled() + self.len() <= resource.capacity());
+        assert!(self.end() <= resource.filled());
+        let mut section = VecSection::new(self.start(), self.end(), Vec::with_capacity(self.len()));
+        // Copy data from `resource` to `section`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &resource.slice[self.start()],
+                &mut section.data[0],
+                self.len(),
+            );
+            section.data.set_len(section.data().len())
+        }
+        // Copy the "old" data back in place of the new.
+        unsafe {
+            std::ptr::copy(
+                &resource.slice[(self.start() as isize + self.len_difference()) as usize],
+                &mut resource.slice[self.start()],
+                resource.filled() - self.start(),
+            )
+        }
+
+        // If we added bytes here,
+        if self.len_difference() < 0 {
+            let to_fill = (0 - self.len_difference()) as usize;
+            unsafe {
+                std::ptr::write_bytes(
+                    &mut resource.slice[(self.start() as isize + self.len_difference()) as usize],
+                    0,
+                    to_fill,
+                );
+            }
+        }
+
+        resource.set_filled((resource.filled() as isize + self.len_difference()) as usize);
+        section
     }
 }
 impl Section for EmptySection {
