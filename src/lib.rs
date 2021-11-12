@@ -479,6 +479,7 @@ mod tests {
                     let event_applier = receiver
                         .apply_event(event, message.uuid(), ev_msg.timestamp)
                         .expect("Got event from future.");
+                    assert_eq!(event_applier.resource(), Some("test.txt"));
                 }
             }
             kind => {
