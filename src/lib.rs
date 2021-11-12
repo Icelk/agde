@@ -1,10 +1,10 @@
 //! A general decentralized sync library supporting text and binary.
 
 #![deny(
-    clippy::pedantic,
+    // clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
-    missing_docs
+    // missing_docs
 )]
 // `TODO`: remove
 #![allow(clippy::missing_panics_doc)]
@@ -33,6 +33,17 @@ pub trait Section {
 }
 pub trait DataSection: Section {
     fn data(&self) -> &[u8];
+}
+impl<S: Section> Section for &S {
+    fn start(&self) -> usize {
+        (*self).start()
+    }
+    fn end(&self) -> usize {
+        (*self).end()
+    }
+    fn len(&self) -> usize {
+        (*self).len()
+    }
 }
 
 #[derive(Debug)]
@@ -86,7 +97,12 @@ impl VecSection {
     ///
     /// `start` must be less than or equal to `end`.
     pub fn new(start: usize, end: usize, data: Vec<u8>) -> Self {
-        assert!(start > end, "passed the start of data after the end of it");
+        assert!(
+            start <= end,
+            "passed the start of data ({:?}) after the end of it({:?})",
+            start,
+            end
+        );
         Self { start, end, data }
     }
 }
@@ -126,11 +142,16 @@ impl<S: DataSection> ModifyEvent<S> {
 /// A deletion of a resource.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct DeleteEvent;
+pub struct DeleteEvent {
+    resource: String,
+}
 /// A move of a resource. Changes the resource path.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct MoveEvent;
+pub struct MoveEvent {
+    resource: String,
+    target: String,
+}
 
 macro_rules! into_event {
     ($type:ty, $enum_name:ident) => {
@@ -143,6 +164,8 @@ macro_rules! into_event {
 }
 
 into_event!(ModifyEvent<T>, Modify);
+into_event!(DeleteEvent, Delete);
+into_event!(MoveEvent, Move);
 impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
     fn from(ev: T) -> Self {
         EventMessage::new(vec![ev.into()])
@@ -160,13 +183,22 @@ pub enum Event<S> {
     /// Move.
     Move(MoveEvent),
 }
+impl<S> Event<S> {
+    pub fn resource(&self) -> &str {
+        match self {
+            Self::Modify(ev) => &ev.resource,
+            Self::Delete(ev) => &ev.resource,
+            Self::Move(ev) => &ev.resource,
+        }
+    }
+}
 /// Clones the `resource` [`String`].
 impl<S: Section> From<&Event<S>> for Event<EmptySection> {
     fn from(ev: &Event<S>) -> Self {
         match ev {
             Event::Modify(ev) => Event::Modify(ModifyEvent {
                 resource: ev.resource.clone(),
-                section: EmptySection::new(ev.section),
+                section: EmptySection::new(&ev.section),
             }),
             Event::Move(ev) => Event::Move(ev.clone()),
             Event::Delete(ev) => Event::Delete(ev.clone()),
@@ -319,6 +351,7 @@ impl Message {
     /// Converts the message to bytes.
     ///
     /// You can also use [`bincode`] or any other [`serde`]-based library to serialize the message.
+    #[must_use]
     pub fn bin(self) -> Vec<u8> {
         // this should be good; we only use objects from ::std and our own derived
         bincode::encode_to_vec(
@@ -326,6 +359,12 @@ impl Message {
             bincode::config::Configuration::standard(),
         )
         .unwrap()
+    }
+}
+impl TryFrom<&[u8]> for Message {
+    type Error = bincode::error::DecodeError;
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        bincode::serde::decode_from_slice(value, bincode::config::Configuration::standard())
     }
 }
 
@@ -353,9 +392,10 @@ impl Manager {
         Self {
             rng,
             uuid,
+            clients: HashMap::new(),
+
             event_log: log::EventLog::new(log_lifetime),
             message_uuid_log: log::MessageUuidLog::new(message_log_limit),
-            ..Default::default()
         }
     }
     /// Gets the UUID of this client.
@@ -372,13 +412,20 @@ impl Manager {
     pub fn process_event(&mut self, event: EventMessage) -> Message {
         Message::new(MessageKind::Event(event), self.uuid, self.generate_uuid())
     }
-    pub fn apply_event(
-        &mut self,
-        event: &DatafulEvent,
+    /// # Errors
+    ///
+    /// Fails if the `event` is more than 10s from the future.
+    ///
+    /// This prevents other clients from hogging our memory with items which never expire.
+    /// If their clock is more than 10s off relative to our, we have a serious problem!
+    pub fn apply_event<'a>(
+        &'a mut self,
+        event: &'a DatafulEvent,
         uuid: Uuid,
         timestamp: Duration,
-    ) -> Result<log::EventSorter, log::Error> {
+    ) -> Result<log::EventApplier<'a>, log::Error> {
         self.event_log.insert(event, uuid, timestamp)?;
+        Ok(self.event_log.event_applier(event.resource(), uuid))
     }
 }
 impl Default for Manager {
@@ -392,33 +439,47 @@ mod tests {
     use super::*;
     #[test]
     fn send_diff() {
-        let mut manager = Manager::default();
+        let (message, sender_uuid): (Vec<u8>, Uuid) = {
+            let mut manager = Manager::default();
 
-        let event = ModifyEvent::new(
-            "test.txt".into(),
-            VecSection::new(0, 0, b"Some test data.".to_vec()),
-            None,
-        );
+            let event = ModifyEvent::new(
+                "test.txt".into(),
+                VecSection::new(0, 0, b"Some test data.".to_vec()),
+                None,
+            );
 
-        let sender_uuid = manager.uuid();
+            let message = manager.process_event(event.into());
 
-        let mut message = manager.process_event(event.clone().into());
+            (message.bin(), manager.uuid())
+        };
 
         // The message are sent to a different client.
+
+        let message: Message = message.as_slice().try_into().unwrap();
 
         assert_eq!(message.sender(), sender_uuid);
 
         let mut receiver = Manager::default();
 
         match message.inner() {
-            MessageKind::Event(ev) => {
-                let mut events = ev
-                    .event_iter()
-                    .map(|action| receiver.apply_event(action, message.uuid(), ev.timestamp))
-                    .flatten();
+            MessageKind::Event(ev_msg) => {
+                let mut events = ev_msg.event_iter();
 
-                assert_eq!(events.next(), Some(event));
+                assert_eq!(
+                    events.next(),
+                    Some(&Event::Modify(ModifyEvent::new(
+                        "test.txt".into(),
+                        VecSection::new(0, 0, b"Some test data.".to_vec()),
+                        None
+                    )))
+                );
                 assert_eq!(events.next(), None);
+
+                for event in ev_msg.event_iter() {
+                    let event_applier = receiver
+                        .apply_event(event, message.uuid(), ev_msg.timestamp)
+                        .expect("Got event from future.");
+                }
             }
             kind => {
                 panic!("Got {:?}, but expected a Event!", kind);
