@@ -12,7 +12,7 @@
 mod log;
 
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -114,7 +114,8 @@ impl Section {
 #[must_use]
 pub struct EventMessage {
     events: Vec<Event>,
-    timestamp: SystemTime,
+    /// Duration since UNIX_EPOCH
+    timestamp: Duration,
 }
 impl EventMessage {
     /// Creates a new event message with the timestamp [`SystemTime::now`] and `events`.
@@ -249,7 +250,11 @@ impl Message {
     /// You can also use [`bincode`] or any other [`serde`]-based library to serialize the message.
     pub fn bin(self) -> Vec<u8> {
         // this should be good; we only use objects from ::std and our own derived
-        bincode::encode_to_vec(self, bincode::config::Configuration::standard()).unwrap()
+        bincode::encode_to_vec(
+            bincode::serde::Compat(self),
+            bincode::config::Configuration::standard(),
+        )
+        .unwrap()
     }
 }
 
@@ -271,8 +276,16 @@ impl Manager {
     /// Creates a empty manager.
     ///
     /// Call [`Self::process_hello()`] to get a hello message.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(log_lifetime: Duration, message_log_limit: u32) -> Self {
+        let mut rng = rand::thread_rng();
+        let uuid = Uuid::with_rng(&mut rng);
+        Self {
+            rng,
+            uuid,
+            event_log: log::EventLog::new(log_lifetime),
+            message_uuid_log: log::MessageUuidLog::new(message_log_limit),
+            ..Default::default()
+        }
     }
     /// Gets the UUID of this client.
     pub fn uuid(&self) -> Uuid {
@@ -283,29 +296,18 @@ impl Manager {
     pub(crate) fn generate_uuid(&mut self) -> Uuid {
         Uuid::with_rng(&mut self.rng)
     }
-    /// Trims down the internal logs.
-    ///
-    /// This should mostly not be called. Only in high-volume steams of [`Messages`] might these
-    /// take up any noticeable difference.
-    pub fn clear_logs(&mut self) {
-        self.event_log.trim();
-        self.message_uuid_log.trim()
-    }
     /// Takes a [`EventMessage`] and returns a [`Message`].
     #[inline]
     pub fn process_event(&mut self, event: EventMessage) -> Message {
         Message::new(MessageKind::Event(event), self.uuid, self.generate_uuid())
     }
+    pub fn apply_event(&mut self, event: &Event, timestamp: Duration) -> Result<log::EventSorter, log::Error> {
+        self.event_log.insert(event, timestamp)?;
+    }
 }
 impl Default for Manager {
     fn default() -> Self {
-        let mut rng = rand::thread_rng();
-        let uuid = Uuid::with_rng(&mut rng);
-        Self {
-            rng,
-            uuid,
-            ..Default::default()
-        }
+        Self::new(Duration::new(64, 0), 200)
     }
 }
 
@@ -334,9 +336,10 @@ mod tests {
 
         match message.inner() {
             MessageKind::Event(ev) => {
+                let timestamp = ev.timestamp;
                 let mut events = ev
                     .event_iter()
-                    .map(|action| receiver.apply(action))
+                    .map(|action| receiver.apply_event(action, timestamp))
                     .flatten();
 
                 assert_eq!(events.next(), Some(event));
