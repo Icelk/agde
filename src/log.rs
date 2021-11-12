@@ -3,23 +3,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{Event, Section, Uuid};
+use crate::{EmptySection, Event, Section, Uuid};
 
-#[derive(Debug)]
-struct EmptySection {
-    start: usize,
-    end: usize,
-    data_len: usize,
-}
-impl From<&Section> for EmptySection {
-    fn from(section: &Section) -> Self {
-        Self {
-            start: section.start,
-            end: section.end,
-            data_len: section.data.len(),
-        }
-    }
-}
 #[derive(Debug)]
 pub(crate) struct SectionRef<'a> {
     start: usize,
@@ -36,8 +21,13 @@ impl<'a> SectionRef<'a> {
     }
 }
 
+enum EmptyEvent {
+    Modify(String),
+}
+
+#[derive(Debug)]
 struct ReceivedEvent {
-    section: EmptySection,
+    event: Event<EmptySection>,
     /// A [`Duration`] of time after UNIX_EPOCH.
     timestamp: Duration,
     uuid: Uuid,
@@ -51,13 +41,13 @@ pub enum Error {
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct EventLog {
-    list: VecDeque<ReceivedEvent>,
+    list: Vec<ReceivedEvent>,
     lifetime: Duration,
 }
 impl EventLog {
     pub(crate) fn new(lifetime: Duration) -> Self {
         Self {
-            list: VecDeque::new(),
+            list: Vec::new(),
             lifetime,
         }
     }
@@ -69,37 +59,54 @@ impl EventLog {
             .checked_sub(self.lifetime)
             .unwrap_or(Duration::ZERO);
 
+        let mut to_drop = 0;
+
         loop {
-            let last = self.list.back();
+            let last = self.list.get(to_drop);
             if let Some(last) = last {
                 if last.timestamp < limit {
-                    self.list.pop_back();
+                    to_drop += 1;
                     continue;
                 }
             }
             break;
         }
+
+        drop(self.list.drain(..to_drop));
     }
-    pub fn insert(&mut self, event: &Event,uuid: Uuid, timestamp: SystemTime) -> Result<(), Error> {
-        let now = SystemTime::now();
+    pub fn insert(
+        &mut self,
+        event: &Event<impl Section>,
+        uuid: Uuid,
+        timestamp: Duration,
+    ) -> Result<(), Error> {
+        use std::cmp::Ordering::*;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
         // The timestamp is after now!
         if (timestamp
             .checked_sub(Duration::new(10, 0))
             .unwrap_or(Duration::ZERO))
-        .duration_since(now)
-        .ok()
+        .checked_sub(now)
+        .is_some()
         {
-            return Err(Error::EventInFuture)
+            return Err(Error::EventInFuture);
         }
-        // `TODO` represent as a EmptyEvent.
-        // How to handle moves in [`EventSorter`] later?
-        let section = EmptySection {
-            start: event
-        }
+        let event = event.into();
         let received = ReceivedEvent {
+            event,
             timestamp,
             uuid,
-        }
+        };
+        self.list.push(received);
+        self.list
+            .sort_by(|a, b| match a.timestamp.cmp(&b.timestamp) {
+                Equal => a.uuid.cmp(&b.uuid),
+                ord => ord,
+            });
+        Ok(())
     }
 }
 

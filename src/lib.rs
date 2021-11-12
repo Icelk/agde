@@ -12,7 +12,7 @@
 mod log;
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,16 +26,97 @@ pub struct Capabilities {
     uuid: Uuid,
 }
 
+pub trait Section {
+    fn start(&self) -> usize;
+    fn end(&self) -> usize;
+    fn len(&self) -> usize;
+}
+pub trait DataSection: Section {
+    fn data(&self) -> &[u8];
+}
+
+#[derive(Debug)]
+pub(crate) struct EmptySection {
+    start: usize,
+    end: usize,
+    len: usize,
+}
+impl EmptySection {
+    pub(crate) fn new<S: Section>(section: S) -> Self {
+        Self {
+            start: section.start(),
+            end: section.end(),
+            len: section.len(),
+        }
+    }
+}
+impl Section for EmptySection {
+    fn start(&self) -> usize {
+        self.start
+    }
+    fn end(&self) -> usize {
+        self.end
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// A selection of data in a document.
+///
+/// Comparable to `slice` functions in various languages (e.g. [JS](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/splice)).
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct VecSection {
+    /// The start of the previous data in the resource.
+    start: usize,
+    /// The end of the previous data in the resource.
+    end: usize,
+    /// A reference to the data.
+    data: Vec<u8>,
+}
+impl VecSection {
+    /// Assembles a new selection using `start` as the start of the original data, `end` as the
+    /// terminator, and `data` to fill the space between `start` and `end`.
+    ///
+    /// If `data` is longer than `end-start`, the buffer is grown. If it's shorter, the buffer will
+    /// be truncated.
+    ///
+    /// # Panics
+    ///
+    /// `start` must be less than or equal to `end`.
+    pub fn new(start: usize, end: usize, data: Vec<u8>) -> Self {
+        assert!(start > end, "passed the start of data after the end of it");
+        Self { start, end, data }
+    }
+}
+impl Section for VecSection {
+    fn start(&self) -> usize {
+        self.start
+    }
+    fn end(&self) -> usize {
+        self.end
+    }
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+}
+impl DataSection for VecSection {
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
 /// A modification to a resource.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct ModifyEvent {
+pub struct ModifyEvent<S> {
     resource: String,
-    section: Section,
+    section: S,
 }
-impl ModifyEvent {
+impl<S: DataSection> ModifyEvent<S> {
     /// Calculates the diff if `source` is [`Some`].
-    pub fn new(resource: String, section: Section, source: Option<&[u8]>) -> Self {
+    pub fn new(resource: String, section: S, source: Option<&[u8]>) -> Self {
         if source.is_some() {
             unimplemented!("Implement diff");
         }
@@ -53,7 +134,7 @@ pub struct MoveEvent;
 
 macro_rules! into_event {
     ($type:ty, $enum_name:ident) => {
-        impl<'a> From<$type> for Event {
+        impl<'a, T> From<$type> for Event<T> {
             fn from(event: $type) -> Self {
                 Self::$enum_name(event)
             }
@@ -61,8 +142,8 @@ macro_rules! into_event {
     };
 }
 
-into_event!(ModifyEvent, Modify);
-impl<T: Into<Event>> From<T> for EventMessage {
+into_event!(ModifyEvent<T>, Modify);
+impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
     fn from(ev: T) -> Self {
         EventMessage::new(vec![ev.into()])
     }
@@ -71,69 +152,59 @@ impl<T: Into<Event>> From<T> for EventMessage {
 /// A change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub enum Event {
+pub enum Event<S> {
     /// Modification.
-    Modify(ModifyEvent),
+    Modify(ModifyEvent<S>),
     /// Deletion.
     Delete(DeleteEvent),
     /// Move.
     Move(MoveEvent),
 }
-
-/// A selection of data in a document.
-///
-/// Comparable to `slice` functions in various languages (e.g. [JS](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/splice)).
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-#[must_use]
-pub struct Section {
-    /// The start of the previous data in the resource.
-    start: usize,
-    /// The end of the previous data in the resource.
-    end: usize,
-    /// A reference to the data.
-    data: Vec<u8>,
-}
-impl Section {
-    /// Assembles a new selection using `start` as the start of the original data, `end` as the
-    /// terminator, and `data` to fill the space between `start` and `end`.
-    ///
-    /// If `data` is longer than `end-start`, the buffer is grown. If it's shorter, the buffer will
-    /// be truncated.
-    ///
-    /// # Panics
-    ///
-    /// `start` must be less than or equal to `end`.
-    pub fn new(start: usize, end: usize, data: Vec<u8>) -> Self {
-        assert!(start > end, "passed the start of data after the end of it");
-        Self { start, end, data }
+/// Clones the `resource` [`String`].
+impl<S: Section> From<&Event<S>> for Event<EmptySection> {
+    fn from(ev: &Event<S>) -> Self {
+        match ev {
+            Event::Modify(ev) => Event::Modify(ModifyEvent {
+                resource: ev.resource.clone(),
+                section: EmptySection::new(ev.section),
+            }),
+            Event::Move(ev) => Event::Move(ev.clone()),
+            Event::Delete(ev) => Event::Delete(ev.clone()),
+        }
     }
 }
+pub type DatafulEvent = Event<VecSection>;
 
 /// The data of [`MessageKind`] corresponding to a list of [`Event`]s.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct EventMessage {
-    events: Vec<Event>,
+    events: Vec<DatafulEvent>,
     /// Duration since UNIX_EPOCH
     timestamp: Duration,
 }
 impl EventMessage {
     /// Creates a new event message with the timestamp [`SystemTime::now`] and `events`.
-    pub fn new(events: Vec<Event>) -> Self {
+    pub fn new(events: Vec<DatafulEvent>) -> Self {
         Self::with_timestamp(events, SystemTime::now())
     }
     /// Assembles from `timestamp` and `events`.
-    pub fn with_timestamp(events: Vec<Event>, timestamp: SystemTime) -> Self {
-        Self { events, timestamp }
+    pub fn with_timestamp(events: Vec<DatafulEvent>, timestamp: SystemTime) -> Self {
+        Self {
+            events,
+            timestamp: timestamp
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO),
+        }
     }
     /// Gets an iterator of the internal events.
-    pub fn event_iter(&self) -> impl Iterator<Item = &Event> {
+    pub fn event_iter(&self) -> impl Iterator<Item = &DatafulEvent> {
         self.events.iter()
     }
 }
 
 /// A UUID.
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
 #[must_use]
 pub struct Uuid(u64);
 impl Uuid {
@@ -301,8 +372,13 @@ impl Manager {
     pub fn process_event(&mut self, event: EventMessage) -> Message {
         Message::new(MessageKind::Event(event), self.uuid, self.generate_uuid())
     }
-    pub fn apply_event(&mut self, event: &Event, timestamp: Duration) -> Result<log::EventSorter, log::Error> {
-        self.event_log.insert(event, timestamp)?;
+    pub fn apply_event(
+        &mut self,
+        event: &DatafulEvent,
+        uuid: Uuid,
+        timestamp: Duration,
+    ) -> Result<log::EventSorter, log::Error> {
+        self.event_log.insert(event, uuid, timestamp)?;
     }
 }
 impl Default for Manager {
@@ -320,7 +396,7 @@ mod tests {
 
         let event = ModifyEvent::new(
             "test.txt".into(),
-            Section::new(0, 0, b"Some test data.".to_vec()),
+            VecSection::new(0, 0, b"Some test data.".to_vec()),
             None,
         );
 
@@ -336,10 +412,9 @@ mod tests {
 
         match message.inner() {
             MessageKind::Event(ev) => {
-                let timestamp = ev.timestamp;
                 let mut events = ev
                     .event_iter()
-                    .map(|action| receiver.apply_event(action, timestamp))
+                    .map(|action| receiver.apply_event(action, message.uuid(), ev.timestamp))
                     .flatten();
 
                 assert_eq!(events.next(), Some(event));
