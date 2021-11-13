@@ -60,7 +60,7 @@ impl<'a> SliceBuf<'a> {
     pub fn advance(&mut self, n: usize) {
         self.set_filled(self.len + n);
     }
-    /// The filled region of the buffer.
+    /// Size of the filled region of the buffer.
     #[must_use]
     pub fn filled(&self) -> usize {
         self.len
@@ -112,7 +112,7 @@ pub trait DataSection: Section {
     /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
     fn apply(&self, resource: &mut SliceBuf) -> Result<usize, ApplyError> {
         let new_size = resource.filled() as isize + self.len_difference();
-        if new_size > resource.capacity() as isize {
+        if new_size > resource.capacity() as isize || self.end() > resource.capacity() {
             return Err(ApplyError::BufTooSmall);
         }
         // Copy the old data that's in the way of the new.
@@ -121,9 +121,10 @@ pub trait DataSection: Section {
             std::ptr::copy(
                 &resource.slice[self.start()],
                 &mut resource.slice[(self.start() as isize + self.len_difference()) as usize],
-                resource.filled() - self.start(),
+                resource.filled().saturating_sub(self.start()),
             )
         }
+
         // Copy data from `Section` to `resource`.
         // SAFETY: The write is guaranteed to have the space left, see `unsafe` block above.
         // They will never overlap, as the [`SliceBuf`] contains a mutable reference to the bytes,
@@ -172,15 +173,15 @@ impl EmptySection {
     ///
     /// Returns an error if the new data cannot fit in `resource`.
     pub(crate) fn revert(&self, resource: &mut SliceBuf) -> Result<VecSection, ApplyError> {
-        // if resource.filled() + self.len() <= resource.capacity() ||self.end() <= resource.filled() {
-        // return Err(ApplyError::BufTooSmall);
-        // }
         let new_size = resource.filled() as isize - self.len_difference();
-        if new_size > resource.capacity() as isize {
+        if new_size > resource.capacity() as isize  {
             return Err(ApplyError::BufTooSmall);
         }
 
-        let mut section = VecSection::new(self.start(), self.end(), Vec::with_capacity(self.len()));
+        let mut section = VecSection::new(self.start(), self.end(), vec![0; self.len()]);
+
+        // `TODO`: safety notes
+
         // Copy data from `resource` to `section`.
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -195,7 +196,7 @@ impl EmptySection {
             std::ptr::copy(
                 &resource.slice[(self.start() as isize + self.len_difference()) as usize],
                 &mut resource.slice[self.start()],
-                resource.filled() - self.start(),
+                resource.filled().saturating_sub(self.start()),
             )
         }
 
@@ -288,6 +289,7 @@ impl<S: DataSection> ModifyEvent<S> {
     /// Calculates the diff if `source` is [`Some`].
     pub fn new(resource: String, section: S, source: Option<&[u8]>) -> Self {
         if source.is_some() {
+            // `TODO`: implement diff
             unimplemented!("Implement diff");
         }
         Self { resource, section }
@@ -465,6 +467,7 @@ impl Default for Uuid {
 }
 
 /// The kinds of messages with their data. Part of a [`Message`].
+// `TODO`: implement the rest of these.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum MessageKind {
@@ -646,7 +649,7 @@ impl Manager {
 }
 impl Default for Manager {
     fn default() -> Self {
-        Self::new(Duration::new(64, 0), 200)
+        Self::new(Duration::new(60, 0), 200)
     }
 }
 
@@ -693,9 +696,6 @@ mod tests {
                 assert_eq!(events.next(), None);
 
                 for event in ev_msg.event_iter() {
-                    // We're assuming Event is a Modify.
-                    // Handle delete and move too.
-                    // On move, change all the cached events to use the new path.
                     let event_applier = receiver
                         .apply_event(event, ev_msg.timestamp)
                         .expect("Got event from future.");
@@ -723,6 +723,123 @@ mod tests {
                 panic!("Got {:?}, but expected a Event!", kind);
             }
         }
+    }
+
+    #[test]
+    fn rework_history() {
+        fn process_message(
+            manager: &mut Manager,
+            message: &Message,
+            resource: &mut Vec<u8>,
+            resource_len: &mut usize,
+            check_too_small: bool,
+        ) {
+            match message.inner() {
+                MessageKind::Event(ev_msg) => {
+                    for event in ev_msg.event_iter() {
+                        let event_applier = manager
+                            .apply_event(event, ev_msg.timestamp)
+                            .expect("Got event from future.");
+                        match event_applier.event().inner() {
+                            EventKind::Modify(ev) => {
+                                assert_eq!(ev.resource(), "private/secret.txt");
+
+                                let additional = std::cmp::max(
+                                    ev.section().len_difference() + 1,
+                                    ev.section.len() as isize,
+                                );
+                                // `as usize` should not normally be used!
+                                // `TODO`: implement a `section.additional()` method to get how
+                                // many bytes to extend the buffer with.
+                                resource.resize(resource.len() + additional as usize, 32);
+
+                                if check_too_small {
+                                    let mut buf = SliceBuf::new(resource);
+                                    buf.set_filled(*resource_len);
+
+                                    event_applier
+                                        .apply(&mut buf)
+                                        .expect_err("Buffer should be too small!");
+                                }
+
+                                // Redo with larger buffer.
+
+                                resource.resize(1024, 32);
+
+                                let mut buf = SliceBuf::new(resource);
+                                buf.set_filled(*resource_len);
+
+                                event_applier.apply(&mut buf).expect("Buffer too small!");
+
+                                *resource_len = buf.filled();
+                            }
+                            _ => panic!("Wrong EventKind"),
+                        }
+                    }
+                }
+                kind => {
+                    panic!("Got {:?}, but expected a Event!", kind);
+                }
+            }
+        }
+        let (first_message, second_message) = {
+            let mut sender = Manager::default();
+
+            let first_event = sender.ev_modify(ModifyEvent::new(
+                "private/secret.txt".into(),
+                VecSection::new(0, 0, "Hello world!".into()),
+                None,
+            ));
+            let second_event = sender.ev_modify(ModifyEvent::new(
+                "private/secret.txt".into(),
+                VecSection::new(6, 11, "friend".into()),
+                None,
+            ));
+            (
+                sender.process_event(EventMessage::with_timestamp(
+                    vec![first_event],
+                    SystemTime::now() - Duration::from_secs(10),
+                )),
+                sender.process_event(EventMessage::with_timestamp(
+                    vec![second_event],
+                    SystemTime::now(),
+                )),
+            )
+        };
+
+        let mut receiver = Manager::default();
+
+        let mut resource = Vec::new();
+        let mut resource_len = 0;
+
+        // Process second message first.
+        process_message(
+            &mut receiver,
+            &second_message,
+            &mut resource,
+            &mut resource_len,
+            true,
+        );
+
+        // We've inserted after the limit. Extend the len.
+        resource_len = 12;
+
+        assert_eq!(&resource[..resource_len], b"      friend");
+
+        resource_len = 1;
+
+        // Now, process first message.
+        process_message(
+            &mut receiver,
+            &first_message,
+            &mut resource,
+            &mut resource_len,
+            false,
+        );
+
+        assert_eq!(&resource[..resource_len], b"Hello friend!");
+        // blocking on `TODO` about ev.section().additional()
+        // assert_eq!(resource_len, resource.len());
     }
 
     // Test doing this ↑ but simplifying as it had previous data, stored how?

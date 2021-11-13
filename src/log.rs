@@ -162,6 +162,7 @@ impl EventLog {
                 // Because the new version of the file, without the move, is the same, but on a
                 // different path, ~~we can just move the current file to the new position?~~ No, but
                 // check the following
+                // `TODO`: implement
                 unimplemented!("See note above.");
             }
         }
@@ -196,8 +197,11 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     ///
     /// # Errors
     ///
+    /// Returns [`ApplyError::InvalidEvent`] if this isn't instantiated from
+    /// [`Manager::apply_event`] with a [`EventKind::Modify`]
+    ///
     /// Returns a [`ApplyError::BufTooSmall`] if the following predicate is not met.
-    /// `resource` must be at least `current_resource.len() + new_resource.section().len_difference()`
+    /// `resource` must be at least `resource.filled() + event.section().len_difference() + 1`
     pub fn apply(&self, resource: &mut SliceBuf) -> Result<(), ApplyError> {
         // Create a stack of the data of the reverted things.
         let mut reverted_stack = Vec::new();
@@ -256,6 +260,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     }
 }
 
+// `TODO`: implement
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct MessageUuidLog {
