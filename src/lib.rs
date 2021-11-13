@@ -671,6 +671,7 @@ mod tests {
 
         // The message are sent to a different client.
 
+        // receive message...
         let message: Message = message.as_slice().try_into().unwrap();
         assert_eq!(message.sender(), sender_uuid);
 
@@ -680,6 +681,7 @@ mod tests {
             MessageKind::Event(ev_msg) => {
                 let mut events = ev_msg.event_iter();
 
+                // assert the only event is to modify `test.txt` with the same section as before.
                 assert_eq!(
                     events.next().map(Event::inner),
                     Some(&EventKind::Modify(ModifyEvent::new(
@@ -713,7 +715,7 @@ mod tests {
                                 .apply(&mut resource)
                                 .expect("Buffer too small!");
                         }
-                        _ => panic!("Wrong ApplyAction"),
+                        _ => panic!("Wrong EventKind"),
                     }
                 }
             }
@@ -721,9 +723,6 @@ mod tests {
                 panic!("Got {:?}, but expected a Event!", kind);
             }
         }
-
-        // receive action...
-        // assert the only action is to modify `test.txt` with the same section as before.
     }
 
     // Test doing this ↑ but simplifying as it had previous data, stored how?

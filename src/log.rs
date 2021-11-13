@@ -144,7 +144,6 @@ impl EventLog {
                 EventApplier {
                     events: slice,
                     modern_resource_name: resource,
-                    // action: ApplyAction::Modify(ev.section().len_difference()),
                     event,
                 }
             }
@@ -153,7 +152,6 @@ impl EventLog {
                 EventApplier {
                     events: slice,
                     modern_resource_name: resource,
-                    // action: ApplyAction::Delete,
                     event,
                 }
             }
@@ -170,19 +168,6 @@ impl EventLog {
     }
 }
 
-// /// These correspond to [`EventKind`].
-// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// pub enum ApplyAction<'a> {
-// /// Call [`EventApplier::apply`].
-// ///
-// /// The [`isize`] is the [`Section::len_difference`].
-// Modify(isize),
-// /// Delete [`EventApplier::resource`] if it's [`Some`].
-// Delete,
-// /// Move [`EventApplier::resource`] (if it's [`Some`]) to the contained path.
-// Move(&'a str),
-// }
-
 // Instances must contain the target event.
 // Unwinding `events` may not return [`Event::Delete`] if `modern_resource_name` is [`Some`]
 #[derive(Debug)]
@@ -192,7 +177,6 @@ pub struct EventApplier<'a, S: DataSection> {
     /// May not contain `Self::event`.
     events: &'a [ReceivedEvent],
     modern_resource_name: Option<&'a str>,
-    // action: ApplyAction<'a>,
     /// Needed because the event might be sorted out of the list; slow push.
     event: &'a Event<S>,
 }
@@ -203,13 +187,10 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     pub fn resource(&self) -> Option<&str> {
         self.modern_resource_name
     }
-    // pub fn action(&self) -> ApplyAction {
-    // self.action
-    // }
     pub fn event(&self) -> &Event<S> {
         self.event
     }
-    /// Must only be called if [`Self::action`] is [`ApplyAction::Modify`] &
+    /// Must only be called if [`Self::event`] is [`EventKind::Modify`] &
     /// [`Self::resource`] returns [`Some`],
     /// as you know which resource to load.
     ///
