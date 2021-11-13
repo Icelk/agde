@@ -33,6 +33,8 @@ pub struct SliceBuf<'a> {
     len: usize,
 }
 impl<'a> SliceBuf<'a> {
+    /// Don't forget to [`Self::advance`] to set the filled region of `slice`.
+    /// If you forget to do this, new data will be overridden at the start.
     pub fn new(slice: &'a mut [u8]) -> Self {
         Self { slice, len: 0 }
     }
@@ -43,7 +45,12 @@ impl<'a> SliceBuf<'a> {
     /// Panics if `n > self.capacity()`.
     pub fn set_filled(&mut self, n: usize) {
         self.len = n;
-        assert!(self.len <= self.slice.len());
+        assert!(
+            self.len <= self.slice.len(),
+            "Tried to set filled to {} while length is {}",
+            n,
+            self.slice.len()
+        );
     }
     /// Advances the size of the filled region of the buffer.
     ///
@@ -68,6 +75,8 @@ impl<'a> SliceBuf<'a> {
 pub enum ApplyError {
     /// [`SliceBuf::capacity`] is too small.
     BufTooSmall,
+    /// The function called must not be called on the current event.
+    InvalidEvent,
 }
 
 /// [`Section::end`] must always be after [`Section::start`].
@@ -126,7 +135,7 @@ pub trait DataSection: Section {
                 self.len(),
             )
         }
-        resource.set_filled((resource.filled() as isize - self.len_difference()) as usize);
+        resource.set_filled((resource.filled() as isize + self.len_difference()) as usize);
         Ok(resource.filled())
     }
 }
@@ -156,9 +165,21 @@ impl EmptySection {
             len: section.len(),
         }
     }
-    pub(crate) fn revert(&self, resource: &mut SliceBuf) -> VecSection {
-        assert!(resource.filled() + self.len() <= resource.capacity());
-        assert!(self.end() <= resource.filled());
+    /// The reverse of [`DataSection::apply`].
+    /// Puts the data gathered from undoing the `apply` in a [`VecSection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the new data cannot fit in `resource`.
+    pub(crate) fn revert(&self, resource: &mut SliceBuf) -> Result<VecSection, ApplyError> {
+        // if resource.filled() + self.len() <= resource.capacity() ||self.end() <= resource.filled() {
+        // return Err(ApplyError::BufTooSmall);
+        // }
+        let new_size = resource.filled() as isize - self.len_difference();
+        if new_size > resource.capacity() as isize {
+            return Err(ApplyError::BufTooSmall);
+        }
+
         let mut section = VecSection::new(self.start(), self.end(), Vec::with_capacity(self.len()));
         // Copy data from `resource` to `section`.
         unsafe {
@@ -190,8 +211,8 @@ impl EmptySection {
             }
         }
 
-        resource.set_filled((resource.filled() as isize + self.len_difference()) as usize);
-        section
+        resource.set_filled((resource.filled() as isize - self.len_difference()) as usize);
+        Ok(section)
     }
 }
 impl Section for EmptySection {
@@ -272,11 +293,26 @@ impl<S: DataSection> ModifyEvent<S> {
         Self { resource, section }
     }
 }
+impl<S: Section> ModifyEvent<S> {
+    pub fn section(&self) -> &S {
+        &self.section
+    }
+}
+impl<S> ModifyEvent<S> {
+    pub fn resource(&self) -> &str {
+        &self.resource
+    }
+}
 /// A deletion of a resource.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct DeleteEvent {
     resource: String,
+}
+impl DeleteEvent {
+    pub fn resource(&self) -> &str {
+        &self.resource
+    }
 }
 /// A move of a resource. Changes the resource path.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -285,10 +321,18 @@ pub struct MoveEvent {
     resource: String,
     target: String,
 }
+impl MoveEvent {
+    pub fn source(&self) -> &str {
+        &self.resource
+    }
+    pub fn destination(&self) -> &str {
+        &self.target
+    }
+}
 
-macro_rules! into_event {
+macro_rules! event_kind_impl {
     ($type:ty, $enum_name:ident) => {
-        impl<'a, T> From<$type> for Event<T> {
+        impl<'a, T> From<$type> for EventKind<T> {
             fn from(event: $type) -> Self {
                 Self::$enum_name(event)
             }
@@ -296,19 +340,19 @@ macro_rules! into_event {
     };
 }
 
-into_event!(ModifyEvent<T>, Modify);
-into_event!(DeleteEvent, Delete);
-into_event!(MoveEvent, Move);
+event_kind_impl!(ModifyEvent<T>, Modify);
+event_kind_impl!(DeleteEvent, Delete);
+event_kind_impl!(MoveEvent, Move);
 impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
     fn from(ev: T) -> Self {
         EventMessage::new(vec![ev.into()])
     }
 }
 
-/// A change of data.
+/// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub enum Event<S> {
+pub enum EventKind<S> {
     /// Modification.
     Modify(ModifyEvent<S>),
     /// Deletion.
@@ -316,25 +360,50 @@ pub enum Event<S> {
     /// Move.
     Move(MoveEvent),
 }
+/// A change of data.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct Event<S> {
+    kind: EventKind<S>,
+    uuid: Uuid,
+}
 impl<S> Event<S> {
-    pub fn resource(&self) -> &str {
-        match self {
-            Self::Modify(ev) => &ev.resource,
-            Self::Delete(ev) => &ev.resource,
-            Self::Move(ev) => &ev.resource,
+    pub fn new(kind: EventKind<S>, manager: &mut Manager) -> Self {
+        Self {
+            kind,
+            uuid: manager.generate_uuid(),
         }
+    }
+    pub fn resource(&self) -> &str {
+        match &self.kind {
+            EventKind::Modify(ev) => ev.resource(),
+            EventKind::Delete(ev) => ev.resource(),
+            EventKind::Move(ev) => ev.source(),
+        }
+    }
+    pub fn inner(&self) -> &EventKind<S> {
+        &self.kind
+    }
+    /// Get this event's UUID.
+    /// This is separate from [`Message::uuid`]; a message can contain several events.
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
     }
 }
 /// Clones the `resource` [`String`].
 impl<S: Section> From<&Event<S>> for Event<EmptySection> {
     fn from(ev: &Event<S>) -> Self {
-        match ev {
-            Event::Modify(ev) => Event::Modify(ModifyEvent {
-                resource: ev.resource.clone(),
-                section: EmptySection::new(&ev.section),
+        let kind = match ev.inner() {
+            EventKind::Modify(ev) => EventKind::Modify(ModifyEvent {
+                resource: ev.resource().into(),
+                section: EmptySection::new(&ev.section()),
             }),
-            Event::Move(ev) => Event::Move(ev.clone()),
-            Event::Delete(ev) => Event::Delete(ev.clone()),
+            EventKind::Move(ev) => EventKind::Move(ev.clone()),
+            EventKind::Delete(ev) => EventKind::Delete(ev.clone()),
+        };
+        Event {
+            kind,
+            uuid: ev.uuid(),
         }
     }
 }
@@ -540,6 +609,21 @@ impl Manager {
     pub(crate) fn generate_uuid(&mut self) -> Uuid {
         Uuid::with_rng(&mut self.rng)
     }
+    /// Convenience method for creating a [`Event`] with a UUID from `ev`.
+    #[inline]
+    pub fn ev_modify<S: Section>(&mut self, ev: ModifyEvent<S>) -> Event<S> {
+        Event::new(ev.into(), self)
+    }
+    /// Convenience method for creating a [`Event`] with a UUID from `ev`.
+    #[inline]
+    pub fn ev_delete<S: Section>(&mut self, ev: DeleteEvent) -> Event<S> {
+        Event::new(ev.into(), self)
+    }
+    /// Convenience method for creating a [`Event`] with a UUID from `ev`.
+    #[inline]
+    pub fn ev_move<S: Section>(&mut self, ev: MoveEvent) -> Event<S> {
+        Event::new(ev.into(), self)
+    }
     /// Takes a [`EventMessage`] and returns a [`Message`].
     #[inline]
     pub fn process_event(&mut self, event: EventMessage) -> Message {
@@ -554,11 +638,10 @@ impl Manager {
     pub fn apply_event<'a>(
         &'a mut self,
         event: &'a DatafulEvent,
-        uuid: Uuid,
         timestamp: Duration,
-    ) -> Result<log::EventApplier<'a>, log::Error> {
-        self.event_log.insert(event, uuid, timestamp)?;
-        Ok(self.event_log.event_applier(event.resource(), uuid))
+    ) -> Result<log::EventApplier<'a, VecSection>, log::Error> {
+        self.event_log.insert(event, timestamp)?;
+        Ok(self.event_log.event_applier(event))
     }
 }
 impl Default for Manager {
@@ -575,11 +658,11 @@ mod tests {
         let (message, sender_uuid): (Vec<u8>, Uuid) = {
             let mut manager = Manager::default();
 
-            let event = ModifyEvent::new(
+            let event = manager.ev_modify(ModifyEvent::new(
                 "test.txt".into(),
                 VecSection::new(0, 0, b"Some test data.".to_vec()),
                 None,
-            );
+            ));
 
             let message = manager.process_event(event.into());
 
@@ -589,7 +672,6 @@ mod tests {
         // The message are sent to a different client.
 
         let message: Message = message.as_slice().try_into().unwrap();
-
         assert_eq!(message.sender(), sender_uuid);
 
         let mut receiver = Manager::default();
@@ -599,8 +681,8 @@ mod tests {
                 let mut events = ev_msg.event_iter();
 
                 assert_eq!(
-                    events.next(),
-                    Some(&Event::Modify(ModifyEvent::new(
+                    events.next().map(Event::inner),
+                    Some(&EventKind::Modify(ModifyEvent::new(
                         "test.txt".into(),
                         VecSection::new(0, 0, b"Some test data.".to_vec()),
                         None
@@ -609,10 +691,30 @@ mod tests {
                 assert_eq!(events.next(), None);
 
                 for event in ev_msg.event_iter() {
+                    // We're assuming Event is a Modify.
+                    // Handle delete and move too.
+                    // On move, change all the cached events to use the new path.
                     let event_applier = receiver
-                        .apply_event(event, message.uuid(), ev_msg.timestamp)
+                        .apply_event(event, ev_msg.timestamp)
                         .expect("Got event from future.");
-                    assert_eq!(event_applier.resource(), Some("test.txt"));
+                    match event_applier.event().inner() {
+                        EventKind::Modify(ev) => {
+                            assert_eq!(event_applier.resource(), Some("test.txt"));
+
+                            let mut test = Vec::new();
+                            let additional = ev.section().len_difference() + 1;
+                            // `as usize` should not normally be used!
+                            test.resize(additional as usize, 0);
+
+                            let mut resource = SliceBuf::new(&mut test);
+                            resource.advance(0);
+
+                            event_applier
+                                .apply(&mut resource)
+                                .expect("Buffer too small!");
+                        }
+                        _ => panic!("Wrong ApplyAction"),
+                    }
                 }
             }
             kind => {
