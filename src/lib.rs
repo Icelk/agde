@@ -316,6 +316,13 @@ pub struct DeleteEvent {
     successor: Option<String>,
 }
 impl DeleteEvent {
+    pub fn new(resource: String, successor: Option<String>) -> Self {
+        Self {
+            resource,
+            successor,
+        }
+    }
+
     pub fn resource(&self) -> &str {
         &self.resource
     }
@@ -332,6 +339,10 @@ pub struct CreateEvent {
     resource: String,
 }
 impl CreateEvent {
+    pub fn new(resource: String) -> Self {
+        Self { resource }
+    }
+
     pub fn resource(&self) -> &str {
         &self.resource
     }
@@ -579,20 +590,20 @@ impl Message {
         bincode::serde::decode_from_slice(slice, bincode::config::Configuration::standard())
     }
     /// Converts the message to a plain text compatible encoding, namely Base64.
+    ///
+    /// > This is a optimised version of converting [`Self::bin()`] to Base64.
+    /// > Since I'm using readers and writers, less allocations are needed.
     #[must_use]
     pub fn base64(self) -> String {
         struct Writer<W: std::io::Write>(W);
         impl<W: std::io::Write> bincode::enc::write::Writer for Writer<W> {
             fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
-                match self.0.write_all(bytes) {
-                    Err(err) => Err(bincode::error::EncodeError::Io {
+                self.0
+                    .write_all(bytes)
+                    .map_err(|err| bincode::error::EncodeError::Io {
                         error: err,
                         index: 0,
-                    }),
-                    Ok(()) => {
-                        Ok(())
-                    }
-                }
+                    })
             }
         }
         let heuristic_size = std::mem::size_of_val(&self);
@@ -613,15 +624,12 @@ impl Message {
         struct Reader<R: std::io::Read>(R);
         impl<R: std::io::Read> bincode::de::read::Reader for Reader<R> {
             fn read(&mut self, bytes: &mut [u8]) -> Result<(), bincode::error::DecodeError> {
-                match self.0.read_exact(bytes) {
-                    Err(err) => Err(bincode::error::DecodeError::OtherString(format!(
+                self.0.read_exact(bytes).map_err(|err| {
+                    bincode::error::DecodeError::OtherString(format!(
                         "base64 decoding failed: {:?}",
                         err
-                    ))),
-                    Ok(()) => {
-                        Ok(())
-                    }
-                }
+                    ))
+                })
             }
         }
         let mut cursor = std::io::Cursor::new(string);
