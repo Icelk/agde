@@ -10,7 +10,39 @@ use crate::{ApplyError, DataSection, EmptySection, Event, EventKind, Section, Sl
 struct ReceivedEvent {
     event: Event<EmptySection>,
     /// A [`Duration`] of time after UNIX_EPOCH.
+    /// [`EventMessage::timestamp`]
     timestamp: Duration,
+    /// Message UUID.
+    uuid: Uuid,
+    /// Order in [`EventMessage::events`]
+    ///
+    /// This will always be different if `timestamp` & `uuid` are the same.
+    /// This guarantees two [`ReceivedEvent`]s are never equal.
+    order: usize,
+}
+impl PartialEq for ReceivedEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.timestamp == other.timestamp && self.uuid == other.uuid && self.order == other.order
+    }
+}
+impl Eq for ReceivedEvent {}
+impl PartialOrd for ReceivedEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ReceivedEvent {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering::Equal;
+
+        match self.timestamp.cmp(&other.timestamp) {
+            Equal => match self.uuid.cmp(&other.uuid) {
+                Equal => self.order.cmp(&other.order),
+                ord => ord,
+            },
+            ord => ord,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -62,9 +94,9 @@ impl EventLog {
         &mut self,
         event: &Event<impl Section>,
         timestamp: Duration,
+        message_uuid: Uuid,
+        pos_in_event_message: usize,
     ) -> Result<(), Error> {
-        use std::cmp::Ordering::Equal;
-
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
@@ -78,13 +110,14 @@ impl EventLog {
             return Err(Error::EventInFuture);
         }
         let event = event.into();
-        let received = ReceivedEvent { event, timestamp };
+        let received = ReceivedEvent {
+            event,
+            timestamp,
+            uuid: message_uuid,
+            order: pos_in_event_message,
+        };
         self.list.push(received);
-        self.list
-            .sort_by(|a, b| match a.timestamp.cmp(&b.timestamp) {
-                Equal => a.event.uuid().cmp(&b.event.uuid()),
-                ord => ord,
-            });
+        self.list.sort();
         self.trim();
         Ok(())
     }
@@ -94,11 +127,19 @@ impl EventLog {
     pub(crate) fn event_applier<'a, S: DataSection>(
         &'a mut self,
         event: &'a Event<S>,
+        message_uuid: Uuid,
+        pos_in_event_message: usize,
     ) -> EventApplier<'a, S> {
-        fn slice<'a>(log: &'a EventLog, resource: &str, uuid: Uuid) -> &'a [ReceivedEvent] {
+        fn slice<'a>(
+            log: &'a EventLog,
+            resource: &str,
+            uuid: Uuid,
+            order: usize,
+        ) -> &'a [ReceivedEvent] {
             // `pos` is from the end of the list.
             for (pos, event) in log.list.iter().enumerate().rev() {
-                if event.event.uuid() == uuid && event.event.resource() == resource {
+                if event.uuid == uuid && event.order == order && event.event.resource() == resource
+                {
                     // Match!
                     // Also takes the current event in the slice.
                     // ↑ is however not true for the backup return below.
@@ -117,6 +158,7 @@ impl EventLog {
                 if log_event.event.resource() == resource {
                     match &log_event.event.inner() {
                         EventKind::Delete(_) => return None,
+                        EventKind::Create(_) => return None,
                         EventKind::Move(ev) => {
                             debug_assert_eq!(
                                 ev.source(),
@@ -135,19 +177,11 @@ impl EventLog {
             Some(resource)
         }
 
-        let slice = slice(self, event.resource(), event.uuid());
+        let slice = slice(self, event.resource(), message_uuid, pos_in_event_message);
         let resource = name(slice, event.resource());
 
         match event.inner() {
-            EventKind::Modify(_ev) => {
-                // Upholds the contracts described in the comment before [`EventApplier`].
-                EventApplier {
-                    events: slice,
-                    modern_resource_name: resource,
-                    event,
-                }
-            }
-            EventKind::Delete(_) => {
+            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Delete(_) => {
                 // Upholds the contracts described in the comment before [`EventApplier`].
                 EventApplier {
                     events: slice,
@@ -162,6 +196,16 @@ impl EventLog {
                 // Because the new version of the file, without the move, is the same, but on a
                 // different path, ~~we can just move the current file to the new position?~~ No, but
                 // check the following
+                //
+                // Either, we simply write to the new file with all the data before the `Create` if
+                // there's a create in the chain up.
+                // Else, the file has not got a new version; move the result.
+                //
+                // The first above will take a resource, wind it back, clone it's contents, then
+                // apply the stack.
+                // The second will simply output the new path.
+                // Give back an enum with either data & name | name.
+                //
                 // `TODO`: implement
                 unimplemented!("See note above.");
             }
@@ -188,6 +232,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     pub fn resource(&self) -> Option<&str> {
         self.modern_resource_name
     }
+    // `TODO`: Don't return an error when the wrong method is called.
     pub fn event(&self) -> &Event<S> {
         self.event
     }
@@ -233,8 +278,8 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
                     let section = ev.section().revert(resource)?;
                     reverted_stack.push(section);
                 }
-                EventKind::Delete(_) => unreachable!(
-                    "Unexpected delete event in unwinding of event log.\
+                EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
+                    "Unexpected delete or create event in unwinding of event log.\
                     Please report this bug."
                 ),
                 EventKind::Move(ev) => {

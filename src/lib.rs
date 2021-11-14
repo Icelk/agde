@@ -174,7 +174,7 @@ impl EmptySection {
     /// Returns an error if the new data cannot fit in `resource`.
     pub(crate) fn revert(&self, resource: &mut SliceBuf) -> Result<VecSection, ApplyError> {
         let new_size = resource.filled() as isize - self.len_difference();
-        if new_size > resource.capacity() as isize  {
+        if new_size > resource.capacity() as isize {
             return Err(ApplyError::BufTooSmall);
         }
 
@@ -279,6 +279,8 @@ impl DataSection for VecSection {
 }
 
 /// A modification to a resource.
+///
+/// The resource must be initialised using [`CreateEvent`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct ModifyEvent<S> {
@@ -306,6 +308,8 @@ impl<S> ModifyEvent<S> {
     }
 }
 /// A deletion of a resource.
+///
+/// The resource must be initialised using [`CreateEvent`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct DeleteEvent {
@@ -316,7 +320,23 @@ impl DeleteEvent {
         &self.resource
     }
 }
+/// The creation of a resource.
+///
+/// Creates an empty file. Overrides the file if it already exists.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[must_use]
+pub struct CreateEvent {
+    resource: String,
+}
+impl CreateEvent {
+    pub fn resource(&self) -> &str {
+        &self.resource
+    }
+}
 /// A move of a resource. Changes the resource path.
+///
+/// The resource must be initialised using [`CreateEvent`].
+/// Writing to the origin should be handled as [`CreateEvent`] does.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct MoveEvent {
@@ -339,10 +359,16 @@ macro_rules! event_kind_impl {
                 Self::$enum_name(event)
             }
         }
+        impl<'a, T> From<$type> for Event<T> {
+            fn from(event: $type) -> Self {
+                Self::new(event.into())
+            }
+        }
     };
 }
 
 event_kind_impl!(ModifyEvent<T>, Modify);
+event_kind_impl!(CreateEvent, Create);
 event_kind_impl!(DeleteEvent, Delete);
 event_kind_impl!(MoveEvent, Move);
 impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
@@ -356,10 +382,18 @@ impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
 #[must_use]
 pub enum EventKind<S> {
     /// Modification.
+    ///
+    /// If the [`ModifyEvent::section()`] start **and** end is `0`, this is considered a file
+    /// creation. See [`Self::Move`] on how this affects the move operation.
     Modify(ModifyEvent<S>),
+    Create(CreateEvent),
     /// Deletion.
     Delete(DeleteEvent),
     /// Move.
+    ///
+    /// Traverses the log forwards in time. Any further modification to the [`MoveEvent::origin`]
+    /// is changed to affect [`MoveEvent::destination`], unless the [`EventKind::Modify`] is
+    /// considered a creation. Then, all
     Move(MoveEvent),
 }
 /// A change of data.
@@ -367,29 +401,21 @@ pub enum EventKind<S> {
 #[must_use]
 pub struct Event<S> {
     kind: EventKind<S>,
-    uuid: Uuid,
 }
 impl<S> Event<S> {
-    pub fn new(kind: EventKind<S>, manager: &mut Manager) -> Self {
-        Self {
-            kind,
-            uuid: manager.generate_uuid(),
-        }
+    pub fn new(kind: EventKind<S>) -> Self {
+        Self { kind }
     }
     pub fn resource(&self) -> &str {
         match &self.kind {
             EventKind::Modify(ev) => ev.resource(),
+            EventKind::Create(ev) => ev.resource(),
             EventKind::Delete(ev) => ev.resource(),
             EventKind::Move(ev) => ev.source(),
         }
     }
     pub fn inner(&self) -> &EventKind<S> {
         &self.kind
-    }
-    /// Get this event's UUID.
-    /// This is separate from [`Message::uuid`]; a message can contain several events.
-    pub fn uuid(&self) -> Uuid {
-        self.uuid
     }
 }
 /// Clones the `resource` [`String`].
@@ -400,13 +426,11 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
                 resource: ev.resource().into(),
                 section: EmptySection::new(&ev.section()),
             }),
+            EventKind::Create(ev) => EventKind::Create(ev.clone()),
             EventKind::Move(ev) => EventKind::Move(ev.clone()),
             EventKind::Delete(ev) => EventKind::Delete(ev.clone()),
         };
-        Event {
-            kind,
-            uuid: ev.uuid(),
-        }
+        Event { kind }
     }
 }
 pub type DatafulEvent = Event<VecSection>;
@@ -565,11 +589,66 @@ impl Message {
         )
         .unwrap()
     }
-}
-impl TryFrom<&[u8]> for Message {
-    type Error = bincode::error::DecodeError;
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        bincode::serde::decode_from_slice(value, bincode::config::Configuration::standard())
+    pub fn from_bin(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::serde::decode_from_slice(slice, bincode::config::Configuration::standard())
+    }
+    /// Converts the message to a plain text compatible encoding, namely Base64.
+    #[must_use]
+    pub fn base64(self) -> String {
+        struct Writer<W: std::io::Write>(W);
+        impl<W: std::io::Write> bincode::enc::write::Writer for Writer<W> {
+            fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
+                match self.0.write(bytes) {
+                    Err(err) => Err(bincode::error::EncodeError::Io {
+                        error: err,
+                        index: 0,
+                    }),
+                    Ok(written) => {
+                        debug_assert_eq!(written, bytes.len());
+                        Ok(())
+                    }
+                }
+            }
+        }
+        let heuristic_size = std::mem::size_of_val(&self);
+        let mut string = String::with_capacity(heuristic_size);
+        let writer = Writer(base64::write::EncoderStringWriter::from(
+            &mut string,
+            base64::STANDARD,
+        ));
+        bincode::encode_into_writer(
+            bincode::serde::Compat(self),
+            writer,
+            bincode::config::Configuration::standard(),
+        )
+        .unwrap();
+        string
+    }
+    pub fn from_base64(string: &str) -> Result<Self, bincode::error::DecodeError> {
+        struct Reader<R: std::io::Read>(R);
+        impl<R: std::io::Read> bincode::de::read::Reader for Reader<R> {
+            fn read(&mut self, bytes: &mut [u8]) -> Result<(), bincode::error::DecodeError> {
+                match self.0.read(bytes) {
+                    Err(err) => Err(bincode::error::DecodeError::OtherString(format!(
+                        "base64 decoding failed: {:?}",
+                        err
+                    ))),
+                    Ok(written) => {
+                        debug_assert_eq!(written, bytes.len());
+                        Ok(())
+                    }
+                }
+            }
+        }
+        let mut cursor = std::io::Cursor::new(string);
+
+        let reader = Reader(base64::read::DecoderReader::new(
+            &mut cursor,
+            base64::STANDARD,
+        ));
+        let decoded: Result<bincode::serde::Compat<Message>, bincode::error::DecodeError> =
+            bincode::decode_from_reader(reader, bincode::config::Configuration::standard());
+        decoded.map(|compat| compat.0)
     }
 }
 
@@ -612,39 +691,35 @@ impl Manager {
     pub(crate) fn generate_uuid(&mut self) -> Uuid {
         Uuid::with_rng(&mut self.rng)
     }
-    /// Convenience method for creating a [`Event`] with a UUID from `ev`.
-    #[inline]
-    pub fn ev_modify<S: Section>(&mut self, ev: ModifyEvent<S>) -> Event<S> {
-        Event::new(ev.into(), self)
-    }
-    /// Convenience method for creating a [`Event`] with a UUID from `ev`.
-    #[inline]
-    pub fn ev_delete<S: Section>(&mut self, ev: DeleteEvent) -> Event<S> {
-        Event::new(ev.into(), self)
-    }
-    /// Convenience method for creating a [`Event`] with a UUID from `ev`.
-    #[inline]
-    pub fn ev_move<S: Section>(&mut self, ev: MoveEvent) -> Event<S> {
-        Event::new(ev.into(), self)
-    }
     /// Takes a [`EventMessage`] and returns a [`Message`].
+    ///
+    /// Be careful to have a [`EventKind::Create`] before the resource receives a [`EventKind::Modify`].
     #[inline]
     pub fn process_event(&mut self, event: EventMessage) -> Message {
         Message::new(MessageKind::Event(event), self.uuid, self.generate_uuid())
     }
+    /// `pos_in_event_message` MUST be the true value. Else, the ordering will fail
+    ///
     /// # Errors
     ///
     /// Fails if the `event` is more than 10s from the future.
     ///
     /// This prevents other clients from hogging our memory with items which never expire.
     /// If their clock is more than 10s off relative to our, we have a serious problem!
+    // `TODO`: Make this not take `pos_in_event_message` as that's annoying and a source of
+    // troubles for the implementers.
     pub fn apply_event<'a>(
         &'a mut self,
         event: &'a DatafulEvent,
         timestamp: Duration,
+        message_uuid: Uuid,
+        pos_in_event_message: usize,
     ) -> Result<log::EventApplier<'a, VecSection>, log::Error> {
-        self.event_log.insert(event, timestamp)?;
-        Ok(self.event_log.event_applier(event))
+        self.event_log
+            .insert(event, timestamp, message_uuid, pos_in_event_message)?;
+        Ok(self
+            .event_log
+            .event_applier(event, message_uuid, pos_in_event_message))
     }
 }
 impl Default for Manager {
@@ -658,24 +733,27 @@ mod tests {
     use super::*;
     #[test]
     fn send_diff() {
-        let (message, sender_uuid): (Vec<u8>, Uuid) = {
+        let (message_bin, message_base64, sender_uuid): (Vec<u8>, String, Uuid) = {
             let mut manager = Manager::default();
 
-            let event = manager.ev_modify(ModifyEvent::new(
+            let event: Event<_> = ModifyEvent::new(
                 "test.txt".into(),
                 VecSection::new(0, 0, b"Some test data.".to_vec()),
                 None,
-            ));
+            )
+            .into();
 
             let message = manager.process_event(event.into());
 
-            (message.bin(), manager.uuid())
+            (message.clone().bin(), message.base64(), manager.uuid())
         };
 
         // The message are sent to a different client.
 
         // receive message...
-        let message: Message = message.as_slice().try_into().unwrap();
+        let message = Message::from_bin(&message_bin).unwrap();
+        let message_base64 = Message::from_base64(&message_base64).unwrap();
+        assert_eq!(message, message_base64);
         assert_eq!(message.sender(), sender_uuid);
 
         let mut receiver = Manager::default();
@@ -695,9 +773,9 @@ mod tests {
                 );
                 assert_eq!(events.next(), None);
 
-                for event in ev_msg.event_iter() {
+                for (pos, event) in ev_msg.event_iter().enumerate() {
                     let event_applier = receiver
-                        .apply_event(event, ev_msg.timestamp)
+                        .apply_event(event, ev_msg.timestamp, message.uuid(), pos)
                         .expect("Got event from future.");
                     match event_applier.event().inner() {
                         EventKind::Modify(ev) => {
@@ -736,9 +814,9 @@ mod tests {
         ) {
             match message.inner() {
                 MessageKind::Event(ev_msg) => {
-                    for event in ev_msg.event_iter() {
+                    for (pos, event) in ev_msg.event_iter().enumerate() {
                         let event_applier = manager
-                            .apply_event(event, ev_msg.timestamp)
+                            .apply_event(event, ev_msg.timestamp, message.uuid(), pos)
                             .expect("Got event from future.");
                         match event_applier.event().inner() {
                             EventKind::Modify(ev) => {
@@ -785,16 +863,18 @@ mod tests {
         let (first_message, second_message) = {
             let mut sender = Manager::default();
 
-            let first_event = sender.ev_modify(ModifyEvent::new(
+            let first_event = ModifyEvent::new(
                 "private/secret.txt".into(),
                 VecSection::new(0, 0, "Hello world!".into()),
                 None,
-            ));
-            let second_event = sender.ev_modify(ModifyEvent::new(
+            )
+            .into();
+            let second_event = ModifyEvent::new(
                 "private/secret.txt".into(),
                 VecSection::new(6, 11, "friend".into()),
                 None,
-            ));
+            )
+            .into();
             (
                 sender.process_event(EventMessage::with_timestamp(
                     vec![first_event],
