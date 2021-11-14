@@ -599,13 +599,12 @@ impl Message {
         struct Writer<W: std::io::Write>(W);
         impl<W: std::io::Write> bincode::enc::write::Writer for Writer<W> {
             fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
-                match self.0.write(bytes) {
+                match self.0.write_all(bytes) {
                     Err(err) => Err(bincode::error::EncodeError::Io {
                         error: err,
                         index: 0,
                     }),
-                    Ok(written) => {
-                        debug_assert_eq!(written, bytes.len());
+                    Ok(()) => {
                         Ok(())
                     }
                 }
@@ -629,13 +628,12 @@ impl Message {
         struct Reader<R: std::io::Read>(R);
         impl<R: std::io::Read> bincode::de::read::Reader for Reader<R> {
             fn read(&mut self, bytes: &mut [u8]) -> Result<(), bincode::error::DecodeError> {
-                match self.0.read(bytes) {
+                match self.0.read_exact(bytes) {
                     Err(err) => Err(bincode::error::DecodeError::OtherString(format!(
                         "base64 decoding failed: {:?}",
                         err
                     ))),
-                    Ok(written) => {
-                        debug_assert_eq!(written, bytes.len());
+                    Ok(()) => {
                         Ok(())
                     }
                 }
