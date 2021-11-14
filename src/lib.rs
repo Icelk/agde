@@ -6,8 +6,6 @@
     missing_debug_implementations,
     // missing_docs
 )]
-// `TODO`: remove
-#![allow(clippy::missing_panics_doc)]
 
 mod log;
 
@@ -449,6 +447,9 @@ impl EventMessage {
         Self::with_timestamp(events, SystemTime::now())
     }
     /// Assembles from `timestamp` and `events`.
+    ///
+    /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
+    /// else the sync will risk wrong results, forcing [`Message::HashCheck`].
     pub fn with_timestamp(events: Vec<DatafulEvent>, timestamp: SystemTime) -> Self {
         Self {
             events,

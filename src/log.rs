@@ -157,8 +157,7 @@ impl EventLog {
             for log_event in events.iter().rev() {
                 if log_event.event.resource() == resource {
                     match &log_event.event.inner() {
-                        EventKind::Delete(_) => return None,
-                        EventKind::Create(_) => return None,
+                        EventKind::Delete(_) | EventKind::Create(_) => return None,
                         EventKind::Move(ev) => {
                             debug_assert_eq!(
                                 ev.source(),
@@ -170,6 +169,12 @@ impl EventLog {
                         }
                         // Do nothing; the file is just modified.
                         EventKind::Modify(_) => {}
+                    }
+                }
+                // If a move has it's destination as us, we're dead.
+                if let EventKind::Move(ev) = log_event.event.inner() {
+                    if ev.destination() == resource {
+                        return None;
                     }
                 }
             }
@@ -189,7 +194,7 @@ impl EventLog {
                     event,
                 }
             }
-            EventKind::Move(_) => {
+            EventKind::Move(ev) => {
                 // Change history of the `resource` in the name loop,
                 // change resource to `new_resource`
                 //
@@ -197,14 +202,45 @@ impl EventLog {
                 // different path, ~~we can just move the current file to the new position?~~ No, but
                 // check the following
                 //
-                // Either, we simply write to the new file with all the data before the `Create` if
-                // there's a create in the chain up.
-                // Else, the file has not got a new version; move the result.
+                // Either, if (there's a create (can be create|delete|move->destination) in the chain up)
+                #[allow(clippy::if_same_then_else)]
+                if let Some(modern_resource_name) = resource {
+                    // Else, the file has not got a new version; move the result. Also remove new
+                    // events in destination used in the old file.
+
+                    // Move `resource` to `destination`. Change events same as below.
+                    //
+                    // OUTPUT: Simply move resource.
+                } else {
+                    // we simply write to the new file with all the data 1. (before the `Create`
+                    // ) and 2. (remove any modifications to the destination resource; their target was
+                    // an older version)
+
+                    // Change `resource` of all events regarding `resource` to `destination` up
+                    // till bad event.
+
+                    let modern_destination_name = name(slice, ev.destination());
+                    if let Some(modern_destination_name) = modern_destination_name {
+                        // The target exists. To override, set resource to ... We'd have to get
+                        // data from before the resource was deleted. That isn't possible; it's
+                        // deleted. The "what's removed" isn't logged, so the data is lost.
+                        // Therefore, moving isn't viable.
+                        //
+                        // OUTPUT: This event stack and a method to compute current version.
+                    } else {
+                        // The target file has been deleted.
+                        //
+                        // OUTPUT: Do noting
+                    }
+                }
                 //
-                // The first above will take a resource, wind it back, clone it's contents, then
+                // ~~The first above will take a resource, wind it back, clone it's contents, then
                 // apply the stack.
                 // The second will simply output the new path.
-                // Give back an enum with either data & name | name.
+                // Give back an enum with either data & name | name.~~
+                //
+                // If we get a [`MoveEvent::destination`] to the current resource, handle as
+                // created.
                 //
                 // `TODO`: implement
                 unimplemented!("See note above.");
@@ -239,6 +275,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// Must only be called if [`Self::event`] is [`EventKind::Modify`] &
     /// [`Self::resource`] returns [`Some`],
     /// as you know which resource to load.
+    /// If the target resource doesn't exist, don't call this.
     ///
     /// # Errors
     ///
