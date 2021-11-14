@@ -312,10 +312,15 @@ impl<S> ModifyEvent<S> {
 #[must_use]
 pub struct DeleteEvent {
     resource: String,
+    /// An optional successor to the [`Self::resource()`]
+    successor: Option<String>,
 }
 impl DeleteEvent {
     pub fn resource(&self) -> &str {
         &self.resource
+    }
+    pub fn successor(&self) -> Option<&str> {
+        self.successor.as_deref()
     }
 }
 /// The creation of a resource.
@@ -329,24 +334,6 @@ pub struct CreateEvent {
 impl CreateEvent {
     pub fn resource(&self) -> &str {
         &self.resource
-    }
-}
-/// A move of a resource. Changes the resource path.
-///
-/// The resource must be initialised using [`CreateEvent`].
-/// Writing to the origin should be handled as [`CreateEvent`] does.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-#[must_use]
-pub struct MoveEvent {
-    resource: String,
-    target: String,
-}
-impl MoveEvent {
-    pub fn source(&self) -> &str {
-        &self.resource
-    }
-    pub fn destination(&self) -> &str {
-        &self.target
     }
 }
 
@@ -368,7 +355,6 @@ macro_rules! event_kind_impl {
 event_kind_impl!(ModifyEvent<T>, Modify);
 event_kind_impl!(CreateEvent, Create);
 event_kind_impl!(DeleteEvent, Delete);
-event_kind_impl!(MoveEvent, Move);
 impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
     fn from(ev: T) -> Self {
         EventMessage::new(vec![ev.into()])
@@ -386,13 +372,11 @@ pub enum EventKind<S> {
     Modify(ModifyEvent<S>),
     Create(CreateEvent),
     /// Deletion.
-    Delete(DeleteEvent),
-    /// Move.
     ///
-    /// Traverses the log forwards in time. Any further modification to the [`MoveEvent::origin`]
-    /// is changed to affect [`MoveEvent::destination`], unless the [`EventKind::Modify`] is
-    /// considered a creation. Then, all
-    Move(MoveEvent),
+    /// Can contain a [`DeleteEvent::successor`] to hint on where the file has been moved to. This
+    /// enables subsequent [`Event`]s to be redirected to the successor.
+    /// The redirections will stop when a new [`Self::Create`] event is triggered.
+    Delete(DeleteEvent),
 }
 /// A change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -409,11 +393,13 @@ impl<S> Event<S> {
             EventKind::Modify(ev) => ev.resource(),
             EventKind::Create(ev) => ev.resource(),
             EventKind::Delete(ev) => ev.resource(),
-            EventKind::Move(ev) => ev.source(),
         }
     }
     pub fn inner(&self) -> &EventKind<S> {
         &self.kind
+    }
+    pub(crate) fn inner_mut(&mut self) -> &mut EventKind<S> {
+        &mut self.kind
     }
 }
 /// Clones the `resource` [`String`].
@@ -425,7 +411,6 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
                 section: EmptySection::new(&ev.section()),
             }),
             EventKind::Create(ev) => EventKind::Create(ev.clone()),
-            EventKind::Move(ev) => EventKind::Move(ev.clone()),
             EventKind::Delete(ev) => EventKind::Delete(ev.clone()),
         };
         Event { kind }

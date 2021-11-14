@@ -130,12 +130,7 @@ impl EventLog {
         message_uuid: Uuid,
         pos_in_event_message: usize,
     ) -> EventApplier<'a, S> {
-        fn slice<'a>(
-            log: &'a EventLog,
-            resource: &str,
-            uuid: Uuid,
-            order: usize,
-        ) -> &'a [ReceivedEvent] {
+        fn slice_start(log: &EventLog, resource: &str, uuid: Uuid, order: usize) -> usize {
             // `pos` is from the end of the list.
             for (pos, event) in log.list.iter().enumerate().rev() {
                 if event.uuid == uuid && event.order == order && event.event.resource() == resource
@@ -143,38 +138,20 @@ impl EventLog {
                     // Match!
                     // Also takes the current event in the slice.
                     // ↑ is however not true for the backup return below.
-                    let slice = &log.list[pos..];
-                    return slice;
+                    return pos;
                 }
             }
             // Event is not in list.
             // This is a slow push.
-            &log.list
+            0
         }
         fn name<'a>(events: &'a [ReceivedEvent], resource: &'a str) -> Option<&'a str> {
-            let mut resource = resource;
-
-            for log_event in events.iter().rev() {
+            for log_event in events.iter() {
                 if log_event.event.resource() == resource {
                     match &log_event.event.inner() {
                         EventKind::Delete(_) | EventKind::Create(_) => return None,
-                        EventKind::Move(ev) => {
-                            debug_assert_eq!(
-                                ev.source(),
-                                resource,
-                                "The previous resource should be the same as in the move event.\
-                                This is guaranteed by [`Manager::apply_event`]"
-                            );
-                            resource = &ev.target;
-                        }
                         // Do nothing; the file is just modified.
                         EventKind::Modify(_) => {}
-                    }
-                }
-                // If a move has it's destination as us, we're dead.
-                if let EventKind::Move(ev) = log_event.event.inner() {
-                    if ev.destination() == resource {
-                        return None;
                     }
                 }
             }
@@ -182,69 +159,41 @@ impl EventLog {
             Some(resource)
         }
 
-        let slice = slice(self, event.resource(), message_uuid, pos_in_event_message);
-        let resource = name(slice, event.resource());
+        let slice_index = slice_start(self, event.resource(), message_uuid, pos_in_event_message);
 
-        match event.inner() {
-            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Delete(_) => {
-                // Upholds the contracts described in the comment before [`EventApplier`].
-                EventApplier {
-                    events: slice,
-                    modern_resource_name: resource,
-                    event,
-                }
-            }
-            EventKind::Move(ev) => {
-                // Change history of the `resource` in the name loop,
-                // change resource to `new_resource`
-                //
-                // Because the new version of the file, without the move, is the same, but on a
-                // different path, ~~we can just move the current file to the new position?~~ No, but
-                // check the following
-                //
-                // Either, if (there's a create (can be create|delete|move->destination) in the chain up)
-                #[allow(clippy::if_same_then_else)]
-                if let Some(modern_resource_name) = resource {
-                    // Else, the file has not got a new version; move the result. Also remove new
-                    // events in destination used in the old file.
+        if let EventKind::Delete(delete_ev) = event.inner() {
+            if let Some(successor) = delete_ev.successor() {
+                for received in &mut self.list[slice_index..] {
+                    if received.uuid == message_uuid && received.order == pos_in_event_message {
+                        continue;
+                    }
 
-                    // Move `resource` to `destination`. Change events same as below.
-                    //
-                    // OUTPUT: Simply move resource.
-                } else {
-                    // we simply write to the new file with all the data 1. (before the `Create`
-                    // ) and 2. (remove any modifications to the destination resource; their target was
-                    // an older version)
-
-                    // Change `resource` of all events regarding `resource` to `destination` up
-                    // till bad event.
-
-                    let modern_destination_name = name(slice, ev.destination());
-                    if let Some(modern_destination_name) = modern_destination_name {
-                        // The target exists. To override, set resource to ... We'd have to get
-                        // data from before the resource was deleted. That isn't possible; it's
-                        // deleted. The "what's removed" isn't logged, so the data is lost.
-                        // Therefore, moving isn't viable.
-                        //
-                        // OUTPUT: This event stack and a method to compute current version.
-                    } else {
-                        // The target file has been deleted.
-                        //
-                        // OUTPUT: Do noting
+                    if received.event.resource() == event.resource() {
+                        match received.event.inner_mut() {
+                            EventKind::Delete(ev) => {
+                                if Some(successor) == ev.successor() {
+                                    ev.resource = ev.successor.take().unwrap();
+                                } else {
+                                    ev.resource = successor.into();
+                                }
+                            }
+                            EventKind::Modify(ev) => {
+                                ev.resource = successor.into();
+                            }
+                            EventKind::Create(_) => break,
+                        }
                     }
                 }
-                //
-                // ~~The first above will take a resource, wind it back, clone it's contents, then
-                // apply the stack.
-                // The second will simply output the new path.
-                // Give back an enum with either data & name | name.~~
-                //
-                // If we get a [`MoveEvent::destination`] to the current resource, handle as
-                // created.
-                //
-                // `TODO`: implement
-                unimplemented!("See note above.");
             }
+        }
+
+        let slice = &self.list[slice_index..];
+        let resource = name(slice, event.resource());
+        // Upholds the contracts described in the comment before [`EventApplier`].
+        EventApplier {
+            events: slice,
+            modern_resource_name: resource,
+            event,
         }
     }
 }
@@ -288,7 +237,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
         // Create a stack of the data of the reverted things.
         let mut reverted_stack = Vec::new();
         // Match only for the current resource.
-        let mut current_resource_name = if let Some(name) = self.modern_resource_name {
+        let current_resource_name = if let Some(name) = self.modern_resource_name {
             name
         } else {
             return Ok(());
@@ -319,11 +268,6 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
                     "Unexpected delete or create event in unwinding of event log.\
                     Please report this bug."
                 ),
-                EventKind::Move(ev) => {
-                    debug_assert_eq!(ev.target, current_resource_name);
-                    // Since we're moving backward,
-                    current_resource_name = ev.source();
-                }
             }
         }
         // When back there, implement the event.
