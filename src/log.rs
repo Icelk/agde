@@ -300,5 +300,9 @@ impl MessageUuidLog {
             limit,
         }
     }
-    pub(crate) fn trim(&mut self) {}
+    pub(crate) fn trim(&mut self) {
+        while self.list.len() > self.limit as usize {
+            self.list.pop_back();
+        }
+    }
 }

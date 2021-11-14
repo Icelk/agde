@@ -1,7 +1,7 @@
 //! A general decentralized sync library supporting text and binary.
 
 #![deny(
-    // clippy::pedantic,
+    clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
     // missing_docs
@@ -79,9 +79,19 @@ pub enum ApplyError {
 
 /// [`Section::end`] must always be after [`Section::start`].
 pub trait Section {
+    /// The start of the section to replace in the resource.
     fn start(&self) -> usize;
+    /// The end of the section to replace in the resource.
     fn end(&self) -> usize;
-    fn resource_replace_len(&self) -> usize {
+    /// Length of new data to fill between [`Section::start`] and [`Section::end`].
+    fn new_len(&self) -> usize;
+    /// Length of the data between [`Section::start`] and [`Section::end`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the end is before the start.
+    /// This guarantee should be upheld by the implementer of [`Section`].
+    fn old_len(&self) -> usize {
         self.end() - self.start()
     }
     /// Difference between old and new length of resource.
@@ -90,13 +100,14 @@ pub trait Section {
     ///
     /// Panics if the end is before the start.
     /// This guarantee should be upheld by the implementer of [`Section`].
+    ///
+    /// Will also panic if any of the lengths don't fit in a [`isize`].
     fn len_difference(&self) -> isize {
-        self.len() as isize - (self.resource_replace_len() as isize)
+        isize::try_from(self.new_len()).expect("length too large for isize.")
+            - isize::try_from(self.old_len()).expect("length too large for isize.")
     }
-    /// Length of new data to fill between [`Section::start`] and [`Section::end`].
-    fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.new_len() == 0
     }
 }
 pub trait DataSection: Section {
@@ -109,8 +120,26 @@ pub trait DataSection: Section {
     ///
     /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
     fn apply(&self, resource: &mut SliceBuf) -> Result<usize, ApplyError> {
-        let new_size = resource.filled() as isize + self.len_difference();
-        if new_size > resource.capacity() as isize || self.end() > resource.capacity() {
+        fn add_iusize(a: usize, b: isize) -> Result<usize, ()> {
+            // We've checked that with the if else.
+            #[allow(clippy::cast_sign_loss)]
+            let result = if b < 0 {
+                let b = (-b) as usize;
+                if b > a {
+                    return Err(());
+                }
+                a - b
+            } else {
+                a + (b as usize)
+            };
+            Ok(result)
+        }
+
+        let new_size = add_iusize(resource.filled(), self.len_difference())
+            .map_err(|()| ApplyError::BufTooSmall)?;
+        let new_data_pos = add_iusize(self.start(), self.len_difference())
+            .map_err(|()| ApplyError::BufTooSmall)?;
+        if new_size > resource.capacity() || self.end() > resource.capacity() {
             return Err(ApplyError::BufTooSmall);
         }
         // Copy the old data that's in the way of the new.
@@ -118,9 +147,9 @@ pub trait DataSection: Section {
         unsafe {
             std::ptr::copy(
                 &resource.slice[self.start()],
-                &mut resource.slice[(self.start() as isize + self.len_difference()) as usize],
+                &mut resource.slice[new_data_pos],
                 resource.filled().saturating_sub(self.start()),
-            )
+            );
         }
 
         // Copy data from `Section` to `resource`.
@@ -131,10 +160,10 @@ pub trait DataSection: Section {
             std::ptr::copy_nonoverlapping(
                 &self.data()[0],
                 &mut resource.slice[self.start()],
-                self.len(),
-            )
+                self.new_len(),
+            );
         }
-        resource.set_filled((resource.filled() as isize + self.len_difference()) as usize);
+        resource.set_filled(new_size);
         Ok(resource.filled())
     }
 }
@@ -145,8 +174,8 @@ impl<S: Section> Section for &S {
     fn end(&self) -> usize {
         (*self).end()
     }
-    fn len(&self) -> usize {
-        (*self).len()
+    fn new_len(&self) -> usize {
+        (*self).new_len()
     }
 }
 
@@ -161,7 +190,7 @@ impl EmptySection {
         Self {
             start: section.start(),
             end: section.end(),
-            len: section.len(),
+            len: section.new_len(),
         }
     }
     /// The reverse of [`DataSection::apply`].
@@ -171,12 +200,29 @@ impl EmptySection {
     ///
     /// Returns an error if the new data cannot fit in `resource`.
     pub(crate) fn revert(&self, resource: &mut SliceBuf) -> Result<VecSection, ApplyError> {
-        let new_size = resource.filled() as isize - self.len_difference();
-        if new_size > resource.capacity() as isize {
+        fn add_iusize(a: usize, b: isize) -> Result<usize, ()> {
+            // We've checked that with the if else.
+            #[allow(clippy::cast_sign_loss)]
+            let result = if b < 0 {
+                let b = (-b) as usize;
+                if b > a {
+                    return Err(());
+                }
+                a - b
+            } else {
+                a + (b as usize)
+            };
+            Ok(result)
+        }
+        let new_size = add_iusize(resource.filled(), -self.len_difference())
+            .map_err(|()| ApplyError::BufTooSmall)?;
+        let new_data_pos = add_iusize(self.start(), self.len_difference())
+            .map_err(|()| ApplyError::BufTooSmall)?;
+        if new_size > resource.capacity() {
             return Err(ApplyError::BufTooSmall);
         }
 
-        let mut section = VecSection::new(self.start(), self.end(), vec![0; self.len()]);
+        let mut section = VecSection::new(self.start(), self.end(), vec![0; self.new_len()]);
 
         // `TODO`: safety notes
 
@@ -185,32 +231,30 @@ impl EmptySection {
             std::ptr::copy_nonoverlapping(
                 &resource.slice[self.start()],
                 &mut section.data[0],
-                self.len(),
+                self.new_len(),
             );
-            section.data.set_len(section.data().len())
+            section.data.set_len(section.data().len());
         }
         // Copy the "old" data back in place of the new.
         unsafe {
             std::ptr::copy(
-                &resource.slice[(self.start() as isize + self.len_difference()) as usize],
+                &resource.slice[new_data_pos],
                 &mut resource.slice[self.start()],
                 resource.filled().saturating_sub(self.start()),
-            )
+            );
         }
 
         // If we added bytes here,
         if self.len_difference() < 0 {
+            // We've checked that with the if statement above.
+            #[allow(clippy::cast_sign_loss)]
             let to_fill = (0 - self.len_difference()) as usize;
             unsafe {
-                std::ptr::write_bytes(
-                    &mut resource.slice[(self.start() as isize + self.len_difference()) as usize],
-                    0,
-                    to_fill,
-                );
+                std::ptr::write_bytes(&mut resource.slice[new_data_pos], 0, to_fill);
             }
         }
 
-        resource.set_filled((resource.filled() as isize - self.len_difference()) as usize);
+        resource.set_filled(new_size);
         Ok(section)
     }
 }
@@ -221,7 +265,7 @@ impl Section for EmptySection {
     fn end(&self) -> usize {
         self.end
     }
-    fn len(&self) -> usize {
+    fn new_len(&self) -> usize {
         self.len
     }
 }
@@ -266,7 +310,7 @@ impl Section for VecSection {
     fn end(&self) -> usize {
         self.end
     }
-    fn len(&self) -> usize {
+    fn new_len(&self) -> usize {
         self.data.len()
     }
 }
@@ -287,9 +331,12 @@ pub struct ModifyEvent<S> {
 }
 impl<S: DataSection> ModifyEvent<S> {
     /// Calculates the diff if `source` is [`Some`].
+    /// 
+    /// # Panics
+    ///
+    /// `TODO`: implement diff
     pub fn new(resource: String, section: S, source: Option<&[u8]>) -> Self {
         if source.is_some() {
-            // `TODO`: implement diff
             unimplemented!("Implement diff");
         }
         Self { resource, section }
@@ -323,9 +370,11 @@ impl DeleteEvent {
         }
     }
 
+    #[must_use]
     pub fn resource(&self) -> &str {
         &self.resource
     }
+    #[must_use]
     pub fn successor(&self) -> Option<&str> {
         self.successor.as_deref()
     }
@@ -343,6 +392,7 @@ impl CreateEvent {
         Self { resource }
     }
 
+    #[must_use]
     pub fn resource(&self) -> &str {
         &self.resource
     }
@@ -577,15 +627,19 @@ impl Message {
     /// Converts the message to bytes.
     ///
     /// You can also use [`bincode`] or any other [`serde`]-based library to serialize the message.
+    #[allow(clippy::missing_panics_doc)]
     #[must_use]
     pub fn bin(self) -> Vec<u8> {
-        // this should be good; we only use objects from ::std and our own derived
+        // UNWRAP: this should be good; we only use objects from ::std and our own derived
         bincode::encode_to_vec(
             bincode::serde::Compat(self),
             bincode::config::Configuration::standard(),
         )
         .unwrap()
     }
+    /// # Errors
+    ///
+    /// Returns an appropriate error if the deserialisation failed.
     pub fn from_bin(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
         bincode::serde::decode_from_slice(slice, bincode::config::Configuration::standard())
     }
@@ -593,6 +647,7 @@ impl Message {
     ///
     /// > This is a optimised version of converting [`Self::bin()`] to Base64.
     /// > Since I'm using readers and writers, less allocations are needed.
+    #[allow(clippy::missing_panics_doc)]
     #[must_use]
     pub fn base64(self) -> String {
         struct Writer<W: std::io::Write>(W);
@@ -620,6 +675,11 @@ impl Message {
         .unwrap();
         string
     }
+    /// # Errors
+    ///
+    /// Returns an appropriate error if the deserialisation failed.
+    /// If the Base64 encoding is wrong, the error returned is
+    /// [`bincode::error::DecodeError::OtherString`] which starts with `base64 decoding failed`.
     pub fn from_base64(string: &str) -> Result<Self, bincode::error::DecodeError> {
         struct Reader<R: std::io::Read>(R);
         impl<R: std::io::Read> bincode::de::read::Reader for Reader<R> {
@@ -816,7 +876,7 @@ mod tests {
 
                                 let additional = std::cmp::max(
                                     ev.section().len_difference() + 1,
-                                    ev.section.len() as isize,
+                                    ev.section.new_len() as isize,
                                 );
                                 // `as usize` should not normally be used!
                                 // `TODO`: implement a `section.additional()` method to get how
