@@ -1,0 +1,20 @@
+[package]
+name = "agde"
+version = "0.1.0"
+authors = ["Icelk <main@icelk.dev>"]
+edition = "2021"
+rust-version = "1.56"
+description = "A general decentralized sync library supporting text and binary."
+readme = "README.md"
+# homepage = "https://icelk.dev/agde/"
+repository = "https://github.com/Icelk/agde/"
+license = "LGPL-3.0-or-later"
+keywords = ["sync", "rsync", "live-share", "binary sync"]
+categories = ["algorithms"]
+
+[dependencies]
+base64 = "^0.13"
+bincode = { version = "2.0.0-alpha.1", features = ["serde"] }
+semver = { version = "^1", features = ["serde"] }
+serde = { version = "^1", features = ["derive"] }
+rand = "^0.8"
