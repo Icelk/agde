@@ -4,10 +4,10 @@
     clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
-    // missing_docs
+    missing_docs
 )]
 
-mod log;
+pub mod log;
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +24,7 @@ pub struct Capabilities {
     uuid: Uuid,
 }
 
+/// A buffer containing a byte slice and a length of the filled data.
 #[derive(Debug)]
 #[must_use]
 pub struct SliceBuf<'a> {
@@ -31,6 +32,7 @@ pub struct SliceBuf<'a> {
     len: usize,
 }
 impl<'a> SliceBuf<'a> {
+    /// Creates a new buffer with length set to `0`.
     /// Don't forget to [`Self::advance`] to set the filled region of `slice`.
     /// If you forget to do this, new data will be overridden at the start.
     #[allow(clippy::inline_always)]
@@ -71,6 +73,7 @@ impl<'a> SliceBuf<'a> {
     pub fn filled(&self) -> usize {
         self.len
     }
+    /// Size of the capacity of the buffer. This cannot be increased.
     #[must_use]
     #[allow(clippy::inline_always)]
     #[inline(always)]
@@ -79,6 +82,7 @@ impl<'a> SliceBuf<'a> {
     }
 }
 
+/// An error during [`DataSection::apply`] and [`EventApplier::apply`].
 #[derive(Debug)]
 pub enum ApplyError {
     /// [`SliceBuf::capacity`] is too small.
@@ -142,9 +146,6 @@ pub trait Section {
         isize::try_from(self.new_len()).expect("length too large for isize.")
             - isize::try_from(self.old_len()).expect("length too large for isize.")
     }
-    fn is_empty(&self) -> bool {
-        self.new_len() == 0
-    }
     /// The needed length of the [`SliceBuf`].
     /// Should be set to this before calling [`EventApplier::Apply`].
     ///
@@ -159,7 +160,6 @@ pub trait Section {
     /// `len` is the length of the [`SliceBuf::filled`] part.
     fn apply_len(&self, buffer: &mut Vec<u8>, len: usize, fill: u8) {
         let needed = std::cmp::max(self.needed_len(len), len);
-        println!("Applies {}, len {}", needed, len);
         buffer.resize(needed, fill);
     }
 }
@@ -390,11 +390,14 @@ impl<S: DataSection> ModifyEvent<S> {
     }
 }
 impl<S: Section> ModifyEvent<S> {
+    /// Gets a reference to the section this event modifies.
     pub fn section(&self) -> &S {
         &self.section
     }
 }
 impl<S> ModifyEvent<S> {
+    /// Returns a reference to the target resource name.
+    #[must_use]
     pub fn resource(&self) -> &str {
         &self.resource
     }
@@ -410,6 +413,14 @@ pub struct DeleteEvent {
     successor: Option<String>,
 }
 impl DeleteEvent {
+    /// Creates a new delete event.
+    ///
+    /// The successor, if present, directs all more recent modifications of the deleted resource
+    /// ([`Self::resource`]) to another resource.
+    /// This is useful for when a file is renamed.
+    ///
+    /// > Having a `MoveEvent` was experimented with, but ultimately failed.
+    /// > Dig into the old git commits to see comments about it.
     pub fn new(resource: String, successor: Option<String>) -> Self {
         Self {
             resource,
@@ -417,10 +428,12 @@ impl DeleteEvent {
         }
     }
 
+    /// Returns a reference to the target resource name.
     #[must_use]
     pub fn resource(&self) -> &str {
         &self.resource
     }
+    /// Returns a reference to the optional successor.
     #[must_use]
     pub fn successor(&self) -> Option<&str> {
         self.successor.as_deref()
@@ -435,10 +448,12 @@ pub struct CreateEvent {
     resource: String,
 }
 impl CreateEvent {
+    /// Signals `resource` should be created, or overridden if present.
     pub fn new(resource: String) -> Self {
         Self { resource }
     }
 
+    /// Returns a reference to the target resource name.
     #[must_use]
     pub fn resource(&self) -> &str {
         &self.resource
@@ -478,6 +493,10 @@ pub enum EventKind<S> {
     /// If the [`ModifyEvent::section()`] start **and** end is `0`, this is considered a file
     /// creation. See [`Self::Move`] on how this affects the move operation.
     Modify(ModifyEvent<S>),
+    /// Creation.
+    ///
+    /// A new resource has been created. Before any other event can affect this resource,
+    /// you'll have to initialise it with this event.
     Create(CreateEvent),
     /// Deletion.
     ///
@@ -493,9 +512,11 @@ pub struct Event<S> {
     kind: EventKind<S>,
 }
 impl<S> Event<S> {
+    /// Creates a new event from `kind`.
     pub fn new(kind: EventKind<S>) -> Self {
         Self { kind }
     }
+    /// Returns a reference to the target resource name.
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub fn resource(&self) -> &str {
@@ -505,11 +526,14 @@ impl<S> Event<S> {
             EventKind::Delete(ev) => ev.resource(),
         }
     }
+    /// Returns a reference to the inner [`EventKind`] where all the event data is stored.
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub fn inner(&self) -> &EventKind<S> {
         &self.kind
     }
+    /// Returns a mutable reference to the inner [`EventKind`].
+    #[inline]
     pub(crate) fn inner_mut(&mut self) -> &mut EventKind<S> {
         &mut self.kind
     }
@@ -528,6 +552,9 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
         Event { kind }
     }
 }
+/// A [`Event`] with internal data.
+///
+/// This is the type that is sent between clients.
 pub type DatafulEvent = Event<VecSection>;
 
 /// The data of [`MessageKind`] corresponding to a list of [`Event`]s.

@@ -5,6 +5,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{ApplyError, DataSection, EmptySection, Event, EventKind, Section, SliceBuf, Uuid};
 
+/// A received event.
+/// 
+/// Contains the necessary metadata to sort the event.
+/// Does not contain any raw data, as that's calculated by undoing all the events.
 #[derive(Debug)]
 #[must_use]
 struct ReceivedEvent {
@@ -45,6 +49,7 @@ impl Ord for ReceivedEvent {
     }
 }
 
+/// An error with editing of any of the logs.
 #[derive(Debug)]
 pub enum Error {
     /// The given [`Event`] has occurred in the future!
@@ -121,9 +126,6 @@ impl EventLog {
         self.trim();
         Ok(())
     }
-    /// `resource` should be part of the [`crate::Message`] with the `uuid`.
-    /// `uuid` is the event's UUID, not the message's.
-    // `TODO`: remove 'a for Event
     pub(crate) fn event_applier<'a, S: DataSection>(
         &'a mut self,
         event: &'a Event<S>,
@@ -198,6 +200,10 @@ impl EventLog {
     }
 }
 
+/// A helper-struct that apples an event.
+///
+/// It's main function is to unwind the log of events, apply the new event (it might have occurred
+/// before any of the other events) and then apply the unwound events.
 // Instances must contain the target event.
 // Unwinding `events` may not return [`Event::Delete`] if `modern_resource_name` is [`Some`]
 #[derive(Debug)]
@@ -214,9 +220,11 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// The name of the modified resource on the local store.
     /// If this is [`None`], the resource this event applies to has been deleted since.
     /// Don't call [`Self::apply`] if that's the case.
+    #[must_use]
     pub fn resource(&self) -> Option<&str> {
         self.modern_resource_name
     }
+    /// Gets a reference to the event to be applied.
     // `TODO`: Don't return an error when the wrong method is called.
     pub fn event(&self) -> &Event<S> {
         self.event
@@ -232,7 +240,9 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// [`Manager::apply_event`] with a [`EventKind::Modify`]
     ///
     /// Returns a [`ApplyError::BufTooSmall`] if the following predicate is not met.
-    /// `resource` must be at least `resource.filled() + event.section().len_difference() + 1`
+    /// `resource` must be at least `max(resource.filled() + event.section().len_difference() + 1,
+    /// event.section().end() + 1)`
+    /// [`Section::apply_len`] guarantees this.
     pub fn apply(&self, resource: &mut SliceBuf) -> Result<(), ApplyError> {
         // Create a stack of the data of the reverted things.
         let mut reverted_stack = Vec::new();
@@ -290,6 +300,8 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct MessageUuidLog {
+    // We need ordering and fast insertions at the front and deletions at the back, here a
+    // `VecDeque` is a perfect fit!
     list: VecDeque<Uuid>,
     limit: u32,
 }
