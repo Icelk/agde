@@ -33,6 +33,8 @@ pub struct SliceBuf<'a> {
 impl<'a> SliceBuf<'a> {
     /// Don't forget to [`Self::advance`] to set the filled region of `slice`.
     /// If you forget to do this, new data will be overridden at the start.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn new(slice: &'a mut [u8]) -> Self {
         Self { slice, len: 0 }
     }
@@ -41,29 +43,37 @@ impl<'a> SliceBuf<'a> {
     /// # Panics
     ///
     /// Panics if `n > self.capacity()`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn set_filled(&mut self, n: usize) {
-        self.len = n;
         assert!(
-            self.len <= self.slice.len(),
+            n <= self.slice.len(),
             "Tried to set filled to {} while length is {}",
             n,
             self.slice.len()
         );
+        self.len = n;
     }
     /// Advances the size of the filled region of the buffer.
     ///
     /// # Panics
     ///
     /// Panics if `self.len() + n > self.capacity()`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn advance(&mut self, n: usize) {
         self.set_filled(self.len + n);
     }
     /// Size of the filled region of the buffer.
     #[must_use]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn filled(&self) -> usize {
         self.len
     }
     #[must_use]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn capacity(&self) -> usize {
         self.slice.len()
     }
@@ -82,6 +92,8 @@ pub enum ApplyError {
 /// # Errors
 ///
 /// Returns an error if `a + b` is negative.
+#[allow(clippy::inline_always)]
+#[inline(always)]
 fn add_iusize(a: usize, b: isize) -> Result<usize, ()> {
     // We've checked that with the if else.
     #[allow(clippy::cast_sign_loss)]
@@ -111,6 +123,8 @@ pub trait Section {
     ///
     /// Panics if the end is before the start.
     /// This guarantee should be upheld by the implementer of [`Section`].
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn old_len(&self) -> usize {
         self.end() - self.start()
     }
@@ -122,6 +136,8 @@ pub trait Section {
     /// This guarantee should be upheld by the implementer of [`Section`].
     ///
     /// Will also panic if any of the lengths don't fit in a [`isize`].
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn len_difference(&self) -> isize {
         isize::try_from(self.new_len()).expect("length too large for isize.")
             - isize::try_from(self.old_len()).expect("length too large for isize.")
@@ -156,6 +172,8 @@ pub trait DataSection: Section {
     /// # Errors
     ///
     /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn apply(&self, resource: &mut SliceBuf) -> Result<usize, ApplyError> {
         let new_size = add_iusize(resource.filled(), self.len_difference())
             .map_err(|()| ApplyError::BufTooSmall)?;
@@ -221,6 +239,8 @@ impl EmptySection {
     /// # Errors
     ///
     /// Returns an error if the new data cannot fit in `resource`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn revert(&self, resource: &mut SliceBuf) -> Result<VecSection, ApplyError> {
         let new_size = add_iusize(resource.filled(), -self.len_difference())
             .map_err(|()| ApplyError::BufTooSmall)?;
@@ -267,12 +287,18 @@ impl EmptySection {
     }
 }
 impl Section for EmptySection {
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn start(&self) -> usize {
         self.start
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn end(&self) -> usize {
         self.end
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn new_len(&self) -> usize {
         self.len
     }
@@ -312,17 +338,25 @@ impl VecSection {
     }
 }
 impl Section for VecSection {
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn start(&self) -> usize {
         self.start
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn end(&self) -> usize {
         self.end
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn new_len(&self) -> usize {
         self.data.len()
     }
 }
 impl DataSection for VecSection {
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn data(&self) -> &[u8] {
         &self.data
     }
@@ -457,6 +491,8 @@ impl<S> Event<S> {
     pub fn new(kind: EventKind<S>) -> Self {
         Self { kind }
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn resource(&self) -> &str {
         match &self.kind {
             EventKind::Modify(ev) => ev.resource(),
@@ -464,6 +500,8 @@ impl<S> Event<S> {
             EventKind::Delete(ev) => ev.resource(),
         }
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn inner(&self) -> &EventKind<S> {
         &self.kind
     }
@@ -842,7 +880,7 @@ mod tests {
                             assert_eq!(event_applier.resource(), Some("test.txt"));
 
                             let mut test = Vec::new();
-                            ev.section().apply_len(&mut test, 0, 32);
+                            ev.section().apply_len(&mut test, 0, b' ');
 
                             let mut resource = SliceBuf::new(&mut test);
                             resource.advance(0);
