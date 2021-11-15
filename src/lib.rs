@@ -163,7 +163,13 @@ pub trait Section {
         buffer.resize(needed, fill);
     }
 }
-pub trait DataSection: Section {
+/// [`DataSection::end`] must always be after [`DataSection::start`].
+pub trait DataSection {
+    /// The start of the section to replace in the resource.
+    fn start(&self) -> usize;
+    /// The end of the section to replace in the resource.
+    fn end(&self) -> usize;
+    /// Returns a reference to the entirety of the data.
     fn data(&self) -> &[u8];
     /// Applies `self` to `resource`.
     ///
@@ -207,15 +213,21 @@ pub trait DataSection: Section {
         Ok(resource.filled())
     }
 }
-impl<S: Section> Section for &S {
+impl<S: DataSection + ?Sized> Section for S {
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn start(&self) -> usize {
-        (*self).start()
+        self.start()
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn end(&self) -> usize {
-        (*self).end()
+        self.end()
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn new_len(&self) -> usize {
-        (*self).new_len()
+        self.data().len()
     }
 }
 
@@ -226,7 +238,7 @@ pub(crate) struct EmptySection {
     len: usize,
 }
 impl EmptySection {
-    pub(crate) fn new<S: Section>(section: S) -> Self {
+    pub(crate) fn new<S: Section>(section: &S) -> Self {
         Self {
             start: section.start(),
             end: section.end(),
@@ -337,7 +349,7 @@ impl VecSection {
         Self { start, end, data }
     }
 }
-impl Section for VecSection {
+impl DataSection for VecSection {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     fn start(&self) -> usize {
@@ -348,13 +360,6 @@ impl Section for VecSection {
     fn end(&self) -> usize {
         self.end
     }
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    fn new_len(&self) -> usize {
-        self.data.len()
-    }
-}
-impl DataSection for VecSection {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     fn data(&self) -> &[u8] {
@@ -515,7 +520,7 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
         let kind = match ev.inner() {
             EventKind::Modify(ev) => EventKind::Modify(ModifyEvent {
                 resource: ev.resource().into(),
-                section: EmptySection::new(&ev.section()),
+                section: EmptySection::new(ev.section()),
             }),
             EventKind::Create(ev) => EventKind::Create(ev.clone()),
             EventKind::Delete(ev) => EventKind::Delete(ev.clone()),
@@ -906,7 +911,6 @@ mod tests {
             message: &Message,
             resource: &mut Vec<u8>,
             resource_len: &mut usize,
-            check_too_small: bool,
         ) {
             match message.inner() {
                 MessageKind::Event(ev_msg) => {
@@ -974,7 +978,6 @@ mod tests {
             &second_message,
             &mut resource,
             &mut resource_len,
-            true,
         );
 
         // We've inserted after the limit. Extend the len.
@@ -990,7 +993,6 @@ mod tests {
             &first_message,
             &mut resource,
             &mut resource_len,
-            false,
         );
 
         assert_eq!(&resource[..resource_len], b"Hello friend!");
