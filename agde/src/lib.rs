@@ -14,14 +14,62 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// Describes the capabilities of the client. Sent in the initial [`Message`] exchange.
+/// The current version of this `agde` library.
+pub const VERSION: semver::Version = semver::Version::new(0, 1, 0);
+
+/// Describes the capabilities and properties of the client. Sent in the initial [`Message`] exchange.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Capabilities {
     version: semver::Version,
-    /// The client is striving to be persistent. These will regularly do [`Message::HashCheck`]
-    persistent: bool,
     uuid: Uuid,
+    persistent: bool,
+    /// The desire to communicate with others in the system.
+    ///
+    /// This will play part in deciding which client to send check requests to.
+    /// Normally, the always-on clients (those started alongside the server, if there is any),
+    /// will have a high value.
+    help_desire: i16,
+}
+impl Capabilities {
+    /// Creates a new set of capabilities and properties used by this client.
+    ///
+    /// See the various getters for more information about the usage of these options.
+    pub fn new(uuid: Uuid, persistent: bool, help_desire: i16) -> Self {
+        Self {
+            version: VERSION,
+            uuid,
+            persistent,
+            help_desire,
+        }
+    }
+    /// Version of this client.
+    #[must_use]
+    pub fn version(&self) -> &semver::Version {
+        &self.version
+    }
+    /// The UUID of this client.
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+    /// The client is striving to be persistent. These will regularly do [`Message::HashCheck`].
+    #[must_use]
+    pub fn persistent(&self) -> bool {
+        self.persistent
+    }
+    /// The desire to communicate with others in the system.
+    ///
+    /// This value will go from [`i16::MIN`], which means "I want none o' this" to
+    /// [`i16::MAX`] which means the client is happy to help others.
+    /// This will usually be set in accordance to the free processing power a client has to offer.
+    ///
+    /// This will play part in deciding which client to send check requests to.
+    /// Normally, the always-on clients (those started alongside the server, if there is any),
+    /// will have a high value.
+    #[must_use]
+    pub fn help_desire(&self) -> i16 {
+        self.help_desire
+    }
 }
 
 /// A buffer containing a byte slice and a length of the filled data.
@@ -789,8 +837,8 @@ impl Message {
 #[derive(Debug)]
 #[must_use]
 pub struct Manager {
+    capabilities: Capabilities,
     rng: rand::rngs::ThreadRng,
-    uuid: Uuid,
     clients: HashMap<Uuid, Capabilities>,
 
     event_log: log::EventLog,
@@ -800,12 +848,22 @@ impl Manager {
     /// Creates a empty manager.
     ///
     /// Call [`Self::process_hello()`] to get a hello message.
-    pub fn new(log_lifetime: Duration, message_log_limit: u32) -> Self {
+    ///
+    /// The options are partially explained in [`Capabilities::new`].
+    /// I recommend a default of `60s` for `log_lifetime` and `200` for `message_log_limit`.
+    pub fn new(
+        persistent: bool,
+        help_desire: i16,
+        log_lifetime: Duration,
+        message_log_limit: u32,
+    ) -> Self {
         let mut rng = rand::thread_rng();
         let uuid = Uuid::with_rng(&mut rng);
+        let capabilities = Capabilities::new(uuid, persistent, help_desire);
+
         Self {
+            capabilities,
             rng,
-            uuid,
             clients: HashMap::new(),
 
             event_log: log::EventLog::new(log_lifetime),
@@ -814,7 +872,7 @@ impl Manager {
     }
     /// Gets the UUID of this client.
     pub fn uuid(&self) -> Uuid {
-        self.uuid
+        self.capabilities.uuid()
     }
     /// Generates a UUID using the internal [`rand::Rng`].
     #[inline]
@@ -826,7 +884,7 @@ impl Manager {
     /// Be careful to have a [`EventKind::Create`] before the resource receives a [`EventKind::Modify`].
     #[inline]
     pub fn process_event(&mut self, event: EventMessage) -> Message {
-        Message::new(MessageKind::Event(event), self.uuid, self.generate_uuid())
+        Message::new(MessageKind::Event(event), self.uuid(), self.generate_uuid())
     }
     /// `pos_in_event_message` MUST be the true value. Else, the ordering will fail
     ///
@@ -852,19 +910,19 @@ impl Manager {
             .event_applier(event, message_uuid, pos_in_event_message))
     }
 }
-impl Default for Manager {
-    fn default() -> Self {
-        Self::new(Duration::new(60, 0), 200)
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manager() -> Manager {
+        Manager::new(false, 0, Duration::from_secs(60), 200)
+    }
+
     #[test]
     fn send_diff() {
         let (message_bin, message_base64, sender_uuid): (Vec<u8>, String, Uuid) = {
-            let mut manager = Manager::default();
+            let mut manager = manager();
 
             let event: Event<_> = ModifyEvent::new(
                 "test.txt".into(),
@@ -886,7 +944,7 @@ mod tests {
         assert_eq!(message, message_base64);
         assert_eq!(message.sender(), sender_uuid);
 
-        let mut receiver = Manager::default();
+        let mut receiver = manager();
 
         match message.inner() {
             MessageKind::Event(ev_msg) => {
@@ -968,7 +1026,7 @@ mod tests {
             }
         }
         let (first_message, second_message) = {
-            let mut sender = Manager::default();
+            let mut sender = manager();
 
             let first_event = ModifyEvent::new(
                 "private/secret.txt".into(),
@@ -994,7 +1052,7 @@ mod tests {
             )
         };
 
-        let mut receiver = Manager::default();
+        let mut receiver = manager();
 
         let mut resource = Vec::new();
         let mut resource_len = 0;
