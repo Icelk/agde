@@ -13,3 +13,6 @@ keywords = ["diff", "rdiff", "rsync"]
 categories = ["algorithms"]
 
 [dependencies]
+fnv = "^1"
+sha3 = "^0.9"
+twox-hash = "^1"
