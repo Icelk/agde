@@ -77,6 +77,26 @@ pub enum ApplyError {
     InvalidEvent,
 }
 
+/// Adds `b` to `a`. There will be no loss in range.
+///
+/// # Errors
+///
+/// Returns an error if `a + b` is negative.
+fn add_iusize(a: usize, b: isize) -> Result<usize, ()> {
+    // We've checked that with the if else.
+    #[allow(clippy::cast_sign_loss)]
+    let result = if b < 0 {
+        let b = (-b) as usize;
+        if b > a {
+            return Err(());
+        }
+        a - b
+    } else {
+        a + (b as usize)
+    };
+    Ok(result)
+}
+
 /// [`Section::end`] must always be after [`Section::start`].
 pub trait Section {
     /// The start of the section to replace in the resource.
@@ -109,6 +129,23 @@ pub trait Section {
     fn is_empty(&self) -> bool {
         self.new_len() == 0
     }
+    /// The needed length of the [`SliceBuf`].
+    /// Should be set to this before calling [`EventApplier::Apply`].
+    ///
+    /// May return a value lower than `resource_len`. This should not be applied until after the
+    /// application.
+    fn needed_len(&self, resource_len: usize) -> usize {
+        let diff = add_iusize(resource_len, self.len_difference()).unwrap_or(0) + 1;
+        let end = self.end() + 1;
+        std::cmp::max(diff, end)
+    }
+    /// Extends the `buffer` with `fill` to fit this section.
+    /// `len` is the length of the [`SliceBuf::filled`] part.
+    fn apply_len(&self, buffer: &mut Vec<u8>, len: usize, fill: u8) {
+        let needed = std::cmp::max(self.needed_len(len), len);
+        println!("Applies {}, len {}", needed, len);
+        buffer.resize(needed, fill);
+    }
 }
 pub trait DataSection: Section {
     fn data(&self) -> &[u8];
@@ -120,21 +157,6 @@ pub trait DataSection: Section {
     ///
     /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
     fn apply(&self, resource: &mut SliceBuf) -> Result<usize, ApplyError> {
-        fn add_iusize(a: usize, b: isize) -> Result<usize, ()> {
-            // We've checked that with the if else.
-            #[allow(clippy::cast_sign_loss)]
-            let result = if b < 0 {
-                let b = (-b) as usize;
-                if b > a {
-                    return Err(());
-                }
-                a - b
-            } else {
-                a + (b as usize)
-            };
-            Ok(result)
-        }
-
         let new_size = add_iusize(resource.filled(), self.len_difference())
             .map_err(|()| ApplyError::BufTooSmall)?;
         let new_data_pos = add_iusize(self.start(), self.len_difference())
@@ -200,20 +222,6 @@ impl EmptySection {
     ///
     /// Returns an error if the new data cannot fit in `resource`.
     pub(crate) fn revert(&self, resource: &mut SliceBuf) -> Result<VecSection, ApplyError> {
-        fn add_iusize(a: usize, b: isize) -> Result<usize, ()> {
-            // We've checked that with the if else.
-            #[allow(clippy::cast_sign_loss)]
-            let result = if b < 0 {
-                let b = (-b) as usize;
-                if b > a {
-                    return Err(());
-                }
-                a - b
-            } else {
-                a + (b as usize)
-            };
-            Ok(result)
-        }
         let new_size = add_iusize(resource.filled(), -self.len_difference())
             .map_err(|()| ApplyError::BufTooSmall)?;
         let new_data_pos = add_iusize(self.start(), self.len_difference())
@@ -331,7 +339,7 @@ pub struct ModifyEvent<S> {
 }
 impl<S: DataSection> ModifyEvent<S> {
     /// Calculates the diff if `source` is [`Some`].
-    /// 
+    ///
     /// # Panics
     ///
     /// `TODO`: implement diff
@@ -834,9 +842,7 @@ mod tests {
                             assert_eq!(event_applier.resource(), Some("test.txt"));
 
                             let mut test = Vec::new();
-                            let additional = ev.section().len_difference() + 1;
-                            // `as usize` should not normally be used!
-                            test.resize(additional as usize, 0);
+                            ev.section().apply_len(&mut test, 0, 32);
 
                             let mut resource = SliceBuf::new(&mut test);
                             resource.advance(0);
@@ -874,27 +880,7 @@ mod tests {
                             EventKind::Modify(ev) => {
                                 assert_eq!(ev.resource(), "private/secret.txt");
 
-                                let additional = std::cmp::max(
-                                    ev.section().len_difference() + 1,
-                                    ev.section.new_len() as isize,
-                                );
-                                // `as usize` should not normally be used!
-                                // `TODO`: implement a `section.additional()` method to get how
-                                // many bytes to extend the buffer with.
-                                resource.resize(resource.len() + additional as usize, 32);
-
-                                if check_too_small {
-                                    let mut buf = SliceBuf::new(resource);
-                                    buf.set_filled(*resource_len);
-
-                                    event_applier
-                                        .apply(&mut buf)
-                                        .expect_err("Buffer should be too small!");
-                                }
-
-                                // Redo with larger buffer.
-
-                                resource.resize(1024, 32);
+                                ev.section().apply_len(resource, *resource_len, b' ');
 
                                 let mut buf = SliceBuf::new(resource);
                                 buf.set_filled(*resource_len);
