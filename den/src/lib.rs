@@ -8,6 +8,7 @@
 )]
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::hash::Hasher;
 use twox_hash::xxh3::HasherExt;
@@ -147,15 +148,45 @@ impl StackSlice<16> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[repr(u8)]
-enum HashResult {
-    None4([u8; 4]),
-    None8([u8; 8]),
-    None16([u8; 16]),
-    Fnv([u8; 8]),
-    XXH3_64([u8; 8]),
-    XXH3_128([u8; 16]),
+macro_rules! hash_result {
+    (
+        $(
+            (
+                $name: ident,
+                $result: ty,
+                $builder: ty,
+                $finish: ident
+            ),
+        )+
+    ) => {
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[repr(u8)]
+        #[must_use]
+        enum HashResult {
+            $(
+                $name($result),
+            )+
+        }
+        impl HashResult {
+            fn to_bytes(&self) -> [u8; 16] {
+                match self {
+                    $(
+                        Self::$name(bytes) => to_16_bytes(bytes),
+                    )+
+                }
+            }
+        }
+    };
+}
+
+hashers!(hash_result!);
+
+fn to_16_bytes<const SIZE: usize>(bytes: &[u8; SIZE]) -> [u8; 16] {
+    let mut bytes_fixed = zeroed();
+
+    bytes_fixed[..SIZE].copy_from_slice(bytes);
+
+    bytes_fixed
 }
 
 #[must_use]
@@ -237,7 +268,71 @@ pub struct Signature {
     block_size: usize,
 }
 impl Signature {
+    /// Larger `block_size`s will take more time to compute, but will be more secure.
+    /// Smaller `block_size`s takes less time to compute, are less secure, and require sending more
+    /// data in the [`Signature`], as more blocks are sent.
     pub fn with_algo(algo: HashAlgorithm, block_size: usize) -> SignatureBuilder {
         SignatureBuilder::new(algo).with_block_size(block_size)
     }
+
+    pub fn algorithm(&self) -> HashAlgorithm {
+        self.algo
+    }
+    #[must_use]
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+    pub(crate) fn blocks(&self) -> &[HashResult] {
+        &self.blocks
+    }
+}
+
+#[derive(Debug)]
+struct BlockData {
+    start: usize,
+}
+#[derive(Debug)]
+#[must_use]
+pub struct SegmentRef {
+    hash: [u8; 16],
+}
+#[derive(Debug)]
+#[must_use]
+pub struct SegmentUnknown {
+    len: usize,
+}
+#[derive(Debug)]
+#[must_use]
+pub enum Segment {
+    Ref(SegmentRef),
+    Unknown(SegmentUnknown),
+}
+#[derive(Debug)]
+#[must_use]
+pub struct Difference {
+    segments: Vec<Segment>,
+}
+
+pub fn diff(data: &[u8], signature: &Signature) -> Difference {
+    let mut map = BTreeMap::new();
+
+    for (nr, block) in signature.blocks().iter().enumerate() {
+        let bytes = block.to_bytes();
+
+        let start = nr * signature.block_size();
+        let block_data = BlockData { start };
+
+        map.insert(bytes, block_data);
+    }
+
+    // Iterate over data, in windows. Find hash.
+    //
+    // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
+    //
+    // If you calculate the diff and want the other's data, we beg to send all their blocks which
+    // we don't have.
+    // If we want them to get our diff, we send our diff, with the `Unknown`s filled with data.
+    // Then, we only send references to their data and our new data.
+
+    Difference { segments: vec![] }
 }
