@@ -14,5 +14,5 @@ categories = ["algorithms"]
 
 [dependencies]
 fnv = "^1"
-sha3 = "^0.9"
+serde = { version = "^1", features = ["derive"] }
 twox-hash = "^1"
