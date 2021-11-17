@@ -291,48 +291,191 @@ impl Signature {
 struct BlockData {
     start: usize,
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub struct SegmentRef {
-    hash: [u8; 16],
+    /// Start of segment with a length of the [`Signature::block_size`].
+    start: usize,
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub struct SegmentUnknown {
-    len: usize,
+    source: Vec<u8>,
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub enum Segment {
     Ref(SegmentRef),
     Unknown(SegmentUnknown),
 }
-#[derive(Debug)]
+impl Segment {
+    fn reference(data: &BlockData) -> Self {
+        Self::Ref(SegmentRef { start: data.start })
+    }
+    fn unknown(data: &[u8]) -> Self {
+        Self::Unknown(SegmentUnknown {
+            source: data.to_vec(),
+        })
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub struct Difference {
     segments: Vec<Segment>,
 }
+impl Difference {
+    /// Returns a reference to all the internal [`Segment`]s.
+    ///
+    /// This can be used for implementing algorithms other than [`apply`] to apply the data.
+    ///
+    /// > `agde` uses this to convert from this format to their `Section` style.
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+}
 
 pub fn diff(data: &[u8], signature: &Signature) -> Difference {
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn test_unknown_data(
+        data: &[u8],
+        last_ref: usize,
+        blocks_pos: usize,
+        segments: &mut Vec<Segment>,
+    ) {
+        let unknown_data = &data[last_ref..blocks_pos - 1];
+        if !unknown_data.is_empty() {
+            segments.push(Segment::unknown(unknown_data));
+        }
+    }
     let mut map = BTreeMap::new();
+
+    let block_size = signature.block_size();
 
     for (nr, block) in signature.blocks().iter().enumerate() {
         let bytes = block.to_bytes();
 
-        let start = nr * signature.block_size();
+        let start = nr * block_size;
         let block_data = BlockData { start };
 
         map.insert(bytes, block_data);
+    }
+
+    let mut blocks = Blocks::new(data, signature.block_size());
+
+    let mut segments = Vec::new();
+    let mut last_ref = 0;
+
+    while let Some(block) = blocks.next() {
+        let mut hasher = signature.algorithm().builder();
+        hasher.write(block);
+        let hash = hasher.finish().to_bytes();
+
+        if let Some(block_data) = map.get(&hash) {
+            test_unknown_data(data, last_ref, blocks.pos(), &mut segments);
+
+            segments.push(Segment::reference(block_data));
+            println!("Block {:?}", std::str::from_utf8(block));
+            blocks.advance(block.len() - 1);
+            last_ref = blocks.pos();
+        }
     }
 
     // Iterate over data, in windows. Find hash.
     //
     // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
     //
-    // If you calculate the diff and want the other's data, we beg to send all their blocks which
-    // we don't have.
     // If we want them to get our diff, we send our diff, with the `Unknown`s filled with data.
     // Then, we only send references to their data and our new data.
+    test_unknown_data(data, last_ref, blocks.pos() + 1, &mut segments);
 
-    Difference { segments: vec![] }
+    Difference { segments }
+}
+
+struct Blocks<'a, T> {
+    slice: &'a [T],
+    block_size: usize,
+    pos: usize,
+}
+impl<'a, T> Blocks<'a, T> {
+    fn new(slice: &'a [T], block_size: usize) -> Self {
+        Self {
+            slice,
+            block_size,
+            pos: 0,
+        }
+    }
+    #[inline]
+    fn advance(&mut self, n: usize) {
+        self.pos += n;
+    }
+    /// Clamped to `slice.len()`.
+    #[inline]
+    fn pos(&self) -> usize {
+        std::cmp::min(self.pos, self.slice.len())
+    }
+}
+impl<'a> Iterator for Blocks<'a, u8> {
+    type Item = &'a [u8];
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos + 1 > self.slice.len() {
+            return None;
+        }
+
+        let start = self.pos;
+        let end = std::cmp::min(start + self.block_size, self.slice.len());
+
+        self.advance(1);
+
+        Some(&self.slice[start..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lorem_ipsum() -> &'static str {
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna ultrices gravida quis in felis. Mauris ac rutrum enim. Nulla auctor lacus at tellus sagittis dictum non id nunc. Donec ac nisl molestie, egestas dui vitae, consectetur sapien. Vivamus vel aliquet magna, ut malesuada mauris. Curabitur eu erat at lorem rhoncus cursus ac at mauris. Curabitur ullamcorper diam sed leo pellentesque, ac rhoncus quam mattis. Suspendisse potenti. Pellentesque risus ex, egestas in ex nec, sollicitudin accumsan dolor. Donec elementum id odio eget pharetra. Morbi aliquet accumsan vestibulum. Suspendisse eros dui, condimentum sagittis magna non, eleifend egestas dui. Ut pulvinar vestibulum lorem quis laoreet. Nam aliquam ante in placerat volutpat. Sed ac imperdiet ex. Nullam ut neque vel augue dignissim semper."
+    }
+
+    #[test]
+    fn difference() {
+        // This is the data we have
+        // let local_data = lorem_ipsum().replace("Cras nec justo", "I don't know");
+        let local_data =
+            "Lorem ipsum dolor sit amet, don't really know Rust elit. Cras nec justo eu magna.";
+        // This is the data we want to get.
+        let remote_data =
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna.";
+        // let remote_data = lorem_ipsum();
+
+        let mut signature = Signature::with_algo(HashAlgorithm::XXH3_64, 8);
+        signature.write(local_data.as_bytes());
+        let signature = signature.finish();
+
+        let now = std::time::Instant::now();
+        let diff = diff(remote_data.as_bytes(), &signature);
+        println!("Segments {:#?}", diff.segments());
+        println!("Took {:?}", now.elapsed());
+        assert_eq!(diff.segments().len(), 8);
+
+        let segment = &diff.segments()[3];
+        assert_eq!(segment, &Segment::unknown(b"et, consectetur adipiscing elit.".as_ref()));
+    }
+    #[test]
+    fn block_size_larger_than_input() {
+        // This is the data we have
+        let local_data = lorem_ipsum().replace("Cras nec justo", "I don't know");
+        // This is the data we want to get.
+        let remote_data = lorem_ipsum();
+
+        let mut signature = Signature::with_algo(HashAlgorithm::XXH3_64, 4096);
+        signature.write(local_data.as_bytes());
+        let signature = signature.finish();
+
+        let diff = diff(remote_data.as_bytes(), &signature);
+        assert_eq!(diff.segments().len(), 1);
+    }
 }
