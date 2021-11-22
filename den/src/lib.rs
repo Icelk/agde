@@ -535,4 +535,16 @@ mod tests {
 
         drop(diff(remote_data.as_bytes(), &signature));
     }
+    #[test]
+    fn empty() {
+        let local_data = "";
+        // This is the data we want to get.
+        let remote_data = "";
+        let mut signature = Signature::with_algorithm(HashAlgorithm::XXH3_64, 512);
+        signature.write(local_data.as_bytes());
+        let signature = signature.finish();
+
+        let diff = diff(remote_data.as_bytes(), &signature);
+        assert_eq!(diff.segments(), []);
+    }
 }
