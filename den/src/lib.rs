@@ -290,7 +290,7 @@ impl Signature {
     /// # Panics
     ///
     /// Will panic if [`HashAlgorithm`] is of type `None*` and `block_size` isn't the same number.
-    pub fn with_algo(algo: HashAlgorithm, block_size: usize) -> SignatureBuilder {
+    pub fn with_algorithm(algo: HashAlgorithm, block_size: usize) -> SignatureBuilder {
         match algo {
             HashAlgorithm::None4 => assert_eq!(block_size, 4),
             HashAlgorithm::None8 => assert_eq!(block_size, 8),
@@ -494,7 +494,7 @@ mod tests {
             "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna.";
         // let remote_data = lorem_ipsum();
 
-        let mut signature = Signature::with_algo(HashAlgorithm::XXH3_64, 8);
+        let mut signature = Signature::with_algorithm(HashAlgorithm::XXH3_64, 8);
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
@@ -517,7 +517,7 @@ mod tests {
         // This is the data we want to get.
         let remote_data = lorem_ipsum();
 
-        let mut signature = Signature::with_algo(HashAlgorithm::Fnv, 4096);
+        let mut signature = Signature::with_algorithm(HashAlgorithm::XXH3_64, 4096);
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
@@ -529,7 +529,7 @@ mod tests {
         let local_data = lorem_ipsum().replace("Cras nec justo", "I don't know");
         // This is the data we want to get.
         let remote_data = lorem_ipsum();
-        let mut signature = Signature::with_algo(HashAlgorithm::None16, 16);
+        let mut signature = Signature::with_algorithm(HashAlgorithm::None16, 16);
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
