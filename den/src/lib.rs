@@ -45,6 +45,7 @@ macro_rules! hash_algorithm {
             )+
         }
         impl HashAlgorithm {
+            #[inline]
             fn builder(&self) -> HashBuilder {
                 match self {
                     $(
@@ -76,6 +77,7 @@ macro_rules! hash_builder {
         }
 
         impl HashBuilder {
+            #[inline]
             fn finish(self) -> HashResult {
                 match self {
                     $(
@@ -83,8 +85,8 @@ macro_rules! hash_builder {
                     )+
                 }
             }
+            #[inline]
             fn write(&mut self, data: &[u8]) {
-
                 match self {
                     $(
                         Self::$name(hasher) => hasher.write(data),
@@ -121,13 +123,26 @@ impl<const SIZE: usize> StackSlice<SIZE> {
     ///
     /// Panics if `data.len()` > [`Self::available`].
     #[allow(clippy::cast_possible_truncation)]
+    #[inline]
     fn write(&mut self, data: &[u8]) {
-        assert!(data.len() <= self.available());
-        self.data[self.len as usize..self.len as usize + data.len()].copy_from_slice(data);
+        // SAFETY: Needed for the block below.
+        assert!(
+            data.len() <= self.available(),
+            "Length ({}) is greater than what's available ({})",
+            data.len(),
+            self.available()
+        );
+        // SAFETY: We've checked above the guarantees hold up.
+        unsafe {
+            self.data
+                .get_unchecked_mut(self.len as usize..self.len as usize + data.len())
+        }
+        .copy_from_slice(data);
 
         // The assert above guarantees we never reach this point if the input is too large.
         self.len += data.len() as u8;
     }
+    #[inline]
     fn available(&self) -> usize {
         SIZE - self.len as usize
     }
@@ -309,9 +324,11 @@ pub enum Segment {
     Unknown(SegmentUnknown),
 }
 impl Segment {
+    #[inline]
     fn reference(data: &BlockData) -> Self {
         Self::Ref(SegmentRef { start: data.start })
     }
+    #[inline]
     fn unknown(data: &[u8]) -> Self {
         Self::Unknown(SegmentUnknown {
             source: data.to_vec(),
@@ -352,6 +369,15 @@ pub fn diff(data: &[u8], signature: &Signature) -> Difference {
 
     let block_size = signature.block_size();
 
+    // Special case 2: Signature contains no hashes.
+    // Just send the whole input.
+    if signature.blocks().is_empty() {
+        let data = Segment::unknown(data);
+        return Difference {
+            segments: vec![data],
+        };
+    }
+
     for (nr, block) in signature.blocks().iter().enumerate() {
         let bytes = block.to_bytes();
 
@@ -366,25 +392,32 @@ pub fn diff(data: &[u8], signature: &Signature) -> Difference {
     let mut segments = Vec::new();
     let mut last_ref = 0;
 
+    // Iterate over data, in windows. Find hash.
     while let Some(block) = blocks.next() {
+        // Special case 1: block size is larger than input.
+        // Just send the whole input.
+        if block_size > block.len() {
+            segments.push(Segment::unknown(&data[last_ref..]));
+            blocks.advance(block_size);
+            last_ref = data.len();
+            continue;
+        }
+
+        // let now = std::time::Instant::now();
         let mut hasher = signature.algorithm().builder();
         hasher.write(block);
         let hash = hasher.finish().to_bytes();
 
+        // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
         if let Some(block_data) = map.get(&hash) {
             test_unknown_data(data, last_ref, blocks.pos(), &mut segments);
 
             segments.push(Segment::reference(block_data));
-            println!("Block {:?}", std::str::from_utf8(block));
             blocks.advance(block.len() - 1);
             last_ref = blocks.pos();
         }
     }
 
-    // Iterate over data, in windows. Find hash.
-    //
-    // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
-    //
     // If we want them to get our diff, we send our diff, with the `Unknown`s filled with data.
     // Then, we only send references to their data and our new data.
     test_unknown_data(data, last_ref, blocks.pos() + 1, &mut segments);
@@ -462,7 +495,10 @@ mod tests {
         assert_eq!(diff.segments().len(), 8);
 
         let segment = &diff.segments()[3];
-        assert_eq!(segment, &Segment::unknown(b"et, consectetur adipiscing elit.".as_ref()));
+        assert_eq!(
+            segment,
+            &Segment::unknown(b"et, consectetur adipiscing elit.".as_ref())
+        );
     }
     #[test]
     fn block_size_larger_than_input() {
@@ -471,11 +507,22 @@ mod tests {
         // This is the data we want to get.
         let remote_data = lorem_ipsum();
 
-        let mut signature = Signature::with_algo(HashAlgorithm::XXH3_64, 4096);
+        let mut signature = Signature::with_algo(HashAlgorithm::Fnv, 4096);
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
         let diff = diff(remote_data.as_bytes(), &signature);
         assert_eq!(diff.segments().len(), 1);
+    }
+    #[test]
+    fn raw_bytes() {
+        let local_data = lorem_ipsum().replace("Cras nec justo", "I don't know");
+        // This is the data we want to get.
+        let remote_data = lorem_ipsum();
+        let mut signature = Signature::with_algo(HashAlgorithm::None16, 16);
+        signature.write(local_data.as_bytes());
+        let signature = signature.finish();
+
+        drop(diff(remote_data.as_bytes(), &signature));
     }
 }
