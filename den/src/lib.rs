@@ -286,7 +286,17 @@ impl Signature {
     /// Larger `block_size`s will take more time to compute, but will be more secure.
     /// Smaller `block_size`s takes less time to compute, are less secure, and require sending more
     /// data in the [`Signature`], as more blocks are sent.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if [`HashAlgorithm`] is of type `None*` and `block_size` isn't the same number.
     pub fn with_algo(algo: HashAlgorithm, block_size: usize) -> SignatureBuilder {
+        match algo {
+            HashAlgorithm::None4 => assert_eq!(block_size, 4),
+            HashAlgorithm::None8 => assert_eq!(block_size, 8),
+            HashAlgorithm::None16 => assert_eq!(block_size, 16),
+            _ => {}
+        }
         SignatureBuilder::new(algo).with_block_size(block_size)
     }
 
