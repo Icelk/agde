@@ -316,11 +316,40 @@ impl Signature {
 struct BlockData {
     start: usize,
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[must_use]
 pub struct SegmentRef {
     /// Start of segment with a length of the [`Signature::block_size`].
     start: usize,
+}
+/// Several [`SegmentRef`] after each other.
+///
+/// This is a separate struct to limit serialized size.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[must_use]
+pub struct SegmentBlockRef {
+    /// Start of segment with a length of [`Self::block_count`]*[`Signature::block_size`].
+    start: usize,
+    block_count: usize,
+}
+impl SegmentBlockRef {
+    #[inline]
+    fn extend(&mut self, n: usize) {
+        self.block_count += n;
+    }
+    #[inline]
+    fn end(&self, block_size: usize) -> usize {
+        self.start + self.block_count * block_size
+    }
+}
+impl From<SegmentRef> for SegmentBlockRef {
+    #[inline]
+    fn from(ref_segment: SegmentRef) -> Self {
+        SegmentBlockRef {
+            start: ref_segment.start,
+            block_count: 1,
+        }
+    }
 }
 #[derive(Debug, PartialEq, Eq)]
 #[must_use]
@@ -331,6 +360,7 @@ pub struct SegmentUnknown {
 #[must_use]
 pub enum Segment {
     Ref(SegmentRef),
+    BlockRef(SegmentBlockRef),
     Unknown(SegmentUnknown),
 }
 impl Segment {
@@ -422,7 +452,32 @@ pub fn diff(data: &[u8], signature: &Signature) -> Difference {
         if let Some(block_data) = map.get(&hash) {
             test_unknown_data(data, last_ref, blocks.pos(), &mut segments);
 
-            segments.push(Segment::reference(block_data));
+            if let Some(last) = segments.last_mut() {
+                match last {
+                    Segment::Ref(ref_segment) => {
+                        if block_data.start == ref_segment.start + block_size {
+                            let mut segment: SegmentBlockRef = (*ref_segment).into();
+                            segment.extend(1);
+                            *last = Segment::BlockRef(segment);
+                        } else {
+                            segments.push(Segment::reference(block_data));
+                        }
+                    }
+                    Segment::BlockRef(block_ref_segment) => {
+                        if block_data.start == block_ref_segment.end(block_size) {
+                            block_ref_segment.extend(1);
+                        } else {
+                            segments.push(Segment::reference(block_data));
+                        }
+                    }
+                    Segment::Unknown(_) => {
+                        segments.push(Segment::reference(block_data));
+                    }
+                }
+            } else {
+                segments.push(Segment::reference(block_data));
+            }
+
             blocks.advance(block.len() - 1);
             last_ref = blocks.pos();
         }
@@ -502,9 +557,9 @@ mod tests {
         let diff = diff(remote_data.as_bytes(), &signature);
         println!("Segments {:#?}", diff.segments());
         println!("Took {:?}", now.elapsed());
-        assert_eq!(diff.segments().len(), 8);
+        assert_eq!(diff.segments().len(), 4);
 
-        let segment = &diff.segments()[3];
+        let segment = &diff.segments()[1];
         assert_eq!(
             segment,
             &Segment::unknown(b"et, consectetur adipiscing elit.".as_ref())
