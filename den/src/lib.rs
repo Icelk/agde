@@ -1,4 +1,25 @@
 //! A difference library similar to `rsync`.
+//!
+//! # Performance
+//!
+//! This library (for now) does not use a rolling hash algorithm, but use the theory.
+//! This is performant enough for like files and files under 10MiB.
+//! Please compile with the **release** preset for **10X** the performance.
+//!
+//! Allocating data and keeping it in memory is very fast compared to hashing.
+//! The reason to move to more readers is for memory space.
+//! Even then, the implementation could abstract the file system to give this library only 64KiB chunks.
+//!
+//! # Future improvements
+//!
+//! - [ ] Rolling hash
+//! - [ ] Multi-threaded [`diff`]
+//! - [ ] Support read/write
+//!     - [ ] Support to diff a reader
+//!     - [ ] Support to apply to a writer
+//!     - [ ] Fetch API for apply to get data on demand.
+//!         - This could slow things down dramatically.
+//!     - [ ] Implement Write for [`HashBuilder`].
 
 #![deny(
     clippy::pedantic,
@@ -324,7 +345,7 @@ pub struct SegmentRef {
 }
 impl SegmentRef {
     #[inline]
-    fn end(&self, block_size: usize) -> usize {
+    fn end(self, block_size: usize) -> usize {
         self.start + block_size
     }
 }
@@ -344,7 +365,7 @@ impl SegmentBlockRef {
         self.block_count += n;
     }
     #[inline]
-    fn end(&self, block_size: usize) -> usize {
+    fn end(self, block_size: usize) -> usize {
         self.start + self.block_count * block_size
     }
 }
@@ -556,12 +577,21 @@ pub enum ApplyError {
 /// # Security
 ///
 /// The `diff` should be sanitized if input is suspected to be malicious.
+///
+/// # Errors
+///
+/// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
 pub fn apply(base: &[u8], diff: &Difference, out: &mut Vec<u8>) -> Result<(), ApplyError> {
     fn extend_vec_slice<T: Copy>(vec: &mut Vec<T>, slice: &[T]) {
+        // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
         vec.reserve(slice.len());
         let len = vec.len();
+        // SAFETY: We get uninitialized bytes and write to them. This is fine.
+        // The length is guaranteed to be allocated from above.
         let destination = unsafe { vec.get_unchecked_mut(len..len + slice.len()) };
         destination.copy_from_slice(slice);
+        // SAFETY: We set the length to that we've written to above.
+        unsafe { vec.set_len(vec.len() + slice.len()) };
     }
     use ApplyError::RefOutOfBounds as Roob;
     let block_size = diff.block_size();
