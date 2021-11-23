@@ -10,6 +10,26 @@
 //! The reason to move to more readers is for memory space.
 //! Even then, the implementation could abstract the file system to give this library only 64KiB chunks.
 //!
+//! # How-to
+//!
+//! Keep in mind this isn't guaranteed to give the exact same data.
+//! Please check the data with for example SHA-3 to ensure consistency.
+//!
+//! ## Get a remote's data
+//!
+//! To get someone else's data, we construct a [`Signature`] and send it.
+//! The remote [calculates](diff) a [`Difference`] using the `Signature`.
+//! The remote sends back the [`Difference`] which we [`apply`].
+//!
+//! ## Push my data to remote
+//!
+//! > This is what `rsync` does.
+//!
+//! Send to the remote the request of their [`Signature`].
+//! They calculate it and send it back.
+//! We calculate a [`diff`] and send it to them.
+//! They [`apply`] it. Their data should now be equal to mine.
+//!
 //! # Future improvements
 //!
 //! - [ ] Rolling hash
