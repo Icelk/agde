@@ -322,6 +322,12 @@ pub struct SegmentRef {
     /// Start of segment with a length of the [`Signature::block_size`].
     start: usize,
 }
+impl SegmentRef {
+    #[inline]
+    fn end(&self, block_size: usize) -> usize {
+        self.start + block_size
+    }
+}
 /// Several [`SegmentRef`] after each other.
 ///
 /// This is a separate struct to limit serialized size.
@@ -379,6 +385,7 @@ impl Segment {
 #[must_use]
 pub struct Difference {
     segments: Vec<Segment>,
+    block_size: usize,
 }
 impl Difference {
     /// Returns a reference to all the internal [`Segment`]s.
@@ -388,6 +395,11 @@ impl Difference {
     /// > `agde` uses this to convert from this format to their `Section` style.
     pub fn segments(&self) -> &[Segment] {
         &self.segments
+    }
+    /// The block size used by this diff.
+    #[must_use]
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 }
 
@@ -415,6 +427,7 @@ pub fn diff(data: &[u8], signature: &Signature) -> Difference {
         let data = Segment::unknown(data);
         return Difference {
             segments: vec![data],
+            block_size,
         };
     }
 
@@ -487,7 +500,10 @@ pub fn diff(data: &[u8], signature: &Signature) -> Difference {
     // Then, we only send references to their data and our new data.
     test_unknown_data(data, last_ref, blocks.pos() + 1, &mut segments);
 
-    Difference { segments }
+    Difference {
+        segments,
+        block_size,
+    }
 }
 
 struct Blocks<'a, T> {
@@ -530,6 +546,51 @@ impl<'a> Iterator for Blocks<'a, u8> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApplyError {
+    RefOutOfBounds,
+}
+
+/// Apply `diff` to the `base` data base, appending the result to `out`.
+///
+/// # Security
+///
+/// The `diff` should be sanitized if input is suspected to be malicious.
+pub fn apply(base: &[u8], diff: &Difference, out: &mut Vec<u8>) -> Result<(), ApplyError> {
+    fn extend_vec_slice<T: Copy>(vec: &mut Vec<T>, slice: &[T]) {
+        vec.reserve(slice.len());
+        let len = vec.len();
+        let destination = unsafe { vec.get_unchecked_mut(len..len + slice.len()) };
+        destination.copy_from_slice(slice);
+    }
+    use ApplyError::RefOutOfBounds as Roob;
+    let block_size = diff.block_size();
+    for segment in diff.segments() {
+        match segment {
+            Segment::Ref(ref_segment) => {
+                let start = ref_segment.start;
+                let end = ref_segment.end(block_size);
+
+                let data = base.get(start..end).ok_or(Roob)?;
+                extend_vec_slice(out, data);
+            }
+            Segment::BlockRef(block_ref_segment) => {
+                let start = block_ref_segment.start;
+                let end = block_ref_segment.end(block_size);
+
+                let data = base.get(start..end).ok_or(Roob)?;
+                extend_vec_slice(out, data);
+            }
+            Segment::Unknown(unknown_segment) => {
+                let data = &unknown_segment.source;
+                extend_vec_slice(out, data);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,13 +602,11 @@ mod tests {
     #[test]
     fn difference() {
         // This is the data we have
-        // let local_data = lorem_ipsum().replace("Cras nec justo", "I don't know");
         let local_data =
             "Lorem ipsum dolor sit amet, don't really know Rust elit. Cras nec justo eu magna.";
         // This is the data we want to get.
         let remote_data =
             "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna.";
-        // let remote_data = lorem_ipsum();
 
         let mut signature = Signature::with_algorithm(HashAlgorithm::XXH3_64, 8);
         signature.write(local_data.as_bytes());
@@ -601,5 +660,22 @@ mod tests {
 
         let diff = diff(remote_data.as_bytes(), &signature);
         assert_eq!(diff.segments(), []);
+    }
+    #[test]
+    fn sync() {
+        let local_data =
+            "Lorem ipsum dolor sit amet, don't really know Rust elit. Cras nec justo eu magna.";
+        let remote_data =
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna.";
+
+        let mut signature = Signature::with_algorithm(HashAlgorithm::XXH3_64, 8);
+        signature.write(local_data.as_bytes());
+        let signature = signature.finish();
+
+        let diff = diff(remote_data.as_bytes(), &signature);
+
+        let mut out = Vec::new();
+        apply(local_data.as_bytes(), &diff, &mut out).unwrap();
+        assert_eq!(&out, remote_data.as_bytes());
     }
 }
