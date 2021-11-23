@@ -25,7 +25,7 @@
     clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
-    // missing_docs
+    missing_docs
 )]
 
 use serde::{Deserialize, Serialize};
@@ -58,8 +58,10 @@ macro_rules! hash_algorithm {
             ),
         )+
     ) => {
+        /// The algorithms which can be used for hashing the data.
         #[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize, Serialize)]
         #[must_use]
+        #[allow(missing_docs)]
         pub enum HashAlgorithm {
             $(
                 $name,
@@ -230,6 +232,10 @@ const fn zeroed<const SIZE: usize>() -> [u8; SIZE] {
     [0; SIZE]
 }
 
+/// Builder of a [`Signature`].
+/// Created using [`Signature::new`];
+///
+/// You [`Self::write`] data and then [`Self::finish`] to get a [`Signature`].
 #[derive(Debug)]
 #[must_use]
 pub struct SignatureBuilder {
@@ -261,6 +267,9 @@ impl SignatureBuilder {
         self.blocks.push(result);
         self.len = 0;
     }
+    /// Appends data to the hasher.
+    ///
+    /// This can be called multiple times to write the resource bit-by-bit.
     pub fn write(&mut self, data: &[u8]) {
         let mut data = data;
 
@@ -279,6 +288,7 @@ impl SignatureBuilder {
         self.block_size = block_size;
         self
     }
+    /// Flushes the data from [`Self::write`] and prepares a [`Signature`].
     pub fn finish(mut self) -> Signature {
         self.finish_hash();
 
@@ -296,6 +306,9 @@ impl SignatureBuilder {
         }
     }
 }
+/// A identifier of a file, much smaller than the file itself.
+///
+/// See [crate-level documentation](crate) for more details.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[must_use]
 pub struct Signature {
@@ -321,9 +334,11 @@ impl Signature {
         SignatureBuilder::new(algo).with_block_size(block_size)
     }
 
+    /// Get the algorithm used by this signature.
     pub fn algorithm(&self) -> HashAlgorithm {
         self.algo
     }
+    /// Returns the block size of this signature.
     #[must_use]
     pub fn block_size(&self) -> usize {
         self.block_size
@@ -337,6 +352,10 @@ impl Signature {
 struct BlockData {
     start: usize,
 }
+/// A segment with a reference to the base data.
+///
+/// Use [`SegmentBlockRef`] if several blocks in succession reference the same successive data in
+/// the base data.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[must_use]
 pub struct SegmentRef {
@@ -378,16 +397,28 @@ impl From<SegmentRef> for SegmentBlockRef {
         }
     }
 }
+/// A segment with unknown contents. This will transmit the data.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub struct SegmentUnknown {
     source: Vec<u8>,
 }
+impl SegmentUnknown {
+    /// Gets a reference to the data transmitted.
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
+        &self.source
+    }
+}
+/// A segment of data corresponding to a multiple of [`Difference::block_size`].
 #[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub enum Segment {
+    /// A reference to a block of data.
     Ref(SegmentRef),
+    /// Reference to successive blocks of data.
     BlockRef(SegmentBlockRef),
+    /// Data unknown to the one who sent the [`Signature`].
     Unknown(SegmentUnknown),
 }
 impl Segment {
@@ -402,6 +433,7 @@ impl Segment {
         })
     }
 }
+/// A delta between the local data and the data the [`Signature`] represents.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use]
 pub struct Difference {
@@ -424,6 +456,10 @@ impl Difference {
     }
 }
 
+/// Get the [`Difference`] between the data the [`Signature`] represents and the local `data`.
+///
+/// This will return a struct which when serialized (using e.g. `bincode`) is much smaller than
+/// `data`.
 pub fn diff(data: &[u8], signature: &Signature) -> Difference {
     #[allow(clippy::inline_always)]
     #[inline(always)]
@@ -567,8 +603,13 @@ impl<'a> Iterator for Blocks<'a, u8> {
     }
 }
 
+/// An error during [`apply`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApplyError {
+    /// The reference is out of bounds.
+    ///
+    /// The data might be malicious or corrupted or the `base` data has changed from calling
+    /// [`Signature::new`] and [`apply`].
     RefOutOfBounds,
 }
 
