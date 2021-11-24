@@ -655,8 +655,8 @@ impl<'a, T> Blocks<'a, T> {
         std::cmp::min(self.pos, self.slice.len())
     }
 }
-impl<'a> Iterator for Blocks<'a, u8> {
-    type Item = &'a [u8];
+impl<'a, T> Iterator for Blocks<'a, T> {
+    type Item = &'a [T];
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos + 1 > self.slice.len() {
