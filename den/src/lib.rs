@@ -18,8 +18,8 @@
 //! ## Get a remote's data
 //!
 //! To get someone else's data, we construct a [`Signature`] and send it.
-//! The remote [calculates](diff) a [`Difference`] using the `Signature`.
-//! The remote sends back the [`Difference`] which we [`apply`].
+//! The remote calculates a [`Difference`] using [`Signature::diff`].
+//! The remote sends back the [`Difference`] which we [`Difference::apply`].
 //!
 //! ## Push my data to remote
 //!
@@ -27,19 +27,19 @@
 //!
 //! Send to the remote the request of their [`Signature`].
 //! They calculate it and send it back.
-//! We calculate a [`diff`] and send it to them.
-//! They [`apply`] it. Their data should now be equal to mine.
+//! We calculate a [`Signature::diff`] and send it to them.
+//! They [`Difference::apply`] it. Their data should now be equal to mine.
 //!
 //! # Future improvements
 //!
 //! - [ ] Rolling hash
-//! - [ ] Multi-threaded [`diff`]
+//! - [ ] Multi-threaded [`Signature::diff`]
 //! - [ ] Support read/write
 //!     - [ ] Support to diff a reader
 //!     - [ ] Support to apply to a writer
 //!     - [ ] Fetch API for apply to get data on demand.
 //!         - This could slow things down dramatically.
-//!     - [ ] Implement Write for [`HashBuilder`].
+//!     - [ ] Implement Write for `HashBuilder`.
 
 #![deny(
     clippy::pedantic,
@@ -253,7 +253,7 @@ const fn zeroed<const SIZE: usize>() -> [u8; SIZE] {
 }
 
 /// Builder of a [`Signature`].
-/// Created using [`Signature::new`];
+/// Created using constructors on [`Signature`] (e.g. [`Signature::with_algorithm`]);
 ///
 /// You [`Self::write`] data and then [`Self::finish`] to get a [`Signature`].
 #[derive(Debug)]
@@ -570,7 +570,7 @@ pub struct Difference {
 impl Difference {
     /// Returns a reference to all the internal [`Segment`]s.
     ///
-    /// This can be used for implementing algorithms other than [`apply`] to apply the data.
+    /// This can be used for implementing algorithms other than [`Self::apply`] to apply the data.
     ///
     /// > `agde` uses this to convert from this format to their `Section` style.
     pub fn segments(&self) -> &[Segment] {
@@ -672,13 +672,13 @@ impl<'a> Iterator for Blocks<'a, u8> {
     }
 }
 
-/// An error during [`apply`].
+/// An error during [`Difference::apply`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApplyError {
     /// The reference is out of bounds.
     ///
-    /// The data might be malicious or corrupted or the `base` data has changed from calling
-    /// [`Signature::new`] and [`apply`].
+    /// The data might be malicious or corrupted or the `base` data has changed from constructing
+    /// [`Signature`] and [`Difference::apply`].
     RefOutOfBounds,
 }
 
