@@ -363,8 +363,115 @@ impl Signature {
     pub fn block_size(&self) -> usize {
         self.block_size
     }
+    /// Gets the hashes for all the blocks of the input resource.
     pub(crate) fn blocks(&self) -> &[HashResult] {
         &self.blocks
+    }
+
+    /// Get the [`Difference`] between the data the [`Signature`] represents and the local `data`.
+    ///
+    /// This will return a struct which when serialized (using e.g. `bincode`) is much smaller than
+    /// `data`.
+    pub fn diff(&self, data: &[u8]) -> Difference {
+        #[allow(clippy::inline_always)]
+        #[inline(always)]
+        fn check_unknown_data(
+            data: &[u8],
+            last_ref: usize,
+            blocks_pos: usize,
+            segments: &mut Vec<Segment>,
+        ) {
+            let unknown_data = &data[last_ref..blocks_pos - 1];
+            if !unknown_data.is_empty() {
+                segments.push(Segment::unknown(unknown_data));
+            }
+        }
+        let mut map = BTreeMap::new();
+
+        let block_size = self.block_size();
+
+        // Special case 2: Signature contains no hashes.
+        // Just send the whole input.
+        if self.blocks().is_empty() {
+            let data = Segment::unknown(data);
+            return Difference {
+                segments: vec![data],
+                block_size,
+            };
+        }
+
+        for (nr, block) in self.blocks().iter().enumerate() {
+            let bytes = block.to_bytes();
+
+            let start = nr * block_size;
+            let block_data = BlockData { start };
+
+            map.insert(bytes, block_data);
+        }
+
+        let mut blocks = Blocks::new(data, self.block_size());
+
+        let mut segments = Vec::new();
+        let mut last_ref = 0;
+
+        // Iterate over data, in windows. Find hash.
+        while let Some(block) = blocks.next() {
+            // Special case 1: block size is larger than input.
+            // Just send the whole input.
+            if block_size > block.len() {
+                segments.push(Segment::unknown(&data[last_ref..]));
+                blocks.advance(block_size);
+                last_ref = data.len();
+                continue;
+            }
+
+            let mut hasher = self.algorithm().builder();
+            hasher.write(block);
+            let hash = hasher.finish().to_bytes();
+
+            // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
+            if let Some(block_data) = map.get(&hash) {
+                check_unknown_data(data, last_ref, blocks.pos(), &mut segments);
+
+                if let Some(last) = segments.last_mut() {
+                    match last {
+                        Segment::Ref(ref_segment) => {
+                            if block_data.start == ref_segment.start + block_size {
+                                let mut segment: SegmentBlockRef = (*ref_segment).into();
+                                segment.extend(1);
+                                *last = Segment::BlockRef(segment);
+                            } else {
+                                segments.push(Segment::reference(block_data));
+                            }
+                        }
+                        Segment::BlockRef(block_ref_segment) => {
+                            if block_data.start == block_ref_segment.end(block_size) {
+                                block_ref_segment.extend(1);
+                            } else {
+                                segments.push(Segment::reference(block_data));
+                            }
+                        }
+                        Segment::Unknown(_) => {
+                            segments.push(Segment::reference(block_data));
+                        }
+                    }
+                } else {
+                    segments.push(Segment::reference(block_data));
+                }
+
+                blocks.advance(block.len() - 1);
+                last_ref = blocks.pos();
+            }
+        }
+
+        // If we want them to get our diff, we send our diff, with the `Unknown`s filled with data.
+        // Then, we only send references to their data and our new data.
+        check_unknown_data(data, last_ref, blocks.pos() + 1, &mut segments);
+
+        Difference {
+            segments,
+            block_size,
+        }
     }
 }
 
@@ -474,112 +581,54 @@ impl Difference {
     pub fn block_size(&self) -> usize {
         self.block_size
     }
-}
 
-/// Get the [`Difference`] between the data the [`Signature`] represents and the local `data`.
-///
-/// This will return a struct which when serialized (using e.g. `bincode`) is much smaller than
-/// `data`.
-pub fn diff(data: &[u8], signature: &Signature) -> Difference {
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    fn test_unknown_data(
-        data: &[u8],
-        last_ref: usize,
-        blocks_pos: usize,
-        segments: &mut Vec<Segment>,
-    ) {
-        let unknown_data = &data[last_ref..blocks_pos - 1];
-        if !unknown_data.is_empty() {
-            segments.push(Segment::unknown(unknown_data));
+    /// Apply `diff` to the `base` data base, appending the result to `out`.
+    ///
+    /// # Security
+    ///
+    /// The `diff` should be sanitized if input is suspected to be malicious.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
+    pub fn apply(&self, base: &[u8], out: &mut Vec<u8>) -> Result<(), ApplyError> {
+        fn extend_vec_slice<T: Copy>(vec: &mut Vec<T>, slice: &[T]) {
+            // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
+            vec.reserve(slice.len());
+            let len = vec.len();
+            // SAFETY: We get uninitialized bytes and write to them. This is fine.
+            // The length is guaranteed to be allocated from above.
+            let destination = unsafe { vec.get_unchecked_mut(len..len + slice.len()) };
+            destination.copy_from_slice(slice);
+            // SAFETY: We set the length to that we've written to above.
+            unsafe { vec.set_len(vec.len() + slice.len()) };
         }
-    }
-    let mut map = BTreeMap::new();
+        use ApplyError::RefOutOfBounds as Roob;
+        let block_size = self.block_size();
+        for segment in self.segments() {
+            match segment {
+                Segment::Ref(ref_segment) => {
+                    let start = ref_segment.start;
+                    let end = ref_segment.end(block_size);
 
-    let block_size = signature.block_size();
-
-    // Special case 2: Signature contains no hashes.
-    // Just send the whole input.
-    if signature.blocks().is_empty() {
-        let data = Segment::unknown(data);
-        return Difference {
-            segments: vec![data],
-            block_size,
-        };
-    }
-
-    for (nr, block) in signature.blocks().iter().enumerate() {
-        let bytes = block.to_bytes();
-
-        let start = nr * block_size;
-        let block_data = BlockData { start };
-
-        map.insert(bytes, block_data);
-    }
-
-    let mut blocks = Blocks::new(data, signature.block_size());
-
-    let mut segments = Vec::new();
-    let mut last_ref = 0;
-
-    // Iterate over data, in windows. Find hash.
-    while let Some(block) = blocks.next() {
-        // Special case 1: block size is larger than input.
-        // Just send the whole input.
-        if block_size > block.len() {
-            segments.push(Segment::unknown(&data[last_ref..]));
-            blocks.advance(block_size);
-            last_ref = data.len();
-            continue;
-        }
-
-        // let now = std::time::Instant::now();
-        let mut hasher = signature.algorithm().builder();
-        hasher.write(block);
-        let hash = hasher.finish().to_bytes();
-
-        // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
-        if let Some(block_data) = map.get(&hash) {
-            test_unknown_data(data, last_ref, blocks.pos(), &mut segments);
-
-            if let Some(last) = segments.last_mut() {
-                match last {
-                    Segment::Ref(ref_segment) => {
-                        if block_data.start == ref_segment.start + block_size {
-                            let mut segment: SegmentBlockRef = (*ref_segment).into();
-                            segment.extend(1);
-                            *last = Segment::BlockRef(segment);
-                        } else {
-                            segments.push(Segment::reference(block_data));
-                        }
-                    }
-                    Segment::BlockRef(block_ref_segment) => {
-                        if block_data.start == block_ref_segment.end(block_size) {
-                            block_ref_segment.extend(1);
-                        } else {
-                            segments.push(Segment::reference(block_data));
-                        }
-                    }
-                    Segment::Unknown(_) => {
-                        segments.push(Segment::reference(block_data));
-                    }
+                    let data = base.get(start..end).ok_or(Roob)?;
+                    extend_vec_slice(out, data);
                 }
-            } else {
-                segments.push(Segment::reference(block_data));
+                Segment::BlockRef(block_ref_segment) => {
+                    let start = block_ref_segment.start;
+                    let end = block_ref_segment.end(block_size);
+
+                    let data = base.get(start..end).ok_or(Roob)?;
+                    extend_vec_slice(out, data);
+                }
+                Segment::Unknown(unknown_segment) => {
+                    let data = &unknown_segment.source;
+                    extend_vec_slice(out, data);
+                }
             }
-
-            blocks.advance(block.len() - 1);
-            last_ref = blocks.pos();
         }
-    }
 
-    // If we want them to get our diff, we send our diff, with the `Unknown`s filled with data.
-    // Then, we only send references to their data and our new data.
-    test_unknown_data(data, last_ref, blocks.pos() + 1, &mut segments);
-
-    Difference {
-        segments,
-        block_size,
+        Ok(())
     }
 }
 
@@ -633,55 +682,6 @@ pub enum ApplyError {
     RefOutOfBounds,
 }
 
-/// Apply `diff` to the `base` data base, appending the result to `out`.
-///
-/// # Security
-///
-/// The `diff` should be sanitized if input is suspected to be malicious.
-///
-/// # Errors
-///
-/// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
-pub fn apply(base: &[u8], diff: &Difference, out: &mut Vec<u8>) -> Result<(), ApplyError> {
-    fn extend_vec_slice<T: Copy>(vec: &mut Vec<T>, slice: &[T]) {
-        // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
-        vec.reserve(slice.len());
-        let len = vec.len();
-        // SAFETY: We get uninitialized bytes and write to them. This is fine.
-        // The length is guaranteed to be allocated from above.
-        let destination = unsafe { vec.get_unchecked_mut(len..len + slice.len()) };
-        destination.copy_from_slice(slice);
-        // SAFETY: We set the length to that we've written to above.
-        unsafe { vec.set_len(vec.len() + slice.len()) };
-    }
-    use ApplyError::RefOutOfBounds as Roob;
-    let block_size = diff.block_size();
-    for segment in diff.segments() {
-        match segment {
-            Segment::Ref(ref_segment) => {
-                let start = ref_segment.start;
-                let end = ref_segment.end(block_size);
-
-                let data = base.get(start..end).ok_or(Roob)?;
-                extend_vec_slice(out, data);
-            }
-            Segment::BlockRef(block_ref_segment) => {
-                let start = block_ref_segment.start;
-                let end = block_ref_segment.end(block_size);
-
-                let data = base.get(start..end).ok_or(Roob)?;
-                extend_vec_slice(out, data);
-            }
-            Segment::Unknown(unknown_segment) => {
-                let data = &unknown_segment.source;
-                extend_vec_slice(out, data);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,7 +704,7 @@ mod tests {
         let signature = signature.finish();
 
         let now = std::time::Instant::now();
-        let diff = diff(remote_data.as_bytes(), &signature);
+        let diff = signature.diff(remote_data.as_bytes());
         println!("Segments {:#?}", diff.segments());
         println!("Took {:?}", now.elapsed());
         assert_eq!(diff.segments().len(), 4);
@@ -726,7 +726,7 @@ mod tests {
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
-        let diff = diff(remote_data.as_bytes(), &signature);
+        let diff = signature.diff(remote_data.as_bytes());
         assert_eq!(diff.segments().len(), 1);
     }
     #[test]
@@ -738,7 +738,7 @@ mod tests {
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
-        drop(diff(remote_data.as_bytes(), &signature));
+        drop(signature.diff(remote_data.as_bytes()));
     }
     #[test]
     fn empty() {
@@ -749,7 +749,7 @@ mod tests {
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
-        let diff = diff(remote_data.as_bytes(), &signature);
+        let diff = signature.diff(remote_data.as_bytes());
         assert_eq!(diff.segments(), []);
     }
     #[test]
@@ -763,10 +763,10 @@ mod tests {
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
-        let diff = diff(remote_data.as_bytes(), &signature);
+        let diff = signature.diff(remote_data.as_bytes());
 
         let mut out = Vec::new();
-        apply(local_data.as_bytes(), &diff, &mut out).unwrap();
+        diff.apply(local_data.as_bytes(), &mut out).expect("Failed to apply good diff.");
         assert_eq!(&out, remote_data.as_bytes());
     }
 }
