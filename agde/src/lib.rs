@@ -401,8 +401,8 @@ impl VecSection {
     /// Creates a new section representing the entire resource.
     ///
     /// Useful to use when passing data for [`ModifyEvent::new`] to diff.
-    pub fn whole_resource(data: Vec<u8>) -> Self {
-        Self::new(0, usize::MAX, data)
+    pub fn whole_resource(resource_len: usize, data: Vec<u8>) -> Self {
+        Self::new(0, resource_len, data)
     }
 }
 impl DataSection for VecSection {
@@ -636,6 +636,14 @@ impl<S> Event<S> {
     #[inline]
     pub(crate) fn inner_mut(&mut self) -> &mut EventKind<S> {
         &mut self.kind
+    }
+    /// Gets the timestamp of this event.
+    ///
+    /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
+    #[inline]
+    #[must_use]
+    pub fn timestamp(&self) -> Duration {
+        self.timestamp
     }
 }
 /// Clones the `resource` [`String`].
@@ -954,15 +962,10 @@ impl Manager {
     pub fn apply_event<'a>(
         &'a mut self,
         event: &'a DatafulEvent,
-        timestamp: Duration,
         message_uuid: Uuid,
-        pos_in_event_message: usize,
     ) -> Result<log::EventApplier<'a, VecSection>, log::Error> {
-        self.event_log
-            .insert(event, timestamp, message_uuid, pos_in_event_message)?;
-        Ok(self
-            .event_log
-            .event_applier(event, message_uuid, pos_in_event_message))
+        self.event_log.insert(event, message_uuid)?;
+        Ok(self.event_log.event_applier(event, message_uuid))
     }
 }
 
@@ -981,12 +984,12 @@ mod tests {
 
             let event: Event<_> = ModifyEvent::new(
                 "test.txt".into(),
-                VecSection::new(0, 0, b"Some test data.".to_vec()),
+                vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
                 None,
             )
             .into();
 
-            let message = manager.process_event(event.into());
+            let message = manager.process_event(event);
 
             (message.clone().bin(), message.base64(), manager.uuid())
         };
@@ -1002,40 +1005,37 @@ mod tests {
         let mut receiver = manager();
 
         match message.inner() {
-            MessageKind::Event(ev_msg) => {
-                let mut events = ev_msg.event_iter();
-
-                // assert the only event is to modify `test.txt` with the same section as before.
+            MessageKind::Event(event) => {
+                // assert the event is to modify `test.txt` with the same section as before.
                 assert_eq!(
-                    events.next().map(Event::inner),
-                    Some(&EventKind::Modify(ModifyEvent::new(
+                    event.inner(),
+                    &EventKind::Modify(ModifyEvent::new(
                         "test.txt".into(),
-                        VecSection::new(0, 0, b"Some test data.".to_vec()),
+                        vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
                         None
-                    )))
+                    ))
                 );
-                assert_eq!(events.next(), None);
 
-                for (pos, event) in ev_msg.event_iter().enumerate() {
-                    let event_applier = receiver
-                        .apply_event(event, ev_msg.timestamp, message.uuid(), pos)
-                        .expect("Got event from future.");
-                    match event_applier.event().inner() {
-                        EventKind::Modify(ev) => {
-                            assert_eq!(event_applier.resource(), Some("test.txt"));
+                let event_applier = receiver
+                    .apply_event(event, message.uuid())
+                    .expect("Got event from future.");
+                match event_applier.event().inner() {
+                    EventKind::Modify(ev) => {
+                        assert_eq!(event_applier.resource(), Some("test.txt"));
 
-                            let mut test = Vec::new();
-                            ev.section().apply_len(&mut test, 0, b' ');
-
-                            let mut resource = SliceBuf::new(&mut test);
-                            resource.advance(0);
-
-                            event_applier
-                                .apply(&mut resource)
-                                .expect("Buffer too small!");
+                        let mut test = Vec::new();
+                        for section in ev.sections() {
+                            section.apply_len(&mut test, 0, b' ');
                         }
-                        _ => panic!("Wrong EventKind"),
+
+                        let mut resource = SliceBuf::new(&mut test);
+                        resource.advance(0);
+
+                        event_applier
+                            .apply(&mut resource)
+                            .expect("Buffer too small!");
                     }
+                    _ => panic!("Wrong EventKind"),
                 }
             }
             kind => {
@@ -1053,26 +1053,26 @@ mod tests {
             resource_len: &mut usize,
         ) {
             match message.inner() {
-                MessageKind::Event(ev_msg) => {
-                    for (pos, event) in ev_msg.event_iter().enumerate() {
-                        let event_applier = manager
-                            .apply_event(event, ev_msg.timestamp, message.uuid(), pos)
-                            .expect("Got event from future.");
-                        match event_applier.event().inner() {
-                            EventKind::Modify(ev) => {
-                                assert_eq!(ev.resource(), "private/secret.txt");
+                MessageKind::Event(event) => {
+                    let event_applier = manager
+                        .apply_event(event, message.uuid())
+                        .expect("Got event from future.");
+                    match event_applier.event().inner() {
+                        EventKind::Modify(ev) => {
+                            assert_eq!(ev.resource(), "private/secret.txt");
 
-                                ev.section().apply_len(resource, *resource_len, b' ');
-
-                                let mut buf = SliceBuf::new(resource);
-                                buf.set_filled(*resource_len);
-
-                                event_applier.apply(&mut buf).expect("Buffer too small!");
-
-                                *resource_len = buf.filled();
+                            for section in ev.sections() {
+                                section.apply_len(resource, *resource_len, b' ');
                             }
-                            _ => panic!("Wrong EventKind"),
+
+                            let mut buf = SliceBuf::new(resource);
+                            buf.set_filled(*resource_len);
+
+                            event_applier.apply(&mut buf).expect("Buffer too small!");
+
+                            *resource_len = buf.filled();
                         }
+                        _ => panic!("Wrong EventKind"),
                     }
                 }
                 kind => {
@@ -1085,25 +1085,22 @@ mod tests {
 
             let first_event = ModifyEvent::new(
                 "private/secret.txt".into(),
-                VecSection::new(0, 0, "Hello world!".into()),
+                vec![VecSection::new(0, 0, "Hello world!".into())],
                 None,
             )
             .into();
             let second_event = ModifyEvent::new(
                 "private/secret.txt".into(),
-                VecSection::new(6, 11, "friend".into()),
+                vec![VecSection::new(6, 11, "friend".into())],
                 None,
             )
             .into();
             (
-                sender.process_event(EventMessage::with_timestamp(
-                    vec![first_event],
+                sender.process_event(Event::with_timestamp(
+                    first_event,
                     SystemTime::now() - Duration::from_secs(10),
                 )),
-                sender.process_event(EventMessage::with_timestamp(
-                    vec![second_event],
-                    SystemTime::now(),
-                )),
+                sender.process_event(Event::with_timestamp(second_event, SystemTime::now())),
             )
         };
 

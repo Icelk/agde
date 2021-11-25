@@ -18,15 +18,10 @@ struct ReceivedEvent {
     timestamp: Duration,
     /// Message UUID.
     uuid: Uuid,
-    /// Order in [`EventMessage::events`]
-    ///
-    /// This will always be different if `timestamp` & `uuid` are the same.
-    /// This guarantees two [`ReceivedEvent`]s are never equal.
-    order: usize,
 }
 impl PartialEq for ReceivedEvent {
     fn eq(&self, other: &Self) -> bool {
-        self.timestamp == other.timestamp && self.uuid == other.uuid && self.order == other.order
+        self.timestamp == other.timestamp && self.uuid == other.uuid
     }
 }
 impl Eq for ReceivedEvent {}
@@ -40,10 +35,7 @@ impl Ord for ReceivedEvent {
         use std::cmp::Ordering::Equal;
 
         match self.timestamp.cmp(&other.timestamp) {
-            Equal => match self.uuid.cmp(&other.uuid) {
-                Equal => self.order.cmp(&other.order),
-                ord => ord,
-            },
+            Equal => self.uuid.cmp(&other.uuid),
             ord => ord,
         }
     }
@@ -98,15 +90,14 @@ impl EventLog {
     pub(crate) fn insert(
         &mut self,
         event: &Event<impl Section>,
-        timestamp: Duration,
         message_uuid: Uuid,
-        pos_in_event_message: usize,
     ) -> Result<(), Error> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
         // The timestamp is after now!
-        if (timestamp
+        if (event
+            .timestamp()
             .checked_sub(Duration::new(10, 0))
             .unwrap_or(Duration::ZERO))
         .checked_sub(now)
@@ -114,12 +105,12 @@ impl EventLog {
         {
             return Err(Error::EventInFuture);
         }
+        let timestamp = event.timestamp();
         let event = event.into();
         let received = ReceivedEvent {
             event,
             timestamp,
             uuid: message_uuid,
-            order: pos_in_event_message,
         };
         self.list.push(received);
         self.list.sort();
@@ -130,13 +121,11 @@ impl EventLog {
         &'a mut self,
         event: &'a Event<S>,
         message_uuid: Uuid,
-        pos_in_event_message: usize,
     ) -> EventApplier<'a, S> {
-        fn slice_start(log: &EventLog, resource: &str, uuid: Uuid, order: usize) -> usize {
+        fn slice_start(log: &EventLog, resource: &str, uuid: Uuid) -> usize {
             // `pos` is from the end of the list.
             for (pos, event) in log.list.iter().enumerate().rev() {
-                if event.uuid == uuid && event.order == order && event.event.resource() == resource
-                {
+                if event.uuid == uuid && event.event.resource() == resource {
                     // Match!
                     // Also takes the current event in the slice.
                     // ↑ is however not true for the backup return below.
@@ -161,12 +150,12 @@ impl EventLog {
             Some(resource)
         }
 
-        let slice_index = slice_start(self, event.resource(), message_uuid, pos_in_event_message);
+        let slice_index = slice_start(self, event.resource(), message_uuid);
 
         if let EventKind::Delete(delete_ev) = event.inner() {
             if let Some(successor) = delete_ev.successor() {
                 for received in &mut self.list[slice_index..] {
-                    if received.uuid == message_uuid && received.order == pos_in_event_message {
+                    if received.uuid == message_uuid {
                         continue;
                     }
 
