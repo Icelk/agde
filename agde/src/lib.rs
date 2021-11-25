@@ -435,9 +435,8 @@ pub struct ModifyEvent<S> {
 impl ModifyEvent<VecSection> {
     /// Calculates the diff if `source` is [`Some`].
     ///
-    /// # Panics
-    ///
-    /// `TODO`: implement diff
+    /// The sections **MUST NOT** overlap. That results in undefined logic and potentially
+    /// loss of data.
     pub fn new(resource: String, sections: Vec<VecSection>, base: Option<&[u8]>) -> Self {
         let mut sections = sections;
         if let Some(base) = base {
@@ -1105,11 +1104,60 @@ mod tests {
         );
 
         assert_eq!(&resource[..resource_len], b"Hello friend!");
-        // blocking on `TODO` about ev.section().additional()
-        // assert_eq!(resource_len, resource.len());
+        assert!((resource.len().saturating_sub(2)..resource_len + 2).contains(&resource_len));
     }
 
     // Test doing this ↑ but simplifying as it had previous data, stored how?
+
+    #[test]
+    fn basic_diff() {
+        let mut mgr = manager();
+
+        let event: Event<_> = ModifyEvent::new(
+            "diff.bin".into(),
+            vec![VecSection::whole_resource(0, b"Some test data. This test works, as the whole diff algorithm is written by me!".to_vec())],
+            Some(b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"),
+        )
+        .into();
+
+        let message = mgr.process_event(event);
+
+        let mut receiver = manager();
+
+        let mut test =
+            b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"
+                .to_vec();
+
+        match message.inner() {
+            MessageKind::Event(event) => {
+                let event_applier = receiver
+                    .apply_event(event, message.uuid())
+                    .expect("Got event from future.");
+                match event_applier.event().inner() {
+                    EventKind::Modify(ev) => {
+                        for section in ev.sections() {
+                            section.apply_len(&mut test, 0, b' ');
+                        }
+
+                        let mut resource = SliceBuf::new(&mut test);
+                        resource.advance(0);
+
+                        event_applier
+                            .apply(&mut resource)
+                            .expect("Buffer too small!");
+                    }
+                    _ => panic!("Wrong EventKind"),
+                }
+            }
+            kind => {
+                panic!("Got {:?}, but expected a Event!", kind);
+            }
+        }
+        assert_eq!(
+            test,
+            b"Some test data. This test works, as the whole diff algorithm is written by me!"
+        );
+    }
 
     // Test when the underlying data has changed without events; then this library is called again.
     // A special call to the library, which will request all the files, mtime & size to see which
