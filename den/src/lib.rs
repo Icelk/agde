@@ -278,7 +278,14 @@ impl SignatureBuilder {
             len: 0,
         }
     }
-    fn block_available(&self) -> usize {
+    /// Sets the block size of the hashes to be `block_size` bytes.
+    ///
+    /// The default is `1024`.
+    const fn with_block_size(mut self, block_size: usize) -> Self {
+        self.block_size = block_size;
+        self
+    }
+    const fn block_available(&self) -> usize {
         self.block_size - self.len
     }
     fn finish_hash(&mut self) {
@@ -300,13 +307,6 @@ impl SignatureBuilder {
             data = &data[self.block_available()..];
             self.finish_hash();
         }
-    }
-    /// Sets the block size of the hashes to be `block_size` bytes.
-    ///
-    /// The default is `1024`.
-    fn with_block_size(mut self, block_size: usize) -> Self {
-        self.block_size = block_size;
-        self
     }
     /// Flushes the data from [`Self::write`] and prepares a [`Signature`].
     pub fn finish(mut self) -> Signature {
@@ -369,23 +369,23 @@ impl Signature {
     /// # Panics
     ///
     /// Will panic if [`HashAlgorithm`] is of type `None*` and `block_size` isn't the same number.
-    pub fn with_algorithm(algo: HashAlgorithm, block_size: usize) -> SignatureBuilder {
-        match algo {
+    pub fn with_algorithm(algorithm: HashAlgorithm, block_size: usize) -> SignatureBuilder {
+        match algorithm {
             HashAlgorithm::None4 => assert_eq!(block_size, 4),
             HashAlgorithm::None8 => assert_eq!(block_size, 8),
             HashAlgorithm::None16 => assert_eq!(block_size, 16),
             _ => {}
         }
-        SignatureBuilder::new(algo).with_block_size(block_size)
+        SignatureBuilder::new(algorithm).with_block_size(block_size)
     }
 
     /// Get the algorithm used by this signature.
-    pub fn algorithm(&self) -> HashAlgorithm {
+    pub const fn algorithm(&self) -> HashAlgorithm {
         self.algo
     }
     /// Returns the block size of this signature.
     #[must_use]
-    pub fn block_size(&self) -> usize {
+    pub const fn block_size(&self) -> usize {
         self.block_size
     }
     /// Gets the hashes for all the blocks of the input resource.
@@ -535,6 +535,12 @@ impl SegmentBlockRef {
     fn extend(&mut self, n: usize) {
         self.block_count += n;
     }
+    /// Multiplies the count of blocks.
+    /// Can be useful if the block size changes.
+    #[inline]
+    fn multiply(&mut self, n: usize) {
+        self.block_count *= n;
+    }
     #[inline]
     fn end(self, block_size: usize) -> usize {
         self.start + self.block_count * block_size
@@ -550,7 +556,7 @@ impl From<SegmentRef> for SegmentBlockRef {
     }
 }
 /// A segment with unknown contents. This will transmit the data.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[must_use]
 pub struct SegmentUnknown {
     source: Vec<u8>,
@@ -603,10 +609,144 @@ impl Difference {
     }
     /// The block size used by this diff.
     #[must_use]
-    pub fn block_size(&self) -> usize {
+    pub const fn block_size(&self) -> usize {
         self.block_size
     }
 
+    /// Changes the block size to `block_size`, shrinking the [`Segment::Unknown`]s in the process.
+    /// This results in a smaller diff.
+    ///
+    /// # Errors
+    ///
+    /// tl;dr, you can [`Option::unwrap`] this if it comes straight from [`Signature::diff`] or
+    /// this very function. If it's untrusted data, handle the errors.
+    ///
+    /// Returns [`MinifyError::NewLarger`] if `block_size` > [`Self::block_size`] and
+    /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
+    /// [`MinifyError::SuccessiveUnknowns`] is returned if two [`Segment::Unknown`] are after
+    /// each other.
+    pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
+        fn push_segment(segments: &mut Vec<Segment>, item: Segment, block_size: usize) {
+            #[cold]
+            #[inline(never)]
+            fn unreachable_reference_segment() {
+                unreachable!("This function should only get BlockRef or Unknown. Report this bug.");
+            }
+            match item {
+                Segment::BlockRef(item) => {
+                    if let Some(last) = segments.last_mut() {
+                        match last {
+                            Segment::BlockRef(seg) => {
+                                if seg.end(block_size) == item.start {
+                                    // The previous end is this start.
+                                    seg.extend(item.block_count);
+                                }
+                            }
+                            Segment::Unknown(_) => segments.push(Segment::BlockRef(item)),
+                            Segment::Ref(_) => unreachable_reference_segment(),
+                        }
+                    }
+                }
+                Segment::Unknown(_) => segments.push(item),
+                Segment::Ref(_) => unreachable_reference_segment(),
+            }
+        }
+
+        if block_size < self.block_size() {
+            return Err(MinifyError::NewLarger);
+        }
+        let block_size_shrinkage = self.block_size() / block_size;
+        let block_size_shrinkage_remainder = self.block_size() % block_size;
+        if block_size_shrinkage_remainder != 0 {
+            return Err(MinifyError::NotMultiple);
+        }
+
+        // `self` can be applied to `base` to get `target`.
+        // We want to minify the `unknown` segments of `self`.
+
+        // Use heuristics to allocate what we have * 1.2, if any more segments are added.
+        // Since we are probably splitting Unknown segments into 3 parts,
+        let mut segments = Vec::with_capacity(self.segments().len() * 6 / 5);
+        for (last, current, next) in PrePostWindow::new(self.segments()) {
+            match current {
+                Segment::Ref(seg) => {
+                    let mut block_seg: SegmentBlockRef = (*seg).into();
+                    // Multiply all block lengths by `block_size_shrinkage` to make them the length
+                    // of new `block_size`.
+                    block_seg.multiply(block_size_shrinkage);
+                    push_segment(&mut segments, Segment::BlockRef(block_seg), block_size);
+                }
+                Segment::BlockRef(seg) => {
+                    let mut seg = *seg;
+                    seg.multiply(block_size_shrinkage);
+                    push_segment(&mut segments, Segment::BlockRef(seg), block_size);
+                }
+                Segment::Unknown(seg) => {
+                    let target_data = seg.data();
+                    let base_data = {
+                        // Start = previous end
+                        // end = next's start.
+                        // If it's a reference, that's start. Else, ~~simply the length of
+                        // `target_data`.~~ that shouldn't happen!
+                        //
+                        // Get a peek to the next segment.
+                        let start = if let Some(last) = last {
+                            match last {
+                                // Start = previous end
+                                // end = next's start.
+                                // If it's a reference, that's start. Else, simply the length of
+                                // `target_data`.
+                                Segment::Ref(seg) => seg.end(block_size),
+                                Segment::BlockRef(seg) => seg.end(block_size),
+                                // Improbable, two Unknowns can't be after each other.
+                                // Only through external modification of data.
+                                Segment::Unknown(_) => return Err(MinifyError::SuccessiveUnknowns),
+                            }
+                        } else {
+                            0
+                        };
+                        let mut end = match next {
+                            Some(Segment::Ref(seg)) => seg.start,
+                            Some(Segment::BlockRef(seg)) => seg.start,
+                            Some(Segment::Unknown(_)) => {
+                                return Err(MinifyError::SuccessiveUnknowns)
+                            }
+                            None => base.len(),
+                        };
+                        if end < start {
+                            end = start + seg.data().len();
+                        }
+                        end = std::cmp::min(end, base.len());
+
+                        base.get(start..end).map(|slice| (slice, start))
+                    };
+
+                    if let Some((base_data, start)) = base_data {
+                        let mut builder = Signature::new(block_size);
+                        builder.write(base_data);
+                        let signature = builder.finish();
+
+                        let diff = signature.diff(target_data);
+
+                        for mut segment in diff.segments {
+                            match &mut segment {
+                                Segment::Ref(seg) => seg.start += start,
+                                Segment::BlockRef(seg) => seg.start += start,
+                                Segment::Unknown(_) => {}
+                            }
+                            push_segment(&mut segments, segment, block_size);
+                        }
+                    } else {
+                        segments.push(Segment::Unknown(seg.clone()));
+                    }
+                }
+            }
+        }
+        Ok(Difference {
+            segments,
+            block_size,
+        })
+    }
     /// Apply `diff` to the `base` data base, appending the result to `out`.
     ///
     /// # Security
@@ -657,6 +797,27 @@ impl Difference {
     }
 }
 
+/// An error during [`Difference::minify`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum MinifyError {
+    /// New block size is larger than previous.
+    NewLarger,
+    /// Old block size is not a multiple of the new.
+    NotMultiple,
+    /// Successive unknown segments are not allowed and **SHOULD** never occur.
+    SuccessiveUnknowns,
+}
+
+/// An error during [`Difference::apply`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApplyError {
+    /// The reference is out of bounds.
+    ///
+    /// The data might be malicious or corrupted or the `base` data has changed from constructing
+    /// [`Signature`] and [`Difference::apply`].
+    RefOutOfBounds,
+}
+
 struct Blocks<'a, T> {
     slice: &'a [T],
     block_size: usize,
@@ -696,15 +857,24 @@ impl<'a, T> Iterator for Blocks<'a, T> {
         Some(&self.slice[start..end])
     }
 }
-
-/// An error during [`Difference::apply`].
-#[derive(Debug, PartialEq, Eq)]
-pub enum ApplyError {
-    /// The reference is out of bounds.
-    ///
-    /// The data might be malicious or corrupted or the `base` data has changed from constructing
-    /// [`Signature`] and [`Difference::apply`].
-    RefOutOfBounds,
+struct PrePostWindow<'a, T> {
+    slice: &'a [T],
+    pos: usize,
+}
+impl<'a, T> PrePostWindow<'a, T> {
+    fn new(slice: &'a [T]) -> Self {
+        Self { slice, pos: 0 }
+    }
+}
+impl<'a, T> Iterator for PrePostWindow<'a, T> {
+    type Item = (Option<&'a T>, &'a T, Option<&'a T>);
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.slice.get(self.pos)?;
+        let before = self.pos.checked_sub(1).and_then(|pos| self.slice.get(pos));
+        let after = self.slice.get(self.pos + 1);
+        self.pos += 1;
+        Some((before, current, after))
+    }
 }
 
 #[cfg(test)]
@@ -791,7 +961,8 @@ mod tests {
         let diff = signature.diff(remote_data.as_bytes());
 
         let mut out = Vec::new();
-        diff.apply(local_data.as_bytes(), &mut out).expect("Failed to apply good diff.");
+        diff.apply(local_data.as_bytes(), &mut out)
+            .expect("Failed to apply good diff.");
         assert_eq!(&out, remote_data.as_bytes());
     }
 }
