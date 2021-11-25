@@ -1012,4 +1012,37 @@ mod tests {
             .expect("Failed to apply good diff.");
         assert_eq!(&out, remote_data.as_bytes());
     }
+    #[test]
+    fn minify() {
+        // This is the data we have
+        let local_data = lorem_ipsum().replace("Cras nec justo", "I don't know");
+        // This is the data we want to get.
+        let remote_data = lorem_ipsum();
+
+        let mut signature = Signature::new(32);
+        signature.write(local_data.as_bytes());
+        let signature = signature.finish();
+        println!("Sig {:#?}", signature);
+
+        let diff = signature.diff(remote_data.as_bytes());
+        println!("Large diff {:#?}", diff);
+        let mut total = 0;
+        for seg in diff.segments() {
+            if let Segment::Unknown(seg) = seg {
+                total += seg.data().len();
+            }
+        }
+        assert_eq!(total, 66);
+        let diff = diff
+            .minify(4, local_data.as_bytes())
+            .expect("Failed to minify a correct diff.");
+        println!("Minified diff {:#?}", diff);
+        total = 0;
+        for seg in diff.segments() {
+            if let Segment::Unknown(seg) = seg {
+                total += seg.data().len();
+            }
+        }
+        assert_eq!(total, 18);
+    }
 }
