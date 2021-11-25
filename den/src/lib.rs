@@ -756,7 +756,7 @@ impl Difference {
                         if end < start {
                             end = start + seg.data().len();
                         }
-                        end = std::cmp::min(end, base.len());
+                        end = cmp::min(end, base.len());
 
                         base.get(start..end).map(|slice| (slice, start))
                     };
@@ -884,7 +884,7 @@ impl<'a, T> Blocks<'a, T> {
     /// Clamped to `slice.len()`.
     #[inline]
     fn pos(&self) -> usize {
-        std::cmp::min(self.pos, self.slice.len())
+        cmp::min(self.pos, self.slice.len())
     }
 }
 impl<'a, T> Iterator for Blocks<'a, T> {
@@ -896,7 +896,7 @@ impl<'a, T> Iterator for Blocks<'a, T> {
         }
 
         let start = self.pos;
-        let end = std::cmp::min(start + self.block_size, self.slice.len());
+        let end = cmp::min(start + self.block_size, self.slice.len());
 
         self.advance(1);
 
@@ -975,9 +975,10 @@ mod tests {
         let local_data = lorem_ipsum().replace("Cras nec justo", "I don't know");
         // This is the data we want to get.
         let remote_data = lorem_ipsum();
-        let mut signature = Signature::with_algorithm(HashAlgorithm::None16, 16);
+        let mut signature = Signature::new(16);
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
+        assert_eq!(signature.algorithm(), HashAlgorithm::None16);
 
         drop(signature.diff(remote_data.as_bytes()));
     }
@@ -986,7 +987,7 @@ mod tests {
         let local_data = "";
         // This is the data we want to get.
         let remote_data = "";
-        let mut signature = Signature::with_algorithm(HashAlgorithm::XXH3_64, 512);
+        let mut signature = Signature::new(512);
         signature.write(local_data.as_bytes());
         let signature = signature.finish();
 
