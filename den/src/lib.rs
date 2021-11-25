@@ -809,8 +809,14 @@ impl Difference {
 
                         for mut segment in diff.segments {
                             match &mut segment {
-                                Segment::Ref(seg) => seg.start += start,
-                                Segment::BlockRef(seg) => seg.start += start,
+                                Segment::Ref(seg) => {
+                                    seg.start += start;
+                                    segment = Segment::BlockRef((*seg).into());
+                                }
+                                Segment::BlockRef(seg) => {
+                                    seg.start += start;
+                                    seg.multiply(block_size);
+                                }
                                 Segment::Unknown(_) => {}
                             }
                             push_segment(&mut segments, segment, block_size);
