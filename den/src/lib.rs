@@ -363,10 +363,10 @@ impl Signature {
     #[allow(clippy::new_ret_no_self)] // This returns a builder.
     pub fn new(block_size: usize) -> SignatureBuilder {
         match block_size {
-            4 => Signature::with_algorithm(HashAlgorithm::None4, block_size),
-            8 => Signature::with_algorithm(HashAlgorithm::None8, block_size),
-            16 => Signature::with_algorithm(HashAlgorithm::None16, block_size),
-            0..=511 => Signature::with_algorithm(HashAlgorithm::XXH3_64, block_size),
+            0..=4 => Signature::with_algorithm(HashAlgorithm::None4, block_size),
+            5..=8 => Signature::with_algorithm(HashAlgorithm::None8, block_size),
+            9..=16 => Signature::with_algorithm(HashAlgorithm::None16, block_size),
+            17..=511 => Signature::with_algorithm(HashAlgorithm::XXH3_64, block_size),
             // 512..
             _ => Signature::with_algorithm(HashAlgorithm::XXH3_128, block_size),
         }
@@ -381,12 +381,15 @@ impl Signature {
     ///
     /// # Panics
     ///
-    /// Will panic if [`HashAlgorithm`] is of type `None*` and `block_size` isn't the same number.
+    /// Will panic if [`HashAlgorithm`] is of type `None*` and `block_size` is larger than the
+    /// `HashAlgorithm`.
+    /// Also panics if `block_size` is `0`.
     pub fn with_algorithm(algorithm: HashAlgorithm, block_size: usize) -> SignatureBuilder {
+        assert_ne!(block_size, 0, "Block size cannot be 0.");
         match algorithm {
-            HashAlgorithm::None4 => assert_eq!(block_size, 4),
-            HashAlgorithm::None8 => assert_eq!(block_size, 8),
-            HashAlgorithm::None16 => assert_eq!(block_size, 16),
+            HashAlgorithm::None4 => assert!(block_size <= 4),
+            HashAlgorithm::None8 => assert!(block_size <= 8),
+            HashAlgorithm::None16 => assert!(block_size <= 16),
             _ => {}
         }
         SignatureBuilder::new(algorithm).with_block_size(block_size)
