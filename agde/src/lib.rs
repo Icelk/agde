@@ -7,8 +7,10 @@
     missing_docs
 )]
 
+pub mod diff;
 pub mod log;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -378,10 +380,10 @@ pub struct VecSection {
     data: Vec<u8>,
 }
 impl VecSection {
-    /// Assembles a new selection using `start` as the start of the original data, `end` as the
+    /// Assembles a new section using `start` as the start of the original data, `end` as the
     /// terminator, and `data` to fill the space between `start` and `end`.
     ///
-    /// If `data` is longer than `end-start`, the buffer is grown. If it's shorter, the buffer will
+    /// If `data` is longer than `end-start`, the buffer (that this section will be applied to) is grown. If it's shorter, the buffer will
     /// be truncated.
     ///
     /// # Panics
@@ -395,6 +397,12 @@ impl VecSection {
             end
         );
         Self { start, end, data }
+    }
+    /// Creates a new section representing the entire resource.
+    ///
+    /// Useful to use when passing data for [`ModifyEvent::new`] to diff.
+    pub fn whole_resource(data: Vec<u8>) -> Self {
+        Self::new(0, usize::MAX, data)
     }
 }
 impl DataSection for VecSection {
@@ -422,25 +430,57 @@ impl DataSection for VecSection {
 #[must_use]
 pub struct ModifyEvent<S> {
     resource: String,
-    section: S,
+    sections: Vec<S>,
 }
-impl<S: DataSection> ModifyEvent<S> {
+impl ModifyEvent<VecSection> {
     /// Calculates the diff if `source` is [`Some`].
     ///
     /// # Panics
     ///
     /// `TODO`: implement diff
-    pub fn new(resource: String, section: S, source: Option<&[u8]>) -> Self {
-        if source.is_some() {
-            unimplemented!("Implement diff");
+    pub fn new(resource: String, sections: Vec<VecSection>, base: Option<&[u8]>) -> Self {
+        let mut sections = sections;
+        if let Some(base) = base {
+            let target = {
+                if sections.len() == 1 {
+                    sections.first().and_then(|section| {
+                        if section.old_len() > base.len() {
+                            Some(section.data())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            };
+            let target = if let Some(base) = target {
+                Cow::Borrowed(base)
+            } else {
+                let mut target = base.to_vec();
+                let mut filled = target.len();
+                for section in sections {
+                    section.apply_len(&mut target, filled, 0);
+                    let mut buf = SliceBuf::new(&mut target);
+                    section
+                        .apply(&mut buf)
+                        .expect("Buffer is guaranteed to not be too small.");
+                    filled = buf.filled();
+                }
+                target.truncate(filled);
+                Cow::Owned(target)
+            };
+            let diff = diff::diff(base, &target);
+            sections = diff::convert_to_sections(diff, base);
         }
-        Self { resource, section }
+        Self { resource, sections }
     }
 }
 impl<S: Section> ModifyEvent<S> {
-    /// Gets a reference to the section this event modifies.
-    pub fn section(&self) -> &S {
-        &self.section
+    /// Gets a reference to the sections of data this event modifies.
+    #[must_use]
+    pub fn sections(&self) -> &[S] {
+        &self.sections
     }
 }
 impl<S> ModifyEvent<S> {
@@ -526,11 +566,11 @@ macro_rules! event_kind_impl {
 event_kind_impl!(ModifyEvent<T>, Modify);
 event_kind_impl!(CreateEvent, Create);
 event_kind_impl!(DeleteEvent, Delete);
-impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
-    fn from(ev: T) -> Self {
-        EventMessage::new(vec![ev.into()])
-    }
-}
+// impl<T: Into<Event<VecSection>>> From<T> for EventMessage {
+// fn from(ev: T) -> Self {
+// EventMessage::new(vec![ev.into()])
+// }
+// }
 
 /// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -558,15 +598,27 @@ pub enum EventKind<S> {
 #[must_use]
 pub struct Event<S> {
     kind: EventKind<S>,
+    /// Duration since UNIX_EPOCH
+    timestamp: Duration,
 }
 impl<S> Event<S> {
     /// Creates a new event from `kind`.
     pub fn new(kind: EventKind<S>) -> Self {
-        Self { kind }
+        Self::with_timestamp(kind, SystemTime::now())
+    }
+    /// Creates a new event from `kind` with the `timestamp`.
+    pub fn with_timestamp(kind: EventKind<S>, timestamp: SystemTime) -> Self {
+        Self {
+            kind,
+            timestamp: timestamp
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO),
+        }
     }
     /// Returns a reference to the target resource name.
     #[allow(clippy::inline_always)]
     #[inline(always)]
+    #[must_use]
     pub fn resource(&self) -> &str {
         match &self.kind {
             EventKind::Modify(ev) => ev.resource(),
@@ -592,12 +644,15 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
         let kind = match ev.inner() {
             EventKind::Modify(ev) => EventKind::Modify(ModifyEvent {
                 resource: ev.resource().into(),
-                section: EmptySection::new(ev.section()),
+                sections: ev.sections().iter().map(EmptySection::new).collect(),
             }),
             EventKind::Create(ev) => EventKind::Create(ev.clone()),
             EventKind::Delete(ev) => EventKind::Delete(ev.clone()),
         };
-        Event { kind }
+        Event {
+            kind,
+            timestamp: ev.timestamp,
+        }
     }
 }
 /// A [`Event`] with internal data.
@@ -605,36 +660,36 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
 /// This is the type that is sent between clients.
 pub type DatafulEvent = Event<VecSection>;
 
-/// The data of [`MessageKind`] corresponding to a list of [`Event`]s.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-#[must_use]
-pub struct EventMessage {
-    events: Vec<DatafulEvent>,
-    /// Duration since UNIX_EPOCH
-    timestamp: Duration,
-}
-impl EventMessage {
-    /// Creates a new event message with the timestamp [`SystemTime::now`] and `events`.
-    pub fn new(events: Vec<DatafulEvent>) -> Self {
-        Self::with_timestamp(events, SystemTime::now())
-    }
-    /// Assembles from `timestamp` and `events`.
-    ///
-    /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
-    /// else the sync will risk wrong results, forcing [`Message::HashCheck`].
-    pub fn with_timestamp(events: Vec<DatafulEvent>, timestamp: SystemTime) -> Self {
-        Self {
-            events,
-            timestamp: timestamp
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO),
-        }
-    }
-    /// Gets an iterator of the internal events.
-    pub fn event_iter(&self) -> impl Iterator<Item = &DatafulEvent> {
-        self.events.iter()
-    }
-}
+// /// The data of [`MessageKind`] corresponding to a list of [`Event`]s.
+// #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+// #[must_use]
+// pub struct EventMessage {
+// events: Vec<DatafulEvent>,
+// /// Duration since UNIX_EPOCH
+// timestamp: Duration,
+// }
+// impl EventMessage {
+// /// Creates a new event message with the timestamp [`SystemTime::now`] and `events`.
+// pub fn new(events: Vec<DatafulEvent>) -> Self {
+// Self::with_timestamp(events, SystemTime::now())
+// }
+// /// Assembles from `timestamp` and `events`.
+// ///
+// /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
+// /// else the sync will risk wrong results, forcing [`Message::HashCheck`].
+// pub fn with_timestamp(events: Vec<DatafulEvent>, timestamp: SystemTime) -> Self {
+// Self {
+// events,
+// timestamp: timestamp
+// .duration_since(UNIX_EPOCH)
+// .unwrap_or(Duration::ZERO),
+// }
+// }
+// /// Gets an iterator of the internal events.
+// pub fn event_iter(&self) -> impl Iterator<Item = &DatafulEvent> {
+// self.events.iter()
+// }
+// }
 
 /// A UUID.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
@@ -684,7 +739,7 @@ pub enum MessageKind {
     /// The sender of the Hello should ignore all future messages from this client.
     MismatchingVersions,
     /// A client has new data to share.
-    Event(EventMessage),
+    Event(DatafulEvent),
     /// A client tries to get the most recent data.
     /// Contains the list of which documents were edited and size at last session.
     /// `TODO`: Don't send the one's that's been modified locally; we only want their changes.
@@ -883,7 +938,7 @@ impl Manager {
     ///
     /// Be careful to have a [`EventKind::Create`] before the resource receives a [`EventKind::Modify`].
     #[inline]
-    pub fn process_event(&mut self, event: EventMessage) -> Message {
+    pub fn process_event(&mut self, event: DatafulEvent) -> Message {
         Message::new(MessageKind::Event(event), self.uuid(), self.generate_uuid())
     }
     /// `pos_in_event_message` MUST be the true value. Else, the ordering will fail

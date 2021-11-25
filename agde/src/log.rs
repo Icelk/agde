@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::{ApplyError, DataSection, EmptySection, Event, EventKind, Section, SliceBuf, Uuid};
 
 /// A received event.
-/// 
+///
 /// Contains the necessary metadata to sort the event.
 /// Does not contain any raw data, as that's calculated by undoing all the events.
 #[derive(Debug)]
@@ -271,8 +271,10 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
             }
             match received_ev.event.inner() {
                 EventKind::Modify(ev) => {
-                    let section = ev.section().revert(resource)?;
-                    reverted_stack.push(section);
+                    for section in ev.sections().iter().rev() {
+                        let section = section.revert(resource)?;
+                        reverted_stack.push(section);
+                    }
                 }
                 EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
                     "Unexpected delete or create event in unwinding of event log.\
@@ -281,7 +283,9 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
             }
         }
         // When back there, implement the event.
-        ev.section().apply(resource)?;
+        for section in ev.sections() {
+            section.apply(resource)?;
+        }
         // Unwind the stack, redoing all the events.
         while let Some(section) = reverted_stack.pop() {
             section.apply(resource)?;
