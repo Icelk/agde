@@ -49,6 +49,7 @@
 )]
 
 use serde::{Deserialize, Serialize};
+use std::cmp;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::hash::Hasher;
@@ -652,7 +653,7 @@ impl Difference {
             }
         }
 
-        if block_size < self.block_size() {
+        if self.block_size() < block_size {
             return Err(MinifyError::NewLarger);
         }
         let block_size_shrinkage = self.block_size() / block_size;
@@ -774,14 +775,20 @@ impl Difference {
             match segment {
                 Segment::Ref(ref_segment) => {
                     let start = ref_segment.start;
-                    let end = ref_segment.end(block_size);
+                    let end = cmp::min(ref_segment.end(block_size), base.len());
 
                     let data = base.get(start..end).ok_or(Roob)?;
                     extend_vec_slice(out, data);
                 }
                 Segment::BlockRef(block_ref_segment) => {
                     let start = block_ref_segment.start;
-                    let end = block_ref_segment.end(block_size);
+                    let end = cmp::min(block_ref_segment.end(block_size), base.len());
+                    // Check that only the last ref goes past the end.
+                    debug_assert!(if end == base.len() {
+                        block_ref_segment.end(block_size) - block_size < base.len()
+                    } else {
+                        true
+                    });
 
                     let data = base.get(start..end).ok_or(Roob)?;
                     extend_vec_slice(out, data);
