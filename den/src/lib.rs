@@ -311,13 +311,15 @@ impl SignatureBuilder {
     pub fn write(&mut self, data: &[u8]) {
         let mut data = data;
 
-        while data.len() > self.block_available() {
+        while data.len() >= self.block_available() {
             let bytes = &data[..self.block_available()];
             self.current.write(bytes);
 
             data = &data[self.block_available()..];
             self.finish_hash();
         }
+        // the data is now less than `self.block_available()`.
+        self.current.write(data);
     }
     /// Flushes the data from [`Self::write`] and prepares a [`Signature`].
     pub fn finish(mut self) -> Signature {
