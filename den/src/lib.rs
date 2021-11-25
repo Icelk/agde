@@ -548,9 +548,18 @@ pub struct SegmentRef {
     start: usize,
 }
 impl SegmentRef {
+    /// The start in the base resource this reference is pointing to.
+    #[must_use]
+    pub fn start(self) -> usize {
+        self.start
+    }
+    /// The end of this segment.
+    ///
+    /// The same as [`Self::start`] + `block_size`.
     #[inline]
-    fn end(self, block_size: usize) -> usize {
-        self.start + block_size
+    #[must_use]
+    pub fn end(self, block_size: usize) -> usize {
+        self.start() + block_size
     }
 }
 /// Several [`SegmentRef`] after each other.
@@ -564,6 +573,24 @@ pub struct SegmentBlockRef {
     block_count: usize,
 }
 impl SegmentBlockRef {
+    /// The start in the base resource this reference is pointing to.
+    #[must_use]
+    pub fn start(self) -> usize {
+        self.start
+    }
+    /// The number of blocks this reference covers.
+    #[must_use]
+    pub fn block_count(self) -> usize {
+        self.block_count
+    }
+    /// The end of this segment.
+    ///
+    /// The same as [`Self::start`] + [`Self::block_count`] * `block_size`.
+    #[inline]
+    #[must_use]
+    pub fn end(self, block_size: usize) -> usize {
+        self.start + self.block_count * block_size
+    }
     #[inline]
     fn extend(&mut self, n: usize) {
         self.block_count += n;
@@ -573,10 +600,6 @@ impl SegmentBlockRef {
     #[inline]
     fn multiply(&mut self, n: usize) {
         self.block_count *= n;
-    }
-    #[inline]
-    fn end(self, block_size: usize) -> usize {
-        self.start + self.block_count * block_size
     }
 }
 impl From<SegmentRef> for SegmentBlockRef {
@@ -599,6 +622,15 @@ impl SegmentUnknown {
     #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.source
+    }
+    /// Gets a mutable reference to the internal data [`Vec`].
+    pub fn data_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.source
+    }
+    /// Takes the internal data of this segment.
+    #[must_use]
+    pub fn into_data(self) -> Vec<u8> {
+        self.source
     }
 }
 impl Debug for SegmentUnknown {
@@ -646,6 +678,13 @@ impl Difference {
     /// > `agde` uses this to convert from this format to their `Section` style.
     pub fn segments(&self) -> &[Segment] {
         &self.segments
+    }
+    /// Turns this difference into it's list of segments.
+    ///
+    /// Prefer to use [`Self::segments`] if you don't plan on consuming the internal data.
+    #[must_use]
+    pub fn into_segments(self) -> Vec<Segment> {
+        self.segments
     }
     /// The block size used by this diff.
     #[must_use]
