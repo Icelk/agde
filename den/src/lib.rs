@@ -459,12 +459,15 @@ impl Signature {
         while let Some(block) = blocks.next() {
             // Special case 1: block size is larger than input.
             // Just send the whole input.
-            if block_size > block.len() {
-                segments.push(Segment::unknown(&data[last_ref..]));
-                blocks.advance(block_size);
-                last_ref = data.len();
-                continue;
-            }
+            //
+            // **NOTE:** This was disabled due to increasing diff length.
+            //
+            // if block_size > block.len() {
+            // segments.push(Segment::unknown(&data[last_ref..]));
+            // blocks.advance(block_size);
+            // last_ref = data.len();
+            // continue;
+            // }
 
             let mut hasher = self.algorithm().builder();
             hasher.write(block);
@@ -945,7 +948,7 @@ mod tests {
         let diff = signature.diff(remote_data.as_bytes());
         println!("Segments {:#?}", diff.segments());
         println!("Took {:?}", now.elapsed());
-        assert_eq!(diff.segments().len(), 4);
+        assert_eq!(diff.segments().len(), 3);
 
         let segment = &diff.segments()[1];
         assert_eq!(
