@@ -337,6 +337,31 @@ pub struct Signature {
     block_size: usize,
 }
 impl Signature {
+    /// Creates a new [`SignatureBuilder`] in which data can be added to create a list of hashes
+    /// for blocks the size of `block_size`.
+    ///
+    /// I recommend block size `4096` for remote transfers.
+    /// If small documents are what's mostly being transmitted, consider `512`.
+    /// Consider running [`Difference::minify`] if getting the smallest diff is your concern.
+    ///
+    /// This creates a signature of a resource. The signature takes up much less space.
+    ///
+    /// The [`HashAlgorithm`] is chosen using experience with hasher's performance and heuristics.
+    #[allow(clippy::new_ret_no_self)] // This returns a builder.
+    pub fn new(block_size: usize) -> SignatureBuilder {
+        match block_size {
+            4 => Signature::with_algorithm(HashAlgorithm::None4, block_size),
+            8 => Signature::with_algorithm(HashAlgorithm::None8, block_size),
+            16 => Signature::with_algorithm(HashAlgorithm::None16, block_size),
+            0..=511 => Signature::with_algorithm(HashAlgorithm::XXH3_64, block_size),
+            // 512..
+            _ => Signature::with_algorithm(HashAlgorithm::XXH3_128, block_size),
+        }
+    }
+    /// This will create a new [`SignatureBuilder`] with the `algorithm`. Consider using [`Self::new`]
+    /// if you don't know *exactly* what you are doing, as it sets the algorithm for you.
+    /// You can query the algorithm using [`Self::algorithm`].
+    ///
     /// Larger `block_size`s will take more time to compute, but will be more secure.
     /// Smaller `block_size`s takes less time to compute, are less secure, and require sending more
     /// data in the [`Signature`], as more blocks are sent.
