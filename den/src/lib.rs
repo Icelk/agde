@@ -218,7 +218,7 @@ macro_rules! hash_result {
             ),
         )+
     ) => {
-        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[derive(PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
         #[repr(u8)]
         #[must_use]
         enum HashResult {
@@ -233,6 +233,16 @@ macro_rules! hash_result {
                         Self::$name(bytes) => to_16_bytes(bytes),
                     )+
                 }
+            }
+        }
+        impl Debug for HashResult {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $(
+                        Self::$name(_) => write!(f, concat!(stringify!($name), " ({:0<16X})"), u128::from_le_bytes(self.to_bytes()))?,
+                    )+
+                }
+                Ok(())
             }
         }
     };
@@ -330,7 +340,7 @@ impl SignatureBuilder {
 /// A identifier of a file, much smaller than the file itself.
 ///
 /// See [crate-level documentation](crate) for more details.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[must_use]
 pub struct Signature {
     algo: HashAlgorithm,
@@ -500,6 +510,20 @@ impl Signature {
         }
     }
 }
+impl Debug for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let blocks: Vec<String> = self
+            .blocks()
+            .iter()
+            .map(|block| format!("{:0<16X}", u128::from_le_bytes(block.to_bytes())))
+            .collect();
+        f.debug_struct("Signature")
+            .field("algo", &self.algo)
+            .field("blocks", &blocks)
+            .field("block_size", &self.block_size)
+            .finish()
+    }
+}
 
 #[derive(Debug)]
 struct BlockData {
@@ -557,7 +581,7 @@ impl From<SegmentRef> for SegmentBlockRef {
     }
 }
 /// A segment with unknown contents. This will transmit the data.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 #[must_use]
 pub struct SegmentUnknown {
     source: Vec<u8>,
@@ -567,6 +591,13 @@ impl SegmentUnknown {
     #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.source
+    }
+}
+impl Debug for SegmentUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentUnknown")
+            .field("source", &String::from_utf8_lossy(&self.source))
+            .finish()
     }
 }
 /// A segment of data corresponding to a multiple of [`Difference::block_size`].
