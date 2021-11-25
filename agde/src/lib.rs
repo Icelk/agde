@@ -607,6 +607,9 @@ impl<S> Event<S> {
         Self::with_timestamp(kind, SystemTime::now())
     }
     /// Creates a new event from `kind` with the `timestamp`.
+    ///
+    /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
+    /// else the sync will risk wrong results, forcing [`Message::HashCheck`].
     pub fn with_timestamp(kind: EventKind<S>, timestamp: SystemTime) -> Self {
         Self {
             kind,
@@ -667,37 +670,6 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
 ///
 /// This is the type that is sent between clients.
 pub type DatafulEvent = Event<VecSection>;
-
-// /// The data of [`MessageKind`] corresponding to a list of [`Event`]s.
-// #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-// #[must_use]
-// pub struct EventMessage {
-// events: Vec<DatafulEvent>,
-// /// Duration since UNIX_EPOCH
-// timestamp: Duration,
-// }
-// impl EventMessage {
-// /// Creates a new event message with the timestamp [`SystemTime::now`] and `events`.
-// pub fn new(events: Vec<DatafulEvent>) -> Self {
-// Self::with_timestamp(events, SystemTime::now())
-// }
-// /// Assembles from `timestamp` and `events`.
-// ///
-// /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
-// /// else the sync will risk wrong results, forcing [`Message::HashCheck`].
-// pub fn with_timestamp(events: Vec<DatafulEvent>, timestamp: SystemTime) -> Self {
-// Self {
-// events,
-// timestamp: timestamp
-// .duration_since(UNIX_EPOCH)
-// .unwrap_or(Duration::ZERO),
-// }
-// }
-// /// Gets an iterator of the internal events.
-// pub fn event_iter(&self) -> impl Iterator<Item = &DatafulEvent> {
-// self.events.iter()
-// }
-// }
 
 /// A UUID.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
@@ -818,7 +790,7 @@ impl Message {
     /// You can also use [`bincode`] or any other [`serde`]-based library to serialize the message.
     #[allow(clippy::missing_panics_doc)]
     #[must_use]
-    pub fn bin(self) -> Vec<u8> {
+    pub fn bin(&self) -> Vec<u8> {
         // UNWRAP: this should be good; we only use objects from ::std and our own derived
         bincode::encode_to_vec(
             bincode::serde::Compat(self),
@@ -838,7 +810,7 @@ impl Message {
     /// > Since I'm using readers and writers, less allocations are needed.
     #[allow(clippy::missing_panics_doc)]
     #[must_use]
-    pub fn base64(self) -> String {
+    pub fn base64(&self) -> String {
         struct Writer<W: std::io::Write>(W);
         impl<W: std::io::Write> bincode::enc::write::Writer for Writer<W> {
             fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
@@ -991,7 +963,7 @@ mod tests {
 
             let message = manager.process_event(event);
 
-            (message.clone().bin(), message.base64(), manager.uuid())
+            (message.bin(), message.base64(), manager.uuid())
         };
 
         // The message are sent to a different client.
