@@ -1131,26 +1131,28 @@ mod tests {
         assert!((resource.len().saturating_sub(2)..resource_len + 2).contains(&resource_len));
     }
 
-    // Test doing this ↑ but simplifying as it had previous data, stored how?
-
     #[test]
     fn basic_diff() {
+        let mut resource =
+            b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"
+                .to_vec();
+
         let mut mgr = manager();
 
         let event: Event<_> = ModifyEvent::new(
             "diff.bin".into(),
-            vec![VecSection::whole_resource(0, b"Some test data. This test works, as the whole diff algorithm is written by me!".to_vec())],
-            Some(b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"),
+            vec![VecSection::whole_resource(
+                resource.len(),
+                b"Some test data. This test works, as the whole diff algorithm is written by me!"
+                    .to_vec(),
+            )],
+            Some(&resource),
         )
         .into();
 
         let message = mgr.process_event(event);
 
         let mut receiver = manager();
-
-        let mut resource =
-            b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"
-                .to_vec();
         let mut resource_len = resource.len();
 
         match message.inner() {
@@ -1162,9 +1164,8 @@ mod tests {
                     EventKind::Modify(ev) => {
                         Section::apply_len(ev.sections().iter(), &mut resource, 0, b' ');
 
-                        let filled = resource_len;
                         let mut resource = SliceBuf::new(&mut resource);
-                        resource.advance(filled);
+                        resource.advance(resource_len);
 
                         event_applier
                             .apply(&mut resource)
