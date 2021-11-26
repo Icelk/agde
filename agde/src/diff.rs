@@ -44,9 +44,9 @@ pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
                 let end = segment_start;
                 let section = VecSection::new(start, end, last.into_data());
                 sections.push(section);
-                *last_ref_end = Some(end);
             }
         }
+        *last_ref_end = Some(segment_end);
     }
 
     let block_size = diff.block_size();

@@ -704,6 +704,8 @@ impl Difference {
     /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
     /// [`MinifyError::SuccessiveUnknowns`] is returned if two [`Segment::Unknown`] are after
     /// each other.
+    // `TODO`: remove lint
+    #[allow(clippy::too_many_lines)]
     pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
         fn push_segment(segments: &mut Vec<Segment>, item: Segment, block_size: usize) {
             #[cold]
@@ -718,12 +720,25 @@ impl Difference {
                             Segment::BlockRef(seg) => {
                                 if seg.end(block_size) == item.start {
                                     // The previous end is this start.
-                                    seg.extend(item.block_count);
+                                    seg.extend(item.block_count());
+                                } else {
+                                    // Check if block segment is only reference.
+                                    // This will never hapen above, as we always add to it.
+                                    // This assumes [`SegmentBlockRef::block_count`] is >= 1
+                                    let seg = *seg;
+                                    if seg.block_count() == 1 {
+                                        segments
+                                            .push(Segment::Ref(SegmentRef { start: seg.start() }));
+                                    } else {
+                                        segments.push(Segment::BlockRef(seg));
+                                    }
                                 }
                             }
                             Segment::Unknown(_) => segments.push(Segment::BlockRef(item)),
                             Segment::Ref(_) => unreachable_reference_segment(),
                         }
+                    } else {
+                        segments.push(Segment::BlockRef(item));
                     }
                 }
                 Segment::Unknown(_) => segments.push(item),
@@ -813,10 +828,7 @@ impl Difference {
                                     seg.start += start;
                                     segment = Segment::BlockRef((*seg).into());
                                 }
-                                Segment::BlockRef(seg) => {
-                                    seg.start += start;
-                                    seg.multiply(block_size);
-                                }
+                                Segment::BlockRef(seg) => seg.start += start,
                                 Segment::Unknown(_) => {}
                             }
                             push_segment(&mut segments, segment, block_size);
@@ -975,6 +987,21 @@ mod tests {
     fn lorem_ipsum() -> &'static str {
         "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna ultrices gravida quis in felis. Mauris ac rutrum enim. Nulla auctor lacus at tellus sagittis dictum non id nunc. Donec ac nisl molestie, egestas dui vitae, consectetur sapien. Vivamus vel aliquet magna, ut malesuada mauris. Curabitur eu erat at lorem rhoncus cursus ac at mauris. Curabitur ullamcorper diam sed leo pellentesque, ac rhoncus quam mattis. Suspendisse potenti. Pellentesque risus ex, egestas in ex nec, sollicitudin accumsan dolor. Donec elementum id odio eget pharetra. Morbi aliquet accumsan vestibulum. Suspendisse eros dui, condimentum sagittis magna non, eleifend egestas dui. Ut pulvinar vestibulum lorem quis laoreet. Nam aliquam ante in placerat volutpat. Sed ac imperdiet ex. Nullam ut neque vel augue dignissim semper."
     }
+    fn test_sync(base: &[u8], target: &[u8]) {
+        let mut signature = Signature::new(128);
+        signature.write(base);
+        let signature = signature.finish();
+
+        let diff = signature
+            .diff(target)
+            .minify(8, base)
+            .expect("Failed to minify.");
+
+        let mut out = Vec::new();
+        diff.apply(base, &mut out)
+            .expect("Failed to apply good diff.");
+        assert_eq!(&out, target);
+    }
 
     #[test]
     fn difference() {
@@ -1040,22 +1067,20 @@ mod tests {
         assert_eq!(diff.segments(), []);
     }
     #[test]
-    fn sync() {
+    fn sync_1() {
         let local_data =
             "Lorem ipsum dolor sit amet, don't really know Rust elit. Cras nec justo eu magna.";
         let remote_data =
             "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna.";
 
-        let mut signature = Signature::with_algorithm(HashAlgorithm::XXH3_64, 8);
-        signature.write(local_data.as_bytes());
-        let signature = signature.finish();
-
-        let diff = signature.diff(remote_data.as_bytes());
-
-        let mut out = Vec::new();
-        diff.apply(local_data.as_bytes(), &mut out)
-            .expect("Failed to apply good diff.");
-        assert_eq!(&out, remote_data.as_bytes());
+        test_sync(local_data.as_bytes(), remote_data.as_bytes());
+    }
+    #[test]
+    fn sync_2() {
+        test_sync(
+            b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!",
+            b"Some test data. This test works, as the whole diff algorithm is written by me!",
+        );
     }
     #[test]
     fn minify() {
