@@ -232,7 +232,10 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// `resource` must be at least `max(resource.filled() + event.section().len_difference() + 1,
     /// event.section().end() + 1)`
     /// [`Section::apply_len`] guarantees this.
-    pub fn apply(&self, resource: &mut SliceBuf) -> Result<(), ApplyError> {
+    pub fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(
+        &self,
+        resource: &mut SliceBuf<T>,
+    ) -> Result<(), ApplyError> {
         // Create a stack of the data of the reverted things.
         let mut reverted_stack = Vec::new();
         // Match only for the current resource.

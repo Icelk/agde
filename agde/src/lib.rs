@@ -78,18 +78,53 @@ impl Capabilities {
 /// A buffer containing a byte slice and a length of the filled data.
 #[derive(Debug)]
 #[must_use]
-pub struct SliceBuf<'a> {
-    slice: &'a mut [u8],
+pub struct SliceBuf<T: AsMut<[u8]>> {
+    slice: T,
     len: usize,
 }
-impl<'a> SliceBuf<'a> {
+impl<T: AsMut<[u8]>> SliceBuf<T> {
     /// Creates a new buffer with length set to `0`.
     /// Don't forget to [`Self::advance`] to set the filled region of `slice`.
     /// If you forget to do this, new data will be overridden at the start.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn new(slice: &'a mut [u8]) -> Self {
+    pub fn new(slice: T) -> Self {
         Self { slice, len: 0 }
+    }
+    /// Creates a new buffer with the fill level set to `filled`.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if `filled > slice.len()`.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub fn with_filled(slice: T, filled: usize) -> Self
+    where
+        T: AsRef<[u8]>,
+    {
+        let mut me = Self::new(slice);
+        me.set_filled(filled);
+        me
+    }
+    /// Creates a new buffer with the fill level being the length of `slice`.
+    /// This assumes the whole buffer is filled with good data.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub fn with_whole(slice: T) -> Self
+    where
+        T: AsRef<[u8]>,
+    {
+        let len = slice.as_ref().len();
+        Self::with_filled(slice, len)
+    }
+    pub(crate) fn slice(&self) -> &[u8]
+    where
+        T: AsRef<[u8]>,
+    {
+        self.slice.as_ref()
+    }
+    pub(crate) fn slice_mut(&mut self) -> &mut [u8] {
+        self.slice.as_mut()
     }
     /// Sets the size of the filled region of the buffer.
     ///
@@ -98,12 +133,15 @@ impl<'a> SliceBuf<'a> {
     /// Panics if `n > self.capacity()`.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn set_filled(&mut self, n: usize) {
+    pub fn set_filled(&mut self, n: usize)
+    where
+        T: AsRef<[u8]>,
+    {
         assert!(
-            n <= self.slice.len(),
+            n <= self.slice().len(),
             "Tried to set filled to {} while length is {}",
             n,
-            self.slice.len()
+            self.slice().len()
         );
         self.len = n;
     }
@@ -114,29 +152,54 @@ impl<'a> SliceBuf<'a> {
     /// Panics if `self.len() + n > self.capacity()`.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn advance(&mut self, n: usize) {
+    pub fn advance(&mut self, n: usize)
+    where
+        T: AsRef<[u8]>,
+    {
         self.set_filled(self.len + n);
     }
     /// Get the filled region of the buffer.
     #[must_use]
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn filled(&self) -> &[u8] {
-        &self.slice[..self.len]
+    pub fn filled(&self) -> &[u8]
+    where
+        T: AsRef<[u8]>,
+    {
+        &self.slice()[..self.len]
     }
     /// Get a mutable reference of the filled region of the buffer.
     #[must_use]
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn filled_mut(&mut self) -> &mut [u8] {
-        &mut self.slice[..self.len]
+    pub fn filled_mut(&mut self) -> &mut [u8]
+    where
+        T: AsRef<[u8]>,
+    {
+        let len = self.len;
+        &mut self.slice_mut()[..len]
     }
     /// Size of the capacity of the buffer. This cannot be increased.
     #[must_use]
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn capacity(&self) -> usize {
-        self.slice.len()
+    pub fn capacity(&self) -> usize
+    where
+        T: AsRef<[u8]>,
+    {
+        self.slice().len()
+    }
+}
+impl SliceBuf<&mut Vec<u8>> {
+    /// Extends this [`SliceBuf`] to fit `sections`.
+    ///
+    /// This only works if the internal type is a mutable reference to a [`Vec`].
+    pub fn extend_to_needed<'b, T: Iterator<Item = &'b S>, S: Section + 'b>(
+        &mut self,
+        sections: impl IntoIterator<Item = &'b S, IntoIter = T>,
+        fill: u8,
+    ) {
+        Section::apply_len(sections.into_iter(), self.slice, self.filled().len(), fill);
     }
 }
 
@@ -262,7 +325,10 @@ pub trait DataSection {
     /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    fn apply(&self, resource: &mut SliceBuf) -> Result<usize, ApplyError> {
+    fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(
+        &self,
+        resource: &mut SliceBuf<T>,
+    ) -> Result<usize, ApplyError> {
         let new_size = add_iusize(resource.filled().len(), self.len_difference()).unwrap_or(0);
         if new_size > resource.capacity() || self.end() > resource.capacity() {
             return Err(ApplyError::BufTooSmall);
@@ -276,8 +342,8 @@ pub trait DataSection {
         // self.len_difference + resource.filled
         unsafe {
             std::ptr::copy(
-                &resource.slice[self.end()],
-                &mut resource.slice[self.start() + self.new_len()],
+                &resource.slice()[self.end()],
+                &mut resource.slice_mut()[self.start() + self.new_len()],
                 resource.filled().len().saturating_sub(self.end()),
             );
         }
@@ -289,7 +355,7 @@ pub trait DataSection {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 &self.data()[0],
-                &mut resource.slice[self.start()],
+                &mut resource.slice_mut()[self.start()],
                 self.new_len(),
             );
         }
@@ -337,7 +403,10 @@ impl EmptySection {
     /// Returns an error if the new data cannot fit in `resource`.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub(crate) fn revert(&self, resource: &mut SliceBuf) -> Result<VecSection, ApplyError> {
+    pub(crate) fn revert<T: AsMut<[u8]> + AsRef<[u8]>>(
+        &self,
+        resource: &mut SliceBuf<T>,
+    ) -> Result<VecSection, ApplyError> {
         let new_size = add_iusize(resource.filled().len(), -self.len_difference())
             .map_err(|()| ApplyError::BufTooSmall)?;
         let new_data_pos = add_iusize(self.start(), self.len_difference()).unwrap_or(0);
@@ -352,7 +421,7 @@ impl EmptySection {
         // Copy data from `resource` to `section`.
         unsafe {
             std::ptr::copy_nonoverlapping(
-                &resource.slice[self.start()],
+                &resource.slice()[self.start()],
                 &mut section.data[0],
                 self.new_len(),
             );
@@ -361,8 +430,8 @@ impl EmptySection {
         // Copy the "old" data back in place of the new.
         unsafe {
             std::ptr::copy(
-                &resource.slice[self.start() + self.new_len()],
-                &mut resource.slice[self.end()],
+                &resource.slice()[self.start() + self.new_len()],
+                &mut resource.slice_mut()[self.end()],
                 resource.filled().len().saturating_sub(self.end()),
             );
         }
@@ -373,7 +442,7 @@ impl EmptySection {
             #[allow(clippy::cast_sign_loss)]
             let to_fill = (0 - self.len_difference()) as usize;
             unsafe {
-                std::ptr::write_bytes(&mut resource.slice[new_data_pos], 0, to_fill);
+                std::ptr::write_bytes(&mut resource.slice_mut()[new_data_pos], 0, to_fill);
             }
         }
 
@@ -1023,14 +1092,10 @@ mod tests {
                         assert_eq!(event_applier.resource(), Some("test.txt"));
 
                         let mut test = Vec::new();
-                        Section::apply_len(ev.sections().iter(), &mut test, 0, b' ');
+                        let mut res = SliceBuf::with_whole(&mut test);
+                        res.extend_to_needed(ev.sections(), b' ');
 
-                        let mut resource = SliceBuf::new(&mut test);
-                        resource.advance(0);
-
-                        event_applier
-                            .apply(&mut resource)
-                            .expect("Buffer too small!");
+                        event_applier.apply(&mut res).expect("Buffer too small!");
                     }
                     _ => panic!("Wrong EventKind"),
                 }
@@ -1046,8 +1111,7 @@ mod tests {
         fn process_message(
             manager: &mut Manager,
             message: &Message,
-            resource: &mut Vec<u8>,
-            resource_len: &mut usize,
+            resource: &mut SliceBuf<&mut Vec<u8>>,
         ) {
             match message.inner() {
                 MessageKind::Event(event) => {
@@ -1058,14 +1122,9 @@ mod tests {
                         EventKind::Modify(ev) => {
                             assert_eq!(ev.resource(), "private/secret.txt");
 
-                            Section::apply_len(ev.sections().iter(), resource, *resource_len, b' ');
+                            resource.extend_to_needed(ev.sections(), b' ');
 
-                            let mut buf = SliceBuf::new(resource);
-                            buf.set_filled(*resource_len);
-
-                            event_applier.apply(&mut buf).expect("Buffer too small!");
-
-                            *resource_len = buf.filled().len();
+                            event_applier.apply(resource).expect("Buffer too small!");
                         }
                         _ => panic!("Wrong EventKind"),
                     }
@@ -1102,33 +1161,21 @@ mod tests {
         let mut receiver = manager();
 
         let mut resource = Vec::new();
-        let mut resource_len = 0;
+        let mut res = SliceBuf::with_whole(&mut resource);
 
         // Process second message first.
-        process_message(
-            &mut receiver,
-            &second_message,
-            &mut resource,
-            &mut resource_len,
-        );
+        process_message(&mut receiver, &second_message, &mut res);
 
-        // We've inserted after the limit. Extend the len.
-        resource_len = 12;
-
-        assert_eq!(&resource[..resource_len], b"      friend");
-
-        resource_len = 1;
+        assert_eq!(res.filled(), b" ");
+        let filled = res.filled().len();
+        res.set_filled(12);
+        assert_eq!(res.filled(), b"      friend");
+        res.set_filled(filled);
 
         // Now, process first message.
-        process_message(
-            &mut receiver,
-            &first_message,
-            &mut resource,
-            &mut resource_len,
-        );
+        process_message(&mut receiver, &first_message, &mut res);
 
-        assert_eq!(&resource[..resource_len], b"Hello friend!");
-        assert!((resource.len().saturating_sub(2)..resource_len + 2).contains(&resource_len));
+        assert_eq!(res.filled(), b"Hello friend!");
     }
 
     #[test]
@@ -1136,24 +1183,24 @@ mod tests {
         let mut resource =
             b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"
                 .to_vec();
+        let mut res = SliceBuf::with_whole(&mut resource);
 
         let mut mgr = manager();
 
         let event: Event<_> = ModifyEvent::new(
             "diff.bin".into(),
             vec![VecSection::whole_resource(
-                resource.len(),
+                res.filled().len(),
                 b"Some test data. This test works, as the whole diff algorithm is written by me!"
                     .to_vec(),
             )],
-            Some(&resource),
+            Some(res.filled()),
         )
         .into();
 
         let message = mgr.process_event(event);
 
         let mut receiver = manager();
-        let mut resource_len = resource.len();
 
         match message.inner() {
             MessageKind::Event(event) => {
@@ -1162,15 +1209,9 @@ mod tests {
                     .expect("Got event from future.");
                 match event_applier.event().inner() {
                     EventKind::Modify(ev) => {
-                        Section::apply_len(ev.sections().iter(), &mut resource, 0, b' ');
+                        res.extend_to_needed(ev.sections(), b' ');
 
-                        let mut resource = SliceBuf::new(&mut resource);
-                        resource.advance(resource_len);
-
-                        event_applier
-                            .apply(&mut resource)
-                            .expect("Buffer too small!");
-                        resource_len = resource.filled().len();
+                        event_applier.apply(&mut res).expect("Buffer too small!");
                     }
                     _ => panic!("Wrong EventKind"),
                 }
@@ -1179,7 +1220,8 @@ mod tests {
                 panic!("Got {:?}, but expected a Event!", kind);
             }
         }
-        resource.truncate(resource_len);
+        let filled = res.filled().len();
+        resource.truncate(filled);
         assert_eq!(
             String::from_utf8(resource).unwrap(),
             "Some test data. This test works, as the whole diff algorithm is written by me!"
