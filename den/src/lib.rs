@@ -10,7 +10,7 @@
 //! The reason to move to more readers is for memory space.
 //! Even then, the implementation could abstract the file system to give this library only 64KiB chunks.
 //!
-//! # How-to
+//! # How-to & examples
 //!
 //! Keep in mind this isn't guaranteed to give the exact same data.
 //! Please check the data with for example SHA-3 to ensure consistency.
@@ -29,6 +29,30 @@
 //! They calculate it and send it back.
 //! We calculate a [`Signature::diff`] and send it to them.
 //! They [`Difference::apply`] it. Their data should now be equal to mine.
+//!
+//! ## Get the difference of a local file
+//!
+//! Gets a small diff to send to others, almost like how `git` works.
+//!
+//! `base_data` is considered prior knowledge. `target_data` is the modified data.
+//!
+//! The data segments can be any size. Performance should still be good.
+//!
+//! ```
+//! # use den::*;
+//! let base_data = b"This is a document everyone has. It's about some new difference library.";
+//! let target_data = b"This is a document only I have. It's about some new difference library.";
+//!
+//! let mut signature = Signature::new(128);
+//! signature.write(base_data);
+//! let signature = signature.finish();
+//!
+//! let diff = signature.diff(target_data);
+//!
+//! // This is the small diff you could serialize with Serde and send.
+//! let minified = diff.minify(8, base_data)
+//!     .expect("This won't panic, as the data hasn't changed from calling the other functions.");
+//! ```
 //!
 //! # Future improvements
 //!
