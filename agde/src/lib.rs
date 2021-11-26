@@ -409,16 +409,19 @@ impl EmptySection {
     ) -> Result<VecSection, ApplyError> {
         let new_size = add_iusize(resource.filled().len(), -self.len_difference())
             .map_err(|()| ApplyError::BufTooSmall)?;
-        let new_data_pos = add_iusize(self.start(), self.len_difference()).unwrap_or(0);
-        if new_size > resource.capacity() {
+        if new_size > resource.capacity()
+            || self.start() + self.new_len() > resource.capacity()
+            || self.end() > resource.capacity()
+        {
             return Err(ApplyError::BufTooSmall);
         }
 
         let mut section = VecSection::new(self.start(), self.end(), vec![0; self.new_len()]);
 
-        // `TODO`: safety notes
-
         // Copy data from `resource` to `section`.
+        // SAFETY: we check that resource[self.start() + self.new_len()] is valid.
+        // Section is created to house the data.
+        // We have copied data to section, which fills it.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 &resource.slice()[self.start()],
@@ -428,6 +431,8 @@ impl EmptySection {
             section.data.set_len(section.data().len());
         }
         // Copy the "old" data back in place of the new.
+        // SAFETY: Here, we simply copy the rest of the resource to later in the resource.
+        // If it's out of bounds, it'll copy 0 bytes, which is sound.
         unsafe {
             std::ptr::copy(
                 &resource.slice()[self.start() + self.new_len()],
@@ -436,13 +441,17 @@ impl EmptySection {
             );
         }
 
-        // If we added bytes here,
+        // If we added bytes here, fill with zeroes, to simplify debugging and avoid random data.
         if self.len_difference() < 0 {
             // We've checked that with the if statement above.
             #[allow(clippy::cast_sign_loss)]
             let to_fill = (0 - self.len_difference()) as usize;
             unsafe {
-                std::ptr::write_bytes(&mut resource.slice_mut()[new_data_pos], 0, to_fill);
+                std::ptr::write_bytes(
+                    &mut resource.slice_mut()[self.start() + self.new_len()],
+                    0,
+                    to_fill,
+                );
             }
         }
 
@@ -818,7 +827,7 @@ pub enum MessageKind {
     Event(DatafulEvent),
     /// A client tries to get the most recent data.
     /// Contains the list of which documents were edited and size at last session.
-    /// `TODO`: Don't send the one's that's been modified locally; we only want their changes.
+    /// `TODO`: Only sync the remote repo, as that's what we want to sync so we can commit.
     ///
     /// You should respond with a [`Self::FastForwardReply`].
     FastForward,
@@ -834,7 +843,8 @@ pub enum MessageKind {
     HashCheckReply,
     /// Checks the internal message UUID log.
     ///
-    /// `TODO`: specify last x messages. Sort them before sending; we have a sorted events
+    /// `TODO`: specify last x messages with a timestamp to filter later messages.
+    /// Sort them before sending; we have a sorted events
     /// guaranteed, so now we ignore order of messages.
     MessageUuidLogCheck,
     /// The target client cancelled the request.
@@ -1025,8 +1035,6 @@ impl Manager {
     ///
     /// This prevents other clients from hogging our memory with items which never expire.
     /// If their clock is more than 10s off relative to our, we have a serious problem!
-    // `TODO`: Make this not take `pos_in_event_message` as that's annoying and a source of
-    // troubles for the implementers.
     pub fn apply_event<'a>(
         &'a mut self,
         event: &'a DatafulEvent,

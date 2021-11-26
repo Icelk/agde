@@ -214,7 +214,6 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
         self.modern_resource_name
     }
     /// Gets a reference to the event to be applied.
-    // `TODO`: Don't return an error when the wrong method is called.
     pub fn event(&self) -> &Event<S> {
         self.event
     }
@@ -224,6 +223,9 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// If the target resource doesn't exist, don't call this.
     ///
     /// # Errors
+    ///
+    /// tl;dr, this can be unwrapped if you have called [`SliceBuf::extend_to_needed`] or
+    /// [`Section::apply_len`] and made sure [`Self::event`] is a [`EventKind::Modify`].
     ///
     /// Returns [`ApplyError::InvalidEvent`] if this isn't instantiated from
     /// [`Manager::apply_event`] with a [`EventKind::Modify`]

@@ -731,7 +731,6 @@ impl Difference {
     /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
     /// [`MinifyError::SuccessiveUnknowns`] is returned if two [`Segment::Unknown`] are after
     /// each other.
-    // `TODO`: remove lint
     #[allow(clippy::too_many_lines)]
     pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
         fn push_segment(segments: &mut Vec<Segment>, item: Segment, block_size: usize) {
