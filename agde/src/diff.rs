@@ -3,7 +3,7 @@
 //! These functions are wrappers for integrating `agde` with it's diff library.
 //! It handles converting data structures so the two can efficiently work together.
 
-use crate::VecSection;
+use crate::{add_iusize, Section, VecSection};
 use den::{Difference, Segment, SegmentUnknown, Signature};
 
 /// Creates a granular [`Difference`] between `base` and `target`.
@@ -30,6 +30,7 @@ pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
         segment_end: usize,
         last_unknown: &mut Option<SegmentUnknown>,
         last_ref_end: &mut Option<usize>,
+        offset: &mut isize,
         sections: &mut Vec<VecSection>,
         base: &[u8],
     ) {
@@ -42,7 +43,16 @@ pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
             } else {
                 let start = last_ref_end.unwrap_or(0);
                 let end = segment_start;
-                let section = VecSection::new(start, end, last.into_data());
+                let section = VecSection::new(
+                    add_iusize(start, *offset).expect(
+                        "Internal error with offset in conversion to sections. Report bug, please.",
+                    ),
+                    add_iusize(end, *offset).expect(
+                        "Internal error with offset in conversion to sections. Report bug, please.",
+                    ),
+                    last.into_data(),
+                );
+                *offset += section.len_difference();
                 sections.push(section);
             }
         }
@@ -60,6 +70,7 @@ pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
 
     let mut last_unknown = None;
     let mut last_ref_end = None;
+    let mut offset = 0;
     for segment in diff.into_segments() {
         match segment {
             Segment::Unknown(seg) => last_unknown = Some(seg),
@@ -68,6 +79,7 @@ pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
                 seg.end(block_size),
                 &mut last_unknown,
                 &mut last_ref_end,
+                &mut offset,
                 &mut sections,
                 base,
             ),
@@ -76,6 +88,7 @@ pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
                 seg.end(block_size),
                 &mut last_unknown,
                 &mut last_ref_end,
+                &mut offset,
                 &mut sections,
                 base,
             ),
