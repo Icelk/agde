@@ -1,0 +1,30 @@
+name: Den CI
+
+on:
+    push:
+        paths:
+            - "den/**"
+            - ".github/workflows/den.yml"
+
+env:
+    CARGO_TERM_COLOR: always
+
+defaults:
+    run:
+        working-directory: den
+
+jobs:
+    check:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checking out sources
+              uses: actions/checkout@v2
+            - name: Installing Rust toolchain
+              uses: actions-rs/toolchain@v1
+            - uses: Swatinem/rust-cache@v1
+            - name: Checking project will all features
+              run: cargo clippy -- -D warnings
+            - uses: Icelk/rustdoc-link-check@d00c3d746c52bb3f88155e07739271282a8cfc7d
+              with:
+                  working-directory: den
+                  private: true
