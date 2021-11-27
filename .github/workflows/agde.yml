@@ -1,4 +1,4 @@
-name: Den CI
+name: Agde CI
 
 on:
     push:

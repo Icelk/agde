@@ -310,6 +310,7 @@ impl MessageUuidLog {
             limit,
         }
     }
+    #[allow(dead_code)] // TODO: remove this allow lint
     pub(crate) fn trim(&mut self) {
         while self.list.len() > self.limit as usize {
             self.list.pop_back();
