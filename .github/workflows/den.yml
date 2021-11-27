@@ -24,7 +24,7 @@ jobs:
             - uses: Swatinem/rust-cache@v1
             - name: Checking project will all features
               run: cargo clippy -- -D warnings
-            - uses: Icelk/rustdoc-link-check@d00c3d746c52bb3f88155e07739271282a8cfc7d
+            - uses: Icelk/rustdoc-link-check@fa5db046b017203aece9f18eff34d0f9f396269f
               with:
                   working-directory: den
                   private: true
