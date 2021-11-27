@@ -14,7 +14,7 @@ use crate::{ApplyError, DataSection, EmptySection, Event, EventKind, Section, Sl
 struct ReceivedEvent {
     event: Event<EmptySection>,
     /// A [`Duration`] of time after UNIX_EPOCH.
-    /// [`EventMessage::timestamp`]
+    /// [`Event::timestamp`]
     timestamp: Duration,
     /// Message UUID.
     uuid: Uuid,
@@ -86,7 +86,7 @@ impl EventLog {
 
         drop(self.list.drain(..to_drop));
     }
-    /// `timestamp` should be the one in [`EventMessage`]
+    /// `timestamp` should be the one in [`Event::timestamp`]
     pub(crate) fn insert(
         &mut self,
         event: &Event<impl Section>,
@@ -227,8 +227,8 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// tl;dr, this can be unwrapped if you have called [`SliceBuf::extend_to_needed`] or
     /// [`Section::apply_len`] and made sure [`Self::event`] is a [`EventKind::Modify`].
     ///
-    /// Returns [`ApplyError::InvalidEvent`] if this isn't instantiated from
-    /// [`Manager::apply_event`] with a [`EventKind::Modify`]
+    /// Returns [`ApplyError::InvalidEvent`] if this [`EventApplier`] wasn't instantiated
+    /// with a [`EventKind::Modify`].
     ///
     /// Returns a [`ApplyError::BufTooSmall`] if the following predicate is not met.
     /// `resource` must be at least `max(resource.filled() + event.section().len_difference() + 1,

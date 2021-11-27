@@ -55,7 +55,7 @@ impl Capabilities {
     pub fn uuid(&self) -> Uuid {
         self.uuid
     }
-    /// The client is striving to be persistent. These will regularly do [`Message::HashCheck`].
+    /// The client is striving to be persistent. These will regularly do [`MessageKind::HashCheck`].
     #[must_use]
     pub fn persistent(&self) -> bool {
         self.persistent
@@ -203,7 +203,7 @@ impl SliceBuf<&mut Vec<u8>> {
     }
 }
 
-/// An error during [`DataSection::apply`] and [`EventApplier::apply`].
+/// An error during [`DataSection::apply`] and [`log::EventApplier::apply`].
 #[derive(Debug)]
 pub enum ApplyError {
     /// [`SliceBuf::capacity`] is too small.
@@ -268,7 +268,7 @@ pub trait Section {
             - isize::try_from(self.old_len()).expect("length too large for isize.")
     }
     /// The needed length of the [`SliceBuf`].
-    /// Should be set to this before calling [`EventApplier::Apply`].
+    /// Should be set to this before calling [`log::EventApplier::apply`].
     ///
     /// May return a value lower than `resource_len`. This should not be applied until after the
     /// application.
@@ -683,8 +683,8 @@ event_kind_impl!(DeleteEvent, Delete);
 pub enum EventKind<S> {
     /// Modification.
     ///
-    /// If the [`ModifyEvent::section()`] start **and** end is `0`, this is considered a file
-    /// creation. See [`Self::Move`] on how this affects the move operation.
+    /// You need to make a [`Self::Create`] event before modifying the resource.
+    /// If you don't do this, the modification MUST NOT be applied.
     Modify(ModifyEvent<S>),
     /// Creation.
     ///
@@ -714,7 +714,7 @@ impl<S> Event<S> {
     /// Creates a new event from `kind` with the `timestamp`.
     ///
     /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
-    /// else the sync will risk wrong results, forcing [`Message::HashCheck`].
+    /// else the sync will risk wrong results, forcing [`MessageKind::HashCheck`].
     pub fn with_timestamp(kind: EventKind<S>, timestamp: SystemTime) -> Self {
         Self {
             kind,
@@ -973,7 +973,7 @@ impl Message {
 
 /// The main manager of a client.
 ///
-/// The `process_*` methods are for creating [`Message`]s.
+/// The `process_*` methods are for creating [`Message`]s from internal data.
 /// The `apply_*` methods are for accepting and evaluating [`Message`]s.
 #[derive(Debug)]
 #[must_use]
@@ -1020,14 +1020,25 @@ impl Manager {
     pub(crate) fn generate_uuid(&mut self) -> Uuid {
         Uuid::with_rng(&mut self.rng)
     }
-    /// Takes a [`EventMessage`] and returns a [`Message`].
+    /// Creates a [`Message`] with [`Self::uuid`] and a random message [`Uuid`].
+    #[inline]
+    fn process(&mut self, message: MessageKind) -> Message {
+        Message::new(message, self.uuid(), self.generate_uuid())
+    }
+    /// Creates a [`MessageKind::Hello`] with the [`Capabilities`] of this manager.
+    pub fn process_hello(&mut self) -> Message {
+        self.process(MessageKind::Hello(self.capabilities.clone()))
+    }
+    /// Takes a [`DatafulEvent`] and returns a [`Message`].
     ///
-    /// Be careful to have a [`EventKind::Create`] before the resource receives a [`EventKind::Modify`].
+    /// Be careful with [`EventKind::Modify`] as you NEED to have a
+    /// [`EventKind::Create`] before it on the same resource.
     #[inline]
     pub fn process_event(&mut self, event: DatafulEvent) -> Message {
-        Message::new(MessageKind::Event(event), self.uuid(), self.generate_uuid())
+        self.process(MessageKind::Event(event))
     }
-    /// `pos_in_event_message` MUST be the true value. Else, the ordering will fail
+    /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
+    /// handle the events.
     ///
     /// # Errors
     ///
