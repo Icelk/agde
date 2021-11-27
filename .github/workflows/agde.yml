@@ -3,15 +3,15 @@ name: Den CI
 on:
     push:
         paths:
-            - "den/**"
-            - ".github/workflows/den.yml"
+            - "agde/**"
+            - ".github/workflows/agde.yml"
 
 env:
     CARGO_TERM_COLOR: always
 
 defaults:
     run:
-        working-directory: den
+        working-directory: agde
 
 jobs:
     check:
@@ -32,5 +32,5 @@ jobs:
               run: cargo test
             - uses: Icelk/rustdoc-link-check@v1
               with:
-                  working-directory: den
+                  working-directory: agde
                   private: true
