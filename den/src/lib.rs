@@ -57,7 +57,7 @@
 //! # Future improvements
 //!
 //! - [ ] Rolling hash
-//! - [ ] Multi-threaded [`Signature::dif`]
+//! - [ ] Multi-threaded [`Signature::diff`]
 //! - [ ] Support read/write
 //!     - [ ] Support to diff a reader
 //!     - [ ] Support to apply to a writer
