@@ -19,4 +19,5 @@ den = { path = "../den" }
 semver = { version = "^1", features = ["serde"] }
 serde = { version = "^1", features = ["derive"] }
 sha3 = "^0.9"
+twox-hash = "^1.6"
 rand = "^0.8"

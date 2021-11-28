@@ -1,9 +1,15 @@
 //! Logs for [`crate::Manager`].
 
 use std::collections::VecDeque;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::hash::Hasher;
+use std::time::Duration;
 
-use crate::{ApplyError, DataSection, EmptySection, Event, EventKind, Section, SliceBuf, Uuid};
+use serde::{Deserialize, Serialize};
+use twox_hash::xxh3::HasherExt;
+
+use crate::{
+    dur_now, ApplyError, DataSection, EmptySection, Event, EventKind, Section, SliceBuf, Uuid,
+};
 
 /// A received event.
 ///
@@ -65,8 +71,7 @@ impl EventLog {
     }
     /// Requires the `self.list` is sorted.
     fn trim(&mut self) {
-        let now = SystemTime::now();
-        let since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+        let since_epoch = dur_now();
         let limit = since_epoch
             .checked_sub(self.lifetime)
             .unwrap_or(Duration::ZERO);
@@ -92,9 +97,7 @@ impl EventLog {
         event: &Event<impl Section>,
         message_uuid: Uuid,
     ) -> Result<(), Error> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
+        let now = dur_now();
         // The timestamp is after now!
         if (event
             .timestamp()
@@ -294,26 +297,115 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     }
 }
 
-// `TODO`: implement
+#[derive(Debug)]
+pub(crate) enum UuidLogError {
+    CountTooBig,
+    /// Cutoff is missing in list.
+    CutoffMissing,
+}
+
 #[derive(Debug)]
 #[must_use]
-pub(crate) struct MessageUuidLog {
+pub(crate) struct EventUuidLog {
     // We need ordering and fast insertions at the front and deletions at the back, here a
     // `VecDeque` is a perfect fit!
-    list: VecDeque<Uuid>,
+    list: VecDeque<(Uuid, Duration)>,
     limit: u32,
 }
-impl MessageUuidLog {
+impl EventUuidLog {
     pub(crate) fn new(limit: u32) -> Self {
         Self {
             list: VecDeque::new(),
             limit,
         }
     }
-    #[allow(dead_code)] // TODO: remove this allow lint
+    pub(crate) fn insert(&mut self, message_uuid: Uuid, event_timestamp: Duration) {
+        self.trim();
+        self.list.push_front((message_uuid, event_timestamp));
+        self.sort_last();
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.list.len()
+    }
+    /// # Panics
+    ///
+    /// Panics if `self.list` has no items.
+    fn sort_last(&mut self) {
+        use std::cmp::Ordering;
+
+        let last = self.list.front().unwrap();
+        let mut position = 0;
+        for (pos, (uuid, timestamp)) in self.list.iter().enumerate() {
+            match timestamp.cmp(&last.1) {
+                Ordering::Less => break,
+                Ordering::Greater => position = pos,
+                Ordering::Equal => match uuid.cmp(&last.0) {
+                    Ordering::Less | Ordering::Equal => break, // Well, fuck. Two identical event UUIDs. Not probable.
+                    Ordering::Greater => position = pos,
+                },
+            }
+        }
+        self.list.swap(0, position);
+    }
     pub(crate) fn trim(&mut self) {
-        while self.list.len() > self.limit as usize {
+        while self.len() > self.limit as usize {
             self.list.pop_back();
         }
     }
+    /// Returns an appropriate cutoff for [`Self::get`] represented as
+    /// it's position from the start (front) of the list.
+    ///
+    /// Returns [`None`] if `self.list` has no elements.
+    pub(crate) fn appropriate_cutoff(&self) -> Option<usize> {
+        let now = dur_now();
+        let target = now - Duration::from_secs(2);
+        for (pos, (_, time)) in self.list.iter().copied().enumerate() {
+            if time <= target {
+                return Some(pos);
+            }
+        }
+        None
+    }
+    /// Gets the hashed log with `count` events and `cutoff` as the latest event to be included.
+    ///
+    /// # Errors
+    ///
+    /// `cutoff` must exist in the internal list and
+    /// `count` events must exist in the remaining list.
+    pub(crate) fn get(&self, count: u32, cutoff: usize) -> Result<EventUuidLogCheck, UuidLogError> {
+        let uuid = if let Some(uuid) = self.list.get(cutoff) {
+            uuid.0
+        } else {
+            return Err(UuidLogError::CutoffMissing);
+        };
+        let end = cutoff;
+        let start = if let Some(start) = end.checked_sub(count as usize) {
+            start
+        } else {
+            return Err(UuidLogError::CountTooBig);
+        };
+        let iter = self.list.range(start..end);
+        let mut hasher = twox_hash::xxh3::Hash128::default();
+        for (uuid, _) in iter {
+            hasher.write(&uuid.inner().to_le_bytes());
+        }
+        let hash = hasher.finish_ext();
+
+        let check = EventUuidLogCheck {
+            log_hash: hash.to_le_bytes(),
+            count,
+            cutoff: uuid,
+        };
+        Ok(check)
+    }
+}
+/// A check of the event UUID log.
+///
+/// A discrepancy indicates differing thought of what the data should be.
+/// Often, a [`crate::MessageKind::HashCheck`] is sent if that's the case.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+pub struct EventUuidLogCheck {
+    log_hash: [u8; 16],
+    count: u32,
+    cutoff: Uuid,
 }

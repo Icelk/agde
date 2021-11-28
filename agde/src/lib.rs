@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+pub use log::EventUuidLogCheck;
+
 /// The current version of this `agde` library.
 pub const VERSION: semver::Version = semver::Version::new(0, 1, 0);
 
@@ -677,6 +679,13 @@ event_kind_impl!(ModifyEvent<T>, Modify);
 event_kind_impl!(CreateEvent, Create);
 event_kind_impl!(DeleteEvent, Delete);
 
+/// Returns the time since [`UNIX_EPOCH`].
+pub(crate) fn dur_now() -> Duration {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+}
+
 /// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
@@ -812,11 +821,16 @@ pub enum MessageKind {
     ///
     /// Will declare it's capabilities.
     ///
-    /// Expects a [`Self::Welcome`] or [`Self::InvalidUuid`].
+    /// # Responses
+    ///
+    /// Expects a [`Self::Welcome`], [`Self::InvalidUuid`], or [`Self::MismatchingVersions`].
     Hello(Capabilities),
     /// Response to the [`Self::Hello`] message.
     Welcome(Capabilities),
     /// The [`MessageKind::Hello`] uses an occupied UUID.
+    ///
+    /// If a critical count of piers respond with this,
+    /// change UUID and send [`Self::Hello`] again.
     InvalidUuid,
     /// The [`Capabilities::version()`] is not compatible.
     ///
@@ -829,7 +843,12 @@ pub enum MessageKind {
     /// Contains the list of which documents were edited and size at last session.
     /// `TODO`: Only sync the remote repo, as that's what we want to sync so we can commit.
     ///
+    /// # Responses
+    ///
     /// You should respond with a [`Self::FastForwardReply`].
+    /// That contains which resources you should sync.
+    ///
+    /// Then, send a [`Self::Sync`] request and
     FastForward,
     /// A reply to a [`Self::FastForward`] request.
     FastForwardReply,
@@ -841,12 +860,17 @@ pub enum MessageKind {
     HashCheck,
     /// A reply with all the hashes of all the requested files.
     HashCheckReply,
-    /// Checks the internal message UUID log.
+    /// Checks the internal event UUID log.
+    ///
+    /// # Responses
+    ///
+    /// If any discrepancy is found, you should send back a [`Self::HashCheck`].
+    /// If everything is ok, don't respond.
     ///
     /// `TODO`: specify last x messages with a timestamp to filter later messages.
     /// Sort them before sending; we have a sorted events
     /// guaranteed, so now we ignore order of messages.
-    MessageUuidLogCheck,
+    EventUuidLogCheck(EventUuidLogCheck),
     /// The target client cancelled the request.
     ///
     /// This may be the result of too many requests.
@@ -983,7 +1007,7 @@ pub struct Manager {
     clients: HashMap<Uuid, Capabilities>,
 
     event_log: log::EventLog,
-    message_uuid_log: log::MessageUuidLog,
+    event_uuid_log: log::EventUuidLog,
 }
 impl Manager {
     /// Creates a empty manager.
@@ -991,12 +1015,12 @@ impl Manager {
     /// Call [`Self::process_hello()`] to get a hello message.
     ///
     /// The options are partially explained in [`Capabilities::new`].
-    /// I recommend a default of `60s` for `log_lifetime` and `200` for `message_log_limit`.
+    /// I recommend a default of `60s` for `log_lifetime` and `512` for `message_log_limit`.
     pub fn new(
         persistent: bool,
         help_desire: i16,
         log_lifetime: Duration,
-        message_log_limit: u32,
+        event_log_limit: u32,
     ) -> Self {
         let mut rng = rand::thread_rng();
         let uuid = Uuid::with_rng(&mut rng);
@@ -1008,7 +1032,7 @@ impl Manager {
             clients: HashMap::new(),
 
             event_log: log::EventLog::new(log_lifetime),
-            message_uuid_log: log::MessageUuidLog::new(message_log_limit),
+            event_uuid_log: log::EventUuidLog::new(event_log_limit),
         }
     }
     /// Gets the UUID of this client.
@@ -1037,6 +1061,27 @@ impl Manager {
     pub fn process_event(&mut self, event: DatafulEvent) -> Message {
         self.process(MessageKind::Event(event))
     }
+    /// May return a message with it's `count` set lower than this.
+    ///
+    /// If there isn't enough events in the log, this returns [`None`].
+    pub fn process_event_uuid_log_check(&mut self, count: u32) -> Option<Message> {
+        // after this call, we are guaranteed to have at least 1 event in the log.
+        let pos = self.event_uuid_log.appropriate_cutoff()?;
+        // this should NEVER not fit inside an u32 as the limit is an u32.
+        #[allow(clippy::cast_possible_truncation)]
+        let possible_count = (self.event_uuid_log.len() - 1 - pos) as u32;
+        // If possible_count is less than half the requested, return nothing.
+        if possible_count * 2 < count {
+            return None;
+        }
+
+        let count = cmp::min(count, possible_count);
+
+        let check = self.event_uuid_log.get(count, pos).expect(
+            "with the values we give, this shouldn't panic. Report this bug if it has occured.",
+        );
+        Some(self.process(MessageKind::EventUuidLogCheck(check)))
+    }
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
     /// handle the events.
     ///
@@ -1052,6 +1097,7 @@ impl Manager {
         message_uuid: Uuid,
     ) -> Result<log::EventApplier<'a, VecSection>, log::Error> {
         self.event_log.insert(event, message_uuid)?;
+        self.event_uuid_log.insert(message_uuid, event.timestamp);
         Ok(self.event_log.event_applier(event, message_uuid))
     }
 }
