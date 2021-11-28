@@ -17,7 +17,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub use log::EventUuidLogCheck;
+pub use log::{EventUuidLogCheck, EventUuidLogCheckAction};
+
+use crate::log::EventUuidLog;
 
 /// The current version of this `agde` library.
 pub const VERSION: semver::Version = semver::Version::new(0, 1, 0);
@@ -813,7 +815,11 @@ impl Default for Uuid {
 }
 
 /// The kinds of messages with their data. Part of a [`Message`].
+///
+/// On direct messages, send a communication UUID which can be [`Self::Canceled`].
 // `TODO`: implement the rest of these.
+// `TODO`: Conversation UUID so multiple exchanges of some of these kinds
+// can take place at the same time.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum MessageKind {
@@ -821,7 +827,7 @@ pub enum MessageKind {
     ///
     /// Will declare it's capabilities.
     ///
-    /// # Responses
+    /// # Replies
     ///
     /// Expects a [`Self::Welcome`], [`Self::InvalidUuid`], or [`Self::MismatchingVersions`].
     Hello(Capabilities),
@@ -843,7 +849,7 @@ pub enum MessageKind {
     /// Contains the list of which documents were edited and size at last session.
     /// `TODO`: Only sync the remote repo, as that's what we want to sync so we can commit.
     ///
-    /// # Responses
+    /// # Replies
     ///
     /// You should respond with a [`Self::FastForwardReply`].
     /// That contains which resources you should sync.
@@ -862,15 +868,20 @@ pub enum MessageKind {
     HashCheckReply,
     /// Checks the internal event UUID log.
     ///
-    /// # Responses
+    /// # Replies
+    ///
+    /// Always send back a [`Self::EventUuidLogCheckReply`] to tell others which "version" you
+    /// have.
     ///
     /// If any discrepancy is found, you should send back a [`Self::HashCheck`].
     /// If everything is ok, don't respond.
-    ///
-    /// `TODO`: specify last x messages with a timestamp to filter later messages.
-    /// Sort them before sending; we have a sorted events
-    /// guaranteed, so now we ignore order of messages.
     EventUuidLogCheck(EventUuidLogCheck),
+    /// A reply to [`Self::EventUuidLogCheck`].
+    ///
+    /// This is used to determine which "version" of the data is the correct one.
+    /// This should not be responded to, but maybe kept a few seconds to keep the piers with
+    /// the "correct version".
+    EventUuidLogCheckReply(EventUuidLogCheck),
     /// The target client cancelled the request.
     ///
     /// This may be the result of too many requests.
@@ -1004,10 +1015,14 @@ impl Message {
 pub struct Manager {
     capabilities: Capabilities,
     rng: rand::rngs::ThreadRng,
-    clients: HashMap<Uuid, Capabilities>,
+    piers: HashMap<Uuid, Capabilities>,
 
     event_log: log::EventLog,
     event_uuid_log: log::EventUuidLog,
+    // `TODO`: investigate where to store which piers sent what on a
+    // [`MessageKind::EventUuidLogCheck`] to determine which to choose.
+    // Does the implementor or we store it?
+    // How do we handle multiple conversations?
 }
 impl Manager {
     /// Creates a empty manager.
@@ -1029,7 +1044,7 @@ impl Manager {
         Self {
             capabilities,
             rng,
-            clients: HashMap::new(),
+            piers: HashMap::new(),
 
             event_log: log::EventLog::new(log_lifetime),
             event_uuid_log: log::EventUuidLog::new(event_log_limit),
@@ -1063,10 +1078,13 @@ impl Manager {
     }
     /// May return a message with it's `count` set lower than this.
     ///
+    /// `count` should be around 1/4 of the limit of the event UUID log to maximise profits for all
+    /// piers on the network.
+    ///
     /// If there isn't enough events in the log, this returns [`None`].
     pub fn process_event_uuid_log_check(&mut self, count: u32) -> Option<Message> {
         // after this call, we are guaranteed to have at least 1 event in the log.
-        let pos = self.event_uuid_log.appropriate_cutoff()?;
+        let (pos, cutoff_timestamp) = self.event_uuid_log.appropriate_cutoff()?;
         // this should NEVER not fit inside an u32 as the limit is an u32.
         #[allow(clippy::cast_possible_truncation)]
         let possible_count = (self.event_uuid_log.len() - 1 - pos) as u32;
@@ -1077,9 +1095,12 @@ impl Manager {
 
         let count = cmp::min(count, possible_count);
 
-        let check = self.event_uuid_log.get(count, pos).expect(
-            "with the values we give, this shouldn't panic. Report this bug if it has occured.",
-        );
+        let check = self
+            .event_uuid_log
+            .get(count, pos, cutoff_timestamp)
+            .expect(
+                "with the values we give, this shouldn't panic. Report this bug if it has occured.",
+            );
         Some(self.process(MessageKind::EventUuidLogCheck(check)))
     }
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
@@ -1099,5 +1120,53 @@ impl Manager {
         self.event_log.insert(event, message_uuid)?;
         self.event_uuid_log.insert(message_uuid, event.timestamp);
         Ok(self.event_log.event_applier(event, message_uuid))
+    }
+    /// Handles a [`MessageKind::EventUuidLogCheck`].
+    /// This will return an [`EventUuidLogCheckAction`] which tells you what to do.
+    pub fn apply_event_uuid_log_check(
+        &mut self,
+        check: &EventUuidLogCheck,
+    ) -> EventUuidLogCheckAction {
+        fn new_cutoff(log: &EventUuidLog, cutoff: Duration, count: u32) -> EventUuidLogCheckAction {
+            let pos = if let Some(pos) = log.cutoff_from_time(cutoff) {
+                pos
+            } else {
+                return EventUuidLogCheckAction::Nothing;
+            };
+            match log.get(count, pos, cutoff) {
+                Ok(check) => EventUuidLogCheckAction::SendAndFurtherCheck(check),
+                Err(log::EventUuidLogError::CountTooBig) => EventUuidLogCheckAction::Nothing,
+                Err(log::EventUuidLogError::CutoffMissing) => {
+                    unreachable!("we got the cutoff above, this must exist in the log.")
+                }
+            }
+        }
+
+        let cutoff = if let Some(cutoff) = self.event_uuid_log.cutoff_from_uuid(check.cutoff()) {
+            cutoff
+        } else {
+            return new_cutoff(
+                &self.event_uuid_log,
+                check.cutoff_timestamp(),
+                check.count(),
+            );
+        };
+        match self
+            .event_uuid_log
+            .get(check.count(), cutoff, check.cutoff_timestamp())
+        {
+            Ok(check) => EventUuidLogCheckAction::Send(check),
+            Err(err) => match err {
+                // We don't have a large enough log. Ignore.
+                // See comment in [`Self::process_event_uuid_log_check`].
+                log::EventUuidLogError::CountTooBig => EventUuidLogCheckAction::Nothing,
+                // We don't have the UUID of the cutoff!
+                log::EventUuidLogError::CutoffMissing => new_cutoff(
+                    &self.event_uuid_log,
+                    check.cutoff_timestamp(),
+                    check.count(),
+                ),
+            },
+        }
     }
 }

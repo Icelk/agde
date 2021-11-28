@@ -298,7 +298,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
 }
 
 #[derive(Debug)]
-pub(crate) enum UuidLogError {
+pub(crate) enum EventUuidLogError {
     CountTooBig,
     /// Cutoff is missing in list.
     CutoffMissing,
@@ -352,19 +352,30 @@ impl EventUuidLog {
             self.list.pop_back();
         }
     }
-    /// Returns an appropriate cutoff for [`Self::get`] represented as
-    /// it's position from the start (front) of the list.
-    ///
-    /// Returns [`None`] if `self.list` has no elements.
-    pub(crate) fn appropriate_cutoff(&self) -> Option<usize> {
-        let now = dur_now();
-        let target = now - Duration::from_secs(2);
-        for (pos, (_, time)) in self.list.iter().copied().enumerate() {
-            if time <= target {
+    pub(crate) fn cutoff_from_uuid(&self, cutoff_uuid: Uuid) -> Option<usize> {
+        for (pos, (uuid, _)) in self.list.iter().copied().enumerate() {
+            if uuid == cutoff_uuid {
                 return Some(pos);
             }
         }
         None
+    }
+    pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
+        for (pos, (_, time)) in self.list.iter().copied().enumerate() {
+            if time <= cutoff {
+                return Some(pos);
+            }
+        }
+        None
+    }
+    /// Returns an appropriate cutoff for [`Self::get`] represented as
+    /// it's position from the start (front) of the list and the target cutoff timestamp.
+    ///
+    /// Returns [`None`] if `self.list` has no elements.
+    pub(crate) fn appropriate_cutoff(&self) -> Option<(usize, Duration)> {
+        let now = dur_now();
+        let target = now - Duration::from_secs(2);
+        self.cutoff_from_time(target).map(|cutoff| (cutoff, target))
     }
     /// Gets the hashed log with `count` events and `cutoff` as the latest event to be included.
     ///
@@ -372,17 +383,22 @@ impl EventUuidLog {
     ///
     /// `cutoff` must exist in the internal list and
     /// `count` events must exist in the remaining list.
-    pub(crate) fn get(&self, count: u32, cutoff: usize) -> Result<EventUuidLogCheck, UuidLogError> {
+    pub(crate) fn get(
+        &self,
+        count: u32,
+        cutoff: usize,
+        cutoff_timestamp: Duration,
+    ) -> Result<EventUuidLogCheck, EventUuidLogError> {
         let uuid = if let Some(uuid) = self.list.get(cutoff) {
             uuid.0
         } else {
-            return Err(UuidLogError::CutoffMissing);
+            return Err(EventUuidLogError::CutoffMissing);
         };
         let end = cutoff;
         let start = if let Some(start) = end.checked_sub(count as usize) {
             start
         } else {
-            return Err(UuidLogError::CountTooBig);
+            return Err(EventUuidLogError::CountTooBig);
         };
         let iter = self.list.range(start..end);
         let mut hasher = twox_hash::xxh3::Hash128::default();
@@ -395,6 +411,7 @@ impl EventUuidLog {
             log_hash: hash.to_le_bytes(),
             count,
             cutoff: uuid,
+            cutoff_timestamp,
         };
         Ok(check)
     }
@@ -404,8 +421,40 @@ impl EventUuidLog {
 /// A discrepancy indicates differing thought of what the data should be.
 /// Often, a [`crate::MessageKind::HashCheck`] is sent if that's the case.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[must_use]
 pub struct EventUuidLogCheck {
     log_hash: [u8; 16],
     count: u32,
     cutoff: Uuid,
+    cutoff_timestamp: Duration,
+}
+impl EventUuidLogCheck {
+    /// Gets the count of events to be included, temporally before the [`Self::cutoff`].
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+    /// Gets the UUID of the latest event to be included.
+    pub fn cutoff(&self) -> Uuid {
+        self.cutoff
+    }
+    /// Gets the timestamp before or at which all events are included.
+    #[must_use]
+    pub fn cutoff_timestamp(&self) -> Duration {
+        self.cutoff_timestamp
+    }
+}
+/// The action to execute after receiving a [`crate::MessageKind::EventUuidLogCheck`].
+#[derive(Debug)]
+#[must_use]
+pub enum EventUuidLogCheckAction {
+    /// The logs match. Send a [`crate::MessageKind::EventUuidLogCheckReply`] with this
+    /// [`EventUuidLogCheck`].
+    Send(EventUuidLogCheck),
+    /// The logs don't match. Do the same as with [`Self::Send`] AND wait a few seconds (e.g. 10)
+    /// and then do a full check of the files. Something's not adding up.
+    SendAndFurtherCheck(EventUuidLogCheck),
+    /// Our log was too small. We can therefore not participate in this exchange.
+    /// Do nothing.
+    Nothing,
 }
