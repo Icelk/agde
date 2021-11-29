@@ -10,12 +10,11 @@ fn send_diff() {
     let (message_bin, message_base64, sender_uuid): (Vec<u8>, String, Uuid) = {
         let mut manager = manager();
 
-        let event: Event<_> = ModifyEvent::new(
+        let event = ModifyEvent::new(
             "test.txt".into(),
             vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
             None,
-        )
-        .into();
+        );
 
         let message = manager.process_event(event);
 
@@ -112,9 +111,14 @@ fn rework_history() {
         (
             sender.process_event(Event::with_timestamp(
                 first_event,
+                sender.uuid(),
                 SystemTime::now() - Duration::from_secs(10),
             )),
-            sender.process_event(Event::with_timestamp(second_event, SystemTime::now())),
+            sender.process_event(Event::with_timestamp(
+                second_event,
+                sender.uuid(),
+                SystemTime::now(),
+            )),
         )
     };
 
@@ -147,7 +151,7 @@ fn basic_diff() {
 
     let mut mgr = manager();
 
-    let event: Event<_> = ModifyEvent::new(
+    let event = ModifyEvent::new(
         "diff.bin".into(),
         vec![VecSection::whole_resource(
             res.filled().len(),
@@ -155,8 +159,7 @@ fn basic_diff() {
                 .to_vec(),
         )],
         Some(res.filled()),
-    )
-    .into();
+    );
 
     let message = mgr.process_event(event);
 

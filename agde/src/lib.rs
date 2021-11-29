@@ -669,12 +669,25 @@ macro_rules! event_kind_impl {
                 Self::$enum_name(event)
             }
         }
-        impl<'a, T> From<$type> for Event<T> {
-            fn from(event: $type) -> Self {
-                Self::new(event.into())
+        impl<'a, T> IntoEvent<T> for $type {
+            fn into_ev(self, manager: &Manager) -> Event<T> {
+                Event::new(self.into(), manager.uuid())
             }
         }
     };
+}
+
+/// Helper trait to convert from `*Event` structs to [`Event`].
+///
+/// Should not be implemented but used with [`Manager::process_event`].
+pub trait IntoEvent<SectionKind> {
+    /// Converts `self` into an [`Event`].
+    fn into_ev(self, manager: &Manager) -> Event<SectionKind>;
+}
+impl<T> IntoEvent<T> for Event<T> {
+    fn into_ev(self, _manager: &Manager) -> Event<T> {
+        self
+    }
 }
 
 event_kind_impl!(ModifyEvent<T>, Modify);
@@ -716,22 +729,24 @@ pub struct Event<S> {
     kind: EventKind<S>,
     /// Duration since UNIX_EPOCH
     timestamp: Duration,
+    sender: Uuid,
 }
 impl<S> Event<S> {
     /// Creates a new event from `kind`.
-    pub fn new(kind: EventKind<S>) -> Self {
-        Self::with_timestamp(kind, SystemTime::now())
+    pub fn new(kind: EventKind<S>, sender: Uuid) -> Self {
+        Self::with_timestamp(kind, sender, SystemTime::now())
     }
     /// Creates a new event from `kind` with the `timestamp`.
     ///
     /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
     /// else the sync will risk wrong results, forcing [`MessageKind::HashCheck`].
-    pub fn with_timestamp(kind: EventKind<S>, timestamp: SystemTime) -> Self {
+    pub fn with_timestamp(kind: EventKind<S>, sender: Uuid, timestamp: SystemTime) -> Self {
         Self {
             kind,
             timestamp: timestamp
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO),
+            sender,
         }
     }
     /// Returns a reference to the target resource name.
@@ -764,6 +779,11 @@ impl<S> Event<S> {
     pub fn timestamp(&self) -> Duration {
         self.timestamp
     }
+    /// Returns the UUID of the sender of this event.
+    #[inline]
+    pub fn sender(&self) -> Uuid {
+        self.sender
+    }
 }
 /// Clones the `resource` [`String`].
 impl<S: Section> From<&Event<S>> for Event<EmptySection> {
@@ -778,7 +798,8 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
         };
         Event {
             kind,
-            timestamp: ev.timestamp,
+            timestamp: ev.timestamp(),
+            sender: ev.sender(),
         }
     }
 }
@@ -833,16 +854,17 @@ pub enum MessageKind {
     Hello(Capabilities),
     /// Response to the [`Self::Hello`] message.
     Welcome(Capabilities),
-    /// The [`MessageKind::Hello`] uses an occupied UUID.
+    /// The sender of [`MessageKind::Hello`] of the contained [`Uuid`] uses an occupied UUID.
     ///
     /// If a critical count of piers respond with this,
     /// change UUID and send [`Self::Hello`] again.
-    InvalidUuid,
+    InvalidUuid(Uuid),
     /// The [`Capabilities::version()`] is not compatible.
     ///
-    /// The sending client will not add UUID of the [`Self::Hello`] message to the known clients.
+    /// The sending client (with the contained [`Uuid`])
+    /// will not add UUID of the [`Self::Hello`] message to the known clients.
     /// The sender of the Hello should ignore all future messages from this client.
-    MismatchingVersions,
+    MismatchingVersions(Uuid),
     /// A client has new data to share.
     Event(DatafulEvent),
     /// A client tries to get the most recent data.
@@ -1073,8 +1095,8 @@ impl Manager {
     /// Be careful with [`EventKind::Modify`] as you NEED to have a
     /// [`EventKind::Create`] before it on the same resource.
     #[inline]
-    pub fn process_event(&mut self, event: DatafulEvent) -> Message {
-        self.process(MessageKind::Event(event))
+    pub fn process_event(&mut self, event: impl IntoEvent<VecSection>) -> Message {
+        self.process(MessageKind::Event(event.into_ev(self)))
     }
     /// May return a message with it's `count` set lower than this.
     ///
