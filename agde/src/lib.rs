@@ -1,4 +1,17 @@
 //! A general decentralized sync library supporting text and binary.
+//!
+//! # Vocabulary
+//!
+//! Here are some terms I use throughout the codebase and documentation.
+//!
+//! - resource - a piece of data (e.g. a file).
+//!     May also be used to denote the location of a resource.
+//! - pier - another client on the network.
+//! - help desire - how much a pier wants to help others in the network.
+//! - conversation - a exchange of some related data (e.g. [`MessageKind::EventUuidLogCheck`]).
+//! - [`Section`] a splice operation to a resource.
+//! - UUID - a unique identifier for a unit (e.g. conversation, [`Message`])
+//! - logs - internal lists to compensate for inconsistencies in message arrival time.
 
 #![deny(
     clippy::pedantic,
@@ -516,7 +529,7 @@ impl Section for EmptySection {
     }
 }
 
-/// A selection of data in a document.
+/// A selection of data in a resource.
 ///
 /// Comparable to `slice` functions in various languages (e.g. [JS](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/splice)).
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -639,7 +652,7 @@ impl<S> ModifyEvent<S> {
         &self.resource
     }
 }
-/// A deletion of a resource.
+/// Deletion of a resource.
 ///
 /// The resource must be initialised using [`CreateEvent`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -872,7 +885,7 @@ impl Default for Uuid {
 
 /// The kinds of messages with their data. Part of a [`Message`].
 ///
-/// On direct messages, send a communication UUID which can be [`Self::Canceled`].
+/// On direct messages, send a conversation UUID which can be [`Self::Canceled`].
 // `TODO`: implement the rest of these.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
