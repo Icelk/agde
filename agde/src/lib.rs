@@ -809,7 +809,7 @@ impl<S: Section> From<&Event<S>> for Event<EmptySection> {
 pub type DatafulEvent = Event<VecSection>;
 
 /// A UUID.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize, Hash)]
 #[must_use]
 pub struct Uuid(u64);
 impl Uuid {
@@ -839,8 +839,6 @@ impl Default for Uuid {
 ///
 /// On direct messages, send a communication UUID which can be [`Self::Canceled`].
 // `TODO`: implement the rest of these.
-// `TODO`: Conversation UUID so multiple exchanges of some of these kinds
-// can take place at the same time.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum MessageKind {
@@ -895,19 +893,32 @@ pub enum MessageKind {
     /// Always send back a [`Self::EventUuidLogCheckReply`] to tell others which "version" you
     /// have.
     ///
+    /// Wait a few seconds (e.g. 10) and then call [`Manager::assure_event_uuid_log`].
     /// If any discrepancy is found, you should send back a [`Self::HashCheck`].
     /// If everything is ok, don't respond.
-    EventUuidLogCheck(EventUuidLogCheck),
+    EventUuidLogCheck {
+        /// The UUID of this check conversation.
+        uuid: Uuid,
+        /// The data of the check.
+        check: EventUuidLogCheck,
+    },
     /// A reply to [`Self::EventUuidLogCheck`].
     ///
     /// This is used to determine which "version" of the data is the correct one.
     /// This should not be responded to, but maybe kept a few seconds to keep the piers with
     /// the "correct version".
-    EventUuidLogCheckReply(EventUuidLogCheck),
+    EventUuidLogCheckReply {
+        /// The UUID of this check conversation.
+        uuid: Uuid,
+        /// The data of the check.
+        check: EventUuidLogCheck,
+    },
     /// The target client cancelled the request.
     ///
     /// This may be the result of too many requests.
     /// Should not be sent as a signal of not supporting the feature.
+    ///
+    /// If a pier request a check from all and we've reached our limit, don't send this.
     Canceled,
 }
 /// A message to be communicated between clients.
@@ -1041,10 +1052,7 @@ pub struct Manager {
 
     event_log: log::EventLog,
     event_uuid_log: log::EventUuidLog,
-    // `TODO`: investigate where to store which piers sent what on a
-    // [`MessageKind::EventUuidLogCheck`] to determine which to choose.
-    // Does the implementor or we store it?
-    // How do we handle multiple conversations?
+    event_uuid_conversation_piers: log::EventUuidReplies,
 }
 impl Manager {
     /// Creates a empty manager.
@@ -1070,6 +1078,7 @@ impl Manager {
 
             event_log: log::EventLog::new(log_lifetime),
             event_uuid_log: log::EventUuidLog::new(event_log_limit),
+            event_uuid_conversation_piers: log::EventUuidReplies::new(),
         }
     }
     /// Gets the UUID of this client.
@@ -1104,6 +1113,18 @@ impl Manager {
     /// piers on the network.
     ///
     /// If there isn't enough events in the log, this returns [`None`].
+    ///
+    /// # Replies
+    ///
+    /// After sending this, wait a few seconds and then run [`Self::assure_event_uuid_log`]
+    /// which checks if you have the "correct" version.
+    ///
+    /// When you call [`Self::apply_event_uuid_log_check`], the manager notes the
+    /// [`MessageKind::EventUuidLogCheckReply`] messages.
+    ///
+    /// # Memory leaks
+    ///
+    /// You must call [`Self::assure_event_uuid_log`] after calling this.
     pub fn process_event_uuid_log_check(&mut self, count: u32) -> Option<Message> {
         // after this call, we are guaranteed to have at least 1 event in the log.
         let (pos, cutoff_timestamp) = self.event_uuid_log.appropriate_cutoff()?;
@@ -1123,7 +1144,12 @@ impl Manager {
             .expect(
                 "with the values we give, this shouldn't panic. Report this bug if it has occured.",
             );
-        Some(self.process(MessageKind::EventUuidLogCheck(check)))
+        let uuid = self.generate_uuid();
+
+        self.event_uuid_conversation_piers
+            .insert(uuid, check.clone(), self.uuid());
+
+        Some(self.process(MessageKind::EventUuidLogCheck { uuid, check }))
     }
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
     /// handle the events.
@@ -1145,9 +1171,15 @@ impl Manager {
     }
     /// Handles a [`MessageKind::EventUuidLogCheck`].
     /// This will return an [`EventUuidLogCheckAction`] which tells you what to do.
+    ///
+    /// # Memory leaks
+    ///
+    /// You must call [`Self::assure_event_uuid_log`] after calling this.
     pub fn apply_event_uuid_log_check(
         &mut self,
-        check: &EventUuidLogCheck,
+        check: EventUuidLogCheck,
+        conversation_uuid: Uuid,
+        remote_uuid: Uuid,
     ) -> EventUuidLogCheckAction {
         fn new_cutoff(log: &EventUuidLog, cutoff: Duration, count: u32) -> EventUuidLogCheckAction {
             let pos = if let Some(pos) = log.cutoff_from_time(cutoff) {
@@ -1173,7 +1205,7 @@ impl Manager {
                 check.count(),
             );
         };
-        match self
+        let action = match self
             .event_uuid_log
             .get(check.count(), cutoff, check.cutoff_timestamp())
         {
@@ -1189,6 +1221,11 @@ impl Manager {
                     check.count(),
                 ),
             },
-        }
+        };
+
+        self.event_uuid_conversation_piers
+            .insert(conversation_uuid, check, remote_uuid);
+
+        action
     }
 }

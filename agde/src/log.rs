@@ -1,6 +1,6 @@
 //! Logs for [`crate::Manager`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hasher;
 use std::time::Duration;
 
@@ -457,4 +457,29 @@ pub enum EventUuidLogCheckAction {
     /// Our log was too small. We can therefore not participate in this exchange.
     /// Do nothing.
     Nothing,
+}
+type Conversation = HashMap<Uuid, EventUuidLogCheck>;
+#[derive(Debug)]
+pub(crate) struct EventUuidReplies {
+    conversations: HashMap<Uuid, Conversation>,
+}
+impl EventUuidReplies {
+    pub(crate) fn new() -> Self {
+        Self {
+            conversations: HashMap::new(),
+        }
+    }
+    /// `conversation` is the UUID of the current conversation. `check` is the data `source` sent.
+    pub(crate) fn insert(&mut self, conversation: Uuid, check: EventUuidLogCheck, source: Uuid) {
+        let mut conversation = self
+            .conversations
+            .entry(conversation)
+            .or_insert_with(HashMap::new);
+        conversation.insert(source, check);
+    }
+}
+impl Default for EventUuidReplies {
+    fn default() -> Self {
+        Self::new()
+    }
 }

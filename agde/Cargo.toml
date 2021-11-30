@@ -1,5 +1,6 @@
 [package]
 name = "agde"
+# Also change this in the VERSION constant of `src/lib.rs`
 version = "0.1.0"
 authors = ["Icelk <main@icelk.dev>"]
 edition = "2021"
