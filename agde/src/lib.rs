@@ -15,6 +15,7 @@ use std::cmp;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 pub use log::{EventUuidLogCheck, EventUuidLogCheckAction};
@@ -68,6 +69,7 @@ impl Capabilities {
     ///
     /// This value will go from [`i16::MIN`], which means "I want none o' this" to
     /// [`i16::MAX`] which means the client is happy to help others.
+    /// See [`Self::effective_help_desire`] for how this range is used.
     /// This will usually be set in accordance to the free processing power a client has to offer.
     ///
     /// This will play part in deciding which client to send check requests to.
@@ -76,6 +78,39 @@ impl Capabilities {
     #[must_use]
     pub fn help_desire(&self) -> i16 {
         self.help_desire
+    }
+    /// Returns a desire to help in a lower range.
+    ///
+    /// This can be used to calculate the relative desire.
+    /// For now, the whole [`i16`] range is collapsed to [0..9)
+    /// This uses a root function (`⁵√self.help_desire`).
+    /// This leads to a `help_desire` of `1024` being just
+    /// half as likely to be chosen as [`i16::MAX`].
+    /// A `help_desire` of `0` returns `1` from this function.
+    /// The value returned from this function will never be `0` or less.
+    #[allow(clippy::missing_panics_doc)] // this is only a internal check.
+    #[must_use]
+    pub fn effective_help_desire(&self) -> f32 {
+        let desire = f32::from(self.help_desire());
+        let effective = desire.powf(0.2);
+        // Here, we need effective to be in range [-8..8]
+        assert!(
+            effective > -8.0 && effective < 8.0,
+            "Effective must be in range [-8..8]. Please report this internal bug."
+        );
+        if effective.is_sign_positive() || effective == 0.0 {
+            // Map (0..8]
+            // to
+            // (1..9]
+            effective + 1.0
+        } else {
+            // Map [-8..0]
+            // to
+            // [0..8]
+            // to
+            // [0..1]
+            (effective + 8.0) / 8.0
+        }
     }
 }
 
@@ -1227,5 +1262,58 @@ impl Manager {
             .insert(conversation_uuid, check, remote_uuid);
 
         action
+    }
+
+    pub(crate) fn filter_piers<'a>(
+        &'a self,
+        filter: impl Fn(Uuid, &Capabilities) -> bool + 'a + Clone,
+    ) -> impl Iterator<Item = (Uuid, &'a Capabilities)> + Clone {
+        self.piers.iter().filter_map(move |(uuid, capabilities)| {
+            if filter(*uuid, capabilities) {
+                Some((*uuid, capabilities))
+            } else {
+                None
+            }
+        })
+    }
+    /// Returns [`None`] if no pier was accepted from the `filter`.
+    pub(crate) fn choose_pier(
+        &mut self,
+        filter: impl Fn(Uuid, &Capabilities) -> bool + Clone,
+    ) -> Option<SelectedPier> {
+        let mut total_desire = 0.0;
+        for (_, capabilities) in self.filter_piers(filter.clone()) {
+            total_desire += capabilities.effective_help_desire();
+        }
+        if total_desire == 0.0 {
+            return None;
+        }
+        let mut random = self.rng.gen_range(0.0..total_desire);
+
+        for (uuid, capabilities) in self.filter_piers(filter) {
+            let desire = capabilities.effective_help_desire();
+            if random < desire {
+                return Some(SelectedPier::new(uuid));
+            }
+            random -= desire;
+        }
+        // `random` will always be less than the total desire. (it's a exclusive range).
+        // Therefore, if `random` is `total_desire - EPSILON`, the previous iterations will have
+        // subtracted so it will be less than or equal to `desire - EPSILON`, which is less than
+        // `desire`.
+        unreachable!("Please report this internal bug regarding choosing an appropriate pier from it's help desire.")
+    }
+}
+
+/// The appropriate pier selected from all piers [`Capabilities::help_desire`].
+///
+/// Used for methods of [`Manager`] to send data to specific piers.
+#[derive(Debug)]
+pub struct SelectedPier {
+    uuid: Uuid,
+}
+impl SelectedPier {
+    pub(crate) fn new(uuid: Uuid) -> Self {
+        Self { uuid }
     }
 }
