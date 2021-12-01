@@ -471,7 +471,7 @@ impl EventUuidReplies {
     }
     /// `conversation` is the UUID of the current conversation. `check` is the data `source` sent.
     pub(crate) fn insert(&mut self, conversation: Uuid, check: EventUuidLogCheck, source: Uuid) {
-        let mut conversation = self
+        let conversation = self
             .conversations
             .entry(conversation)
             .or_insert_with(HashMap::new);
