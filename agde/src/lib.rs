@@ -26,6 +26,8 @@ pub mod log;
 use std::borrow::Cow;
 use std::cmp;
 use std::collections::HashMap;
+use std::ops::DerefMut;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::Rng;
@@ -1095,7 +1097,7 @@ impl Message {
 #[must_use]
 pub struct Manager {
     capabilities: Capabilities,
-    rng: rand::rngs::ThreadRng,
+    rng: Mutex<rand::rngs::ThreadRng>,
     piers: HashMap<Uuid, Capabilities>,
 
     event_log: log::EventLog,
@@ -1121,13 +1123,17 @@ impl Manager {
 
         Self {
             capabilities,
-            rng,
+            rng: Mutex::new(rng),
             piers: HashMap::new(),
 
             event_log: log::EventLog::new(log_lifetime),
             event_uuid_log: log::EventUuidLog::new(event_log_limit),
             event_uuid_conversation_piers: log::EventUuidReplies::new(),
         }
+    }
+    /// Get the random number generator of this manager.
+    fn rng(&self) -> impl DerefMut<Target = impl rand::Rng> + '_ {
+        self.rng.lock().unwrap()
     }
     /// Gets the UUID of this client.
     pub fn uuid(&self) -> Uuid {
@@ -1136,7 +1142,8 @@ impl Manager {
     /// Generates a UUID using the internal [`rand::Rng`].
     #[inline]
     pub(crate) fn generate_uuid(&mut self) -> Uuid {
-        Uuid::with_rng(&mut self.rng)
+        let mut rng = self.rng();
+        Uuid::with_rng(&mut *rng)
     }
     /// Creates a [`Message`] with [`Self::uuid`] and a random message [`Uuid`].
     #[inline]
@@ -1276,6 +1283,78 @@ impl Manager {
 
         action
     }
+    /// Assures you are using the "correct" version of the files.
+    /// This return [`None`] if that's the case.
+    /// Otherwise returns an appropriate pier to get data from.
+    ///
+    /// Also returns [`None`] if the conversation wasn't found or no responses were sent.
+    #[allow(clippy::missing_panics_doc)] // It's safe.
+    pub fn assure_event_uuid_log(&mut self, conversation_uuid: Uuid) -> Option<SelectedPier> {
+        let conversation = self.event_uuid_conversation_piers.get(conversation_uuid)?;
+        let total_reponses = conversation.len();
+        // We are one response.
+        if total_reponses < 2 {
+            return None;
+        }
+        let mut options: Vec<([u8; 16], usize)> =
+            Vec::with_capacity(cmp::min(total_reponses / 3, 20));
+
+        for option in conversation.values() {
+            match options.binary_search_by(|(hash, _count)| hash.cmp(option.hash())) {
+                Ok(pos) => options[pos].1 += 1,
+                Err(pos) => options.insert(pos, (*option.hash(), 1)),
+            }
+        }
+        let mut most_popular = (&options[0].0, options[0].1);
+        for (hash, count) in &options {
+            let count = *count;
+
+            if count > most_popular.1 {
+                most_popular = (hash, count);
+            }
+        }
+
+        // Take the pier with highest help_desire and UUID
+        if most_popular.1 * 3 < total_reponses * 2 {
+            let mut highest = None;
+
+            for (pier, check) in conversation.iter() {
+                if check.hash() != most_popular.0 {
+                    continue;
+                }
+                let pier = if let Some(pier) = self.piers.get(pier) {
+                    pier
+                } else {
+                    continue;
+                };
+                match pier
+                    .help_desire()
+                    .cmp(&highest.map_or(i16::MIN, |(_, desire)| desire))
+                {
+                    cmp::Ordering::Less => {}
+                    cmp::Ordering::Equal => match pier
+                        .uuid()
+                        .cmp(&highest.map_or(Uuid(0), |(uuid, _)| uuid))
+                    {
+                        // Oh, shit
+                        cmp::Ordering::Equal | cmp::Ordering::Less => {}
+                        cmp::Ordering::Greater => highest = Some((pier.uuid(), pier.help_desire())),
+                    },
+                    cmp::Ordering::Greater => highest = Some((pier.uuid(), pier.help_desire())),
+                }
+            }
+            highest.map(|(uuid, _)| SelectedPier::new(uuid))
+        } else {
+            self.choose_pier(|uuid, _| {
+                let pier_check = if let Some(check) = conversation.get(&uuid) {
+                    check
+                } else {
+                    return false;
+                };
+                pier_check.hash() == most_popular.0
+            })
+        }
+    }
 
     pub(crate) fn filter_piers<'a>(
         &'a self,
@@ -1291,19 +1370,23 @@ impl Manager {
     }
     /// Returns [`None`] if no pier was accepted from the `filter`.
     pub(crate) fn choose_pier(
-        &mut self,
+        & self,
         filter: impl Fn(Uuid, &Capabilities) -> bool + Clone,
     ) -> Option<SelectedPier> {
         let mut total_desire = 0.0;
-        for (_, capabilities) in self.filter_piers(filter.clone()) {
+        for (_, capabilities) in self
+            .filter_piers(|uuid, capabilities| uuid != self.uuid() && filter(uuid, capabilities))
+        {
             total_desire += capabilities.effective_help_desire();
         }
         if total_desire == 0.0 {
             return None;
         }
-        let mut random = self.rng.gen_range(0.0..total_desire);
+        let mut random = self.rng().gen_range(0.0..total_desire);
 
-        for (uuid, capabilities) in self.filter_piers(filter) {
+        for (uuid, capabilities) in self
+            .filter_piers(|uuid, capabilities| uuid != self.uuid() && filter(uuid, capabilities))
+        {
             let desire = capabilities.effective_help_desire();
             if random < desire {
                 return Some(SelectedPier::new(uuid));

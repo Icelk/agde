@@ -443,6 +443,10 @@ impl EventUuidLogCheck {
     pub fn cutoff_timestamp(&self) -> Duration {
         self.cutoff_timestamp
     }
+    /// Gets a reference to the 16-byte long hash.
+    pub fn hash(&self ) -> &[u8; 16] {
+        &self.log_hash
+    }
 }
 /// The action to execute after receiving a [`crate::MessageKind::EventUuidLogCheck`].
 #[derive(Debug)]
@@ -476,6 +480,9 @@ impl EventUuidReplies {
             .entry(conversation)
             .or_insert_with(HashMap::new);
         conversation.insert(source, check);
+    }
+    pub(crate) fn get(&self, conversation: Uuid) -> Option<&HashMap<Uuid, EventUuidLogCheck>> {
+        self.conversations.get(&conversation)
     }
 }
 impl Default for EventUuidReplies {
