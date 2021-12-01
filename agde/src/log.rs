@@ -444,6 +444,7 @@ impl EventUuidLogCheck {
         self.cutoff_timestamp
     }
     /// Gets a reference to the 16-byte long hash.
+    #[must_use]
     pub fn hash(&self) -> &[u8; 16] {
         &self.log_hash
     }
