@@ -1370,7 +1370,7 @@ impl Manager {
     }
     /// Returns [`None`] if no pier was accepted from the `filter`.
     pub(crate) fn choose_pier(
-        & self,
+        &self,
         filter: impl Fn(Uuid, &Capabilities) -> bool + Clone,
     ) -> Option<SelectedPier> {
         let mut total_desire = 0.0;
