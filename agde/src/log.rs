@@ -7,9 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
-use crate::{
-    dur_now, DataSection, Event, EventKind, Section, SliceBuf, Uuid, section,
-};
+use crate::{event::dur_now, section, DataSection, Event, Kind, Section, SliceBuf, Uuid};
 
 /// A received event.
 ///
@@ -143,9 +141,9 @@ impl EventLog {
             for log_event in events.iter() {
                 if log_event.event.resource() == resource {
                     match &log_event.event.inner() {
-                        EventKind::Delete(_) | EventKind::Create(_) => return None,
+                        Kind::Delete(_) | Kind::Create(_) => return None,
                         // Do nothing; the file is just modified.
-                        EventKind::Modify(_) => {}
+                        Kind::Modify(_) => {}
                     }
                 }
             }
@@ -155,7 +153,7 @@ impl EventLog {
 
         let slice_index = slice_start(self, event.resource(), message_uuid);
 
-        if let EventKind::Delete(delete_ev) = event.inner() {
+        if let Kind::Delete(delete_ev) = event.inner() {
             if let Some(successor) = delete_ev.successor() {
                 for received in &mut self.list[slice_index..] {
                     if received.uuid == message_uuid {
@@ -164,17 +162,18 @@ impl EventLog {
 
                     if received.event.resource() == event.resource() {
                         match received.event.inner_mut() {
-                            EventKind::Delete(ev) => {
+                            Kind::Delete(ev) => {
                                 if Some(successor) == ev.successor() {
-                                    ev.resource = ev.successor.take().unwrap();
+                                    let successor = ev.take_successor().unwrap();
+                                    ev.set_resource(successor);
                                 } else {
-                                    ev.resource = successor.into();
+                                    ev.set_resource(successor.into());
                                 }
                             }
-                            EventKind::Modify(ev) => {
-                                ev.resource = successor.into();
+                            Kind::Modify(ev) => {
+                                ev.set_resource(successor.into());
                             }
-                            EventKind::Create(_) => break,
+                            Kind::Create(_) => break,
                         }
                     }
                 }
@@ -249,7 +248,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
         } else {
             return Ok(());
         };
-        let ev = if let EventKind::Modify(ev) = self.event.inner() {
+        let ev = if let Kind::Modify(ev) = self.event.inner() {
             ev
         } else {
             return Err(section::ApplyError::InvalidEvent);
@@ -267,13 +266,13 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
                 continue;
             }
             match received_ev.event.inner() {
-                EventKind::Modify(ev) => {
+                Kind::Modify(ev) => {
                     for section in ev.sections().iter().rev() {
                         let section = section.revert(resource)?;
                         reverted_stack.push(section);
                     }
                 }
-                EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
+                Kind::Delete(_) | Kind::Create(_) => unreachable!(
                     "Unexpected delete or create event in unwinding of event log.\
                     Please report this bug."
                 ),

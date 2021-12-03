@@ -10,7 +10,7 @@ fn send_diff() {
     let (message_bin, message_base64, sender_uuid): (Vec<u8>, String, Uuid) = {
         let mut manager = manager();
 
-        let event = ModifyEvent::new(
+        let event = event::Modify::new(
             "test.txt".into(),
             vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
             None,
@@ -36,7 +36,7 @@ fn send_diff() {
             // assert the event is to modify `test.txt` with the same section as before.
             assert_eq!(
                 event.inner(),
-                &EventKind::Modify(ModifyEvent::new(
+                &Kind::Modify(event::Modify::new(
                     "test.txt".into(),
                     vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
                     None
@@ -47,7 +47,7 @@ fn send_diff() {
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
-                EventKind::Modify(ev) => {
+                Kind::Modify(ev) => {
                     assert_eq!(event_applier.resource(), Some("test.txt"));
 
                     let mut test = Vec::new();
@@ -78,7 +78,7 @@ fn rework_history() {
                     .apply_event(event, message.uuid())
                     .expect("Got event from future.");
                 match event_applier.event().inner() {
-                    EventKind::Modify(ev) => {
+                    Kind::Modify(ev) => {
                         assert_eq!(ev.resource(), "private/secret.txt");
 
                         resource.extend_to_needed(ev.sections(), b' ');
@@ -96,13 +96,13 @@ fn rework_history() {
     let (first_message, second_message) = {
         let mut sender = manager();
 
-        let first_event = ModifyEvent::new(
+        let first_event = event::Modify::new(
             "private/secret.txt".into(),
             vec![VecSection::new(0, 0, "Hello world!".into())],
             None,
         )
         .into();
-        let second_event = ModifyEvent::new(
+        let second_event = event::Modify::new(
             "private/secret.txt".into(),
             vec![VecSection::new(6, 11, "friend".into())],
             None,
@@ -151,7 +151,7 @@ fn basic_diff() {
 
     let mut mgr = manager();
 
-    let event = ModifyEvent::new(
+    let event = event::Modify::new(
         "diff.bin".into(),
         vec![VecSection::whole_resource(
             res.filled().len(),
@@ -171,7 +171,7 @@ fn basic_diff() {
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
-                EventKind::Modify(ev) => {
+                Kind::Modify(ev) => {
                     res.extend_to_needed(ev.sections(), b' ');
 
                     event_applier.apply(&mut res).expect("Buffer too small!");
