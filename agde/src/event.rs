@@ -7,7 +7,7 @@ use crate::{
 
 /// A modification to a resource.
 ///
-/// The resource must be initialised using [`CreateEvent`].
+/// The resource must be initialised using [`Create`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Modify<S> {
@@ -79,7 +79,7 @@ impl<S> Modify<S> {
 }
 /// Deletion of a resource.
 ///
-/// The resource must be initialised using [`CreateEvent`].
+/// The resource must be initialised using [`Create`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Delete {
@@ -203,7 +203,7 @@ pub enum Kind<S> {
     Create(Create),
     /// Deletion.
     ///
-    /// Can contain a [`DeleteEvent::successor`] to hint on where the file has been moved to. This
+    /// Can contain a [`Delete::successor`] to hint on where the file has been moved to. This
     /// enables subsequent [`Event`]s to be redirected to the successor.
     /// The redirections will stop when a new [`Self::Create`] event is triggered.
     Delete(Delete),
@@ -225,7 +225,7 @@ impl<S> Event<S> {
     /// Creates a new event from `kind` with the `timestamp`.
     ///
     /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
-    /// else the sync will risk wrong results, forcing [`MessageKind::HashCheck`].
+    /// else the sync will risk wrong results, forcing [`crate::MessageKind::HashCheck`].
     pub fn with_timestamp(kind: Kind<S>, sender: Uuid, timestamp: SystemTime) -> Self {
         Self {
             kind,
@@ -246,13 +246,13 @@ impl<S> Event<S> {
             Kind::Delete(ev) => ev.resource(),
         }
     }
-    /// Returns a reference to the inner [`EventKind`] where all the event data is stored.
+    /// Returns a reference to the inner [`Kind`] where all the event data is stored.
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub fn inner(&self) -> &Kind<S> {
         &self.kind
     }
-    /// Returns a mutable reference to the inner [`EventKind`].
+    /// Returns a mutable reference to the inner [`Kind`].
     #[inline]
     pub(crate) fn inner_mut(&mut self) -> &mut Kind<S> {
         &mut self.kind

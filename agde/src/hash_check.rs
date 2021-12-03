@@ -1,4 +1,4 @@
-//! Checking of hashes of [`resource`]s.
+//! Checking of hashes of [`crate::resource`]s.
 
 use crate::{Deserialize, Serialize};
 

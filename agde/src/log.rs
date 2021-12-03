@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
-use crate::{event::dur_now, section, DataSection, Event, Kind, Section, SliceBuf, Uuid};
+use crate::{event::dur_now, section, DataSection, Event, EventKind, Section, SliceBuf, Uuid};
 
 /// A received event.
 ///
@@ -141,9 +141,9 @@ impl EventLog {
             for log_event in events.iter() {
                 if log_event.event.resource() == resource {
                     match &log_event.event.inner() {
-                        Kind::Delete(_) | Kind::Create(_) => return None,
+                        EventKind::Delete(_) | EventKind::Create(_) => return None,
                         // Do nothing; the file is just modified.
-                        Kind::Modify(_) => {}
+                        EventKind::Modify(_) => {}
                     }
                 }
             }
@@ -153,7 +153,7 @@ impl EventLog {
 
         let slice_index = slice_start(self, event.resource(), message_uuid);
 
-        if let Kind::Delete(delete_ev) = event.inner() {
+        if let EventKind::Delete(delete_ev) = event.inner() {
             if let Some(successor) = delete_ev.successor() {
                 for received in &mut self.list[slice_index..] {
                     if received.uuid == message_uuid {
@@ -162,7 +162,7 @@ impl EventLog {
 
                     if received.event.resource() == event.resource() {
                         match received.event.inner_mut() {
-                            Kind::Delete(ev) => {
+                            EventKind::Delete(ev) => {
                                 if Some(successor) == ev.successor() {
                                     let successor = ev.take_successor().unwrap();
                                     ev.set_resource(successor);
@@ -170,10 +170,10 @@ impl EventLog {
                                     ev.set_resource(successor.into());
                                 }
                             }
-                            Kind::Modify(ev) => {
+                            EventKind::Modify(ev) => {
                                 ev.set_resource(successor.into());
                             }
-                            Kind::Create(_) => break,
+                            EventKind::Create(_) => break,
                         }
                     }
                 }
@@ -229,10 +229,10 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// tl;dr, this can be unwrapped if you have called [`SliceBuf::extend_to_needed`] or
     /// [`Section::apply_len`] and made sure [`Self::event`] is a [`EventKind::Modify`].
     ///
-    /// Returns [`ApplyError::InvalidEvent`] if this [`EventApplier`] wasn't instantiated
+    /// Returns [`section::ApplyError::InvalidEvent`] if this [`EventApplier`] wasn't instantiated
     /// with a [`EventKind::Modify`].
     ///
-    /// Returns a [`ApplyError::BufTooSmall`] if the following predicate is not met.
+    /// Returns a [`section::ApplyError::BufTooSmall`] if the following predicate is not met.
     /// `resource` must be at least `max(resource.filled() + event.section().len_difference() + 1,
     /// event.section().end() + 1)`
     /// [`Section::apply_len`] guarantees this.
@@ -248,7 +248,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
         } else {
             return Ok(());
         };
-        let ev = if let Kind::Modify(ev) = self.event.inner() {
+        let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
             return Err(section::ApplyError::InvalidEvent);
@@ -266,13 +266,13 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
                 continue;
             }
             match received_ev.event.inner() {
-                Kind::Modify(ev) => {
+                EventKind::Modify(ev) => {
                     for section in ev.sections().iter().rev() {
                         let section = section.revert(resource)?;
                         reverted_stack.push(section);
                     }
                 }
-                Kind::Delete(_) | Kind::Create(_) => unreachable!(
+                EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
                     "Unexpected delete or create event in unwinding of event log.\
                     Please report this bug."
                 ),

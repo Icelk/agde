@@ -134,7 +134,7 @@ impl SliceBuf<&mut Vec<u8>> {
     }
 }
 
-/// An error during [`DataSection::apply`] and [`log::EventApplier::apply`].
+/// An error during [`DataSection::apply`] and [`crate::log::EventApplier::apply`].
 #[derive(Debug)]
 pub enum ApplyError {
     /// [`SliceBuf::capacity`] is too small.
@@ -199,7 +199,7 @@ pub trait Section {
             - isize::try_from(self.old_len()).expect("length too large for isize.")
     }
     /// The needed length of the [`SliceBuf`].
-    /// Should be set to this before calling [`log::EventApplier::apply`].
+    /// Should be set to this before calling [`crate::log::EventApplier::apply`].
     ///
     /// May return a value lower than `resource_len`. This should not be applied until after the
     /// application.
@@ -444,7 +444,7 @@ impl VecSection {
     }
     /// Creates a new section representing the entire resource.
     ///
-    /// Useful to use when passing data for [`ModifyEvent::new`] to diff.
+    /// Useful to use when passing data for [`crate::event::Modify::new`] to diff.
     pub fn whole_resource(resource_len: usize, data: Vec<u8>) -> Self {
         Self::new(0, resource_len, data)
     }

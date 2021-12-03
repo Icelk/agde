@@ -36,7 +36,7 @@ fn send_diff() {
             // assert the event is to modify `test.txt` with the same section as before.
             assert_eq!(
                 event.inner(),
-                &Kind::Modify(event::Modify::new(
+                &EventKind::Modify(event::Modify::new(
                     "test.txt".into(),
                     vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
                     None
@@ -47,7 +47,7 @@ fn send_diff() {
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
-                Kind::Modify(ev) => {
+                EventKind::Modify(ev) => {
                     assert_eq!(event_applier.resource(), Some("test.txt"));
 
                     let mut test = Vec::new();
@@ -78,7 +78,7 @@ fn rework_history() {
                     .apply_event(event, message.uuid())
                     .expect("Got event from future.");
                 match event_applier.event().inner() {
-                    Kind::Modify(ev) => {
+                    EventKind::Modify(ev) => {
                         assert_eq!(ev.resource(), "private/secret.txt");
 
                         resource.extend_to_needed(ev.sections(), b' ');
@@ -171,7 +171,7 @@ fn basic_diff() {
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
-                Kind::Modify(ev) => {
+                EventKind::Modify(ev) => {
                     res.extend_to_needed(ev.sections(), b' ');
 
                     event_applier.apply(&mut res).expect("Buffer too small!");

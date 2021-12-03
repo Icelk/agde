@@ -37,7 +37,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-pub use event::{Dataful, Event, Into as IntoEvent, Kind};
+pub use event::{Dataful as DatafulEvent, Event, Into as IntoEvent, Kind as EventKind};
 pub use log::{EventUuidLogCheck, EventUuidLogCheckAction};
 pub use section::{DataSection, Section, SliceBuf, VecSection};
 
@@ -189,7 +189,7 @@ pub enum MessageKind {
     /// The sender of the Hello should ignore all future messages from this client.
     MismatchingVersions(Uuid),
     /// A client has new data to share.
-    Event(Dataful),
+    Event(DatafulEvent),
     /// A client tries to get the most recent data.
     /// Contains the list of which documents were edited and size at last session.
     /// `TODO`: Only sync the remote repo, as that's what we want to sync so we can commit.
@@ -492,7 +492,7 @@ impl Manager {
     /// If their clock is more than 10s off relative to our, we have a serious problem!
     pub fn apply_event<'a>(
         &'a mut self,
-        event: &'a Dataful,
+        event: &'a DatafulEvent,
         message_uuid: Uuid,
     ) -> Result<log::EventApplier<'a, VecSection>, log::Error> {
         self.event_log.insert(event, message_uuid)?;
