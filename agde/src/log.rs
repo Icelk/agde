@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
 use crate::{
-    dur_now, ApplyError, DataSection, EmptySection, Event, EventKind, Section, SliceBuf, Uuid,
+    dur_now, DataSection, Event, EventKind, Section, SliceBuf, Uuid, section,
 };
 
 /// A received event.
@@ -18,7 +18,7 @@ use crate::{
 #[derive(Debug)]
 #[must_use]
 struct ReceivedEvent {
-    event: Event<EmptySection>,
+    event: Event<section::Empty>,
     /// A [`Duration`] of time after UNIX_EPOCH.
     /// [`Event::timestamp`]
     timestamp: Duration,
@@ -240,7 +240,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     pub fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(
         &self,
         resource: &mut SliceBuf<T>,
-    ) -> Result<(), ApplyError> {
+    ) -> Result<(), section::ApplyError> {
         // Create a stack of the data of the reverted things.
         let mut reverted_stack = Vec::new();
         // Match only for the current resource.
@@ -252,7 +252,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
         let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
-            return Err(ApplyError::InvalidEvent);
+            return Err(section::ApplyError::InvalidEvent);
         };
         // On move events, only change resource.
         // On delete messages, panic. A bug.
