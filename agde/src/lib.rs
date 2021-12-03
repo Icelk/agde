@@ -22,7 +22,9 @@
 
 pub mod diff;
 pub mod event;
+pub mod hash_check;
 pub mod log;
+pub mod resource;
 pub mod section;
 
 use std::borrow::Cow;
@@ -206,9 +208,9 @@ pub enum MessageKind {
     /// The response with hashes of the specified resources.
     SyncReply,
     /// Requests all the hashes of all the resources specified in the regex.
-    HashCheck,
+    HashCheck(hash_check::Check),
     /// A reply with all the hashes of all the requested files.
-    HashCheckReply,
+    HashCheckReply(hash_check::Check),
     /// Checks the internal event UUID log.
     ///
     /// # Replies
