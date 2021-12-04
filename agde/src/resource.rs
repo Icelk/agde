@@ -10,11 +10,35 @@ pub enum Matches {
     None,
     /// Matches everything.
     All,
+    /// Matches the exact string.
+    /// More performant than [`Self::Regex`].
+    Exact(String),
     /// Matches according to the [`regex::Regex`].
+    ///
+    /// Consider using [`Self::Exact`] in [`Self::List`] to match multiple exact resources.
     #[serde(with = "serde_regex")]
     Regex(regex::Regex),
     /// Matches if any [`Matches`] in the list match.
     List(Vec<Matches>),
+}
+impl Matches {
+    /// Checks if this `resource` is allowed with the filter.
+    #[must_use]
+    pub fn matches(&self, resource: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::Exact(target) => resource == target,
+            Self::Regex(regex) => regex.is_match(resource),
+            Self::List(list) => list.iter().any(|matches| matches.matches(resource)),
+        }
+    }
+    fn make_list(&mut self) {
+        let mut vec = Vec::with_capacity(2);
+        let included = std::mem::replace(self, Matches::None);
+        vec.push(included);
+        *self = Matches::List(vec);
+    }
 }
 
 /// Matches `resource`s.
@@ -60,16 +84,13 @@ impl Matcher {
         match &mut self.include {
             Matches::All => self,
             Matches::None => self.set_include(include),
-            Matches::Regex(_) => {
-                let mut vec = Vec::with_capacity(2);
-                let included = std::mem::replace(&mut self.include, Matches::None);
-                vec.push(included);
-                self.include = Matches::List(vec);
-                self.include(include)
-            }
             Matches::List(list) => {
                 list.push(include);
                 self
+            }
+            _ => {
+                self.include.make_list();
+                self.include(include)
             }
         }
     }
@@ -80,16 +101,13 @@ impl Matcher {
         match &mut self.include {
             Matches::All => self,
             Matches::None => self.set_exclude(exclude),
-            Matches::Regex(_) => {
-                let mut vec = Vec::with_capacity(2);
-                let excluded = std::mem::replace(&mut self.exclude, Matches::None);
-                vec.push(excluded);
-                self.exclude = Matches::List(vec);
-                self.exclude(exclude)
-            }
             Matches::List(list) => {
                 list.push(exclude);
                 self
+            }
+            _ => {
+                self.exclude.make_list();
+                self.exclude(exclude)
             }
         }
     }
