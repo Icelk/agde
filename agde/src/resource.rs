@@ -3,7 +3,7 @@
 use crate::{Deserialize, Serialize};
 
 /// A filter to match a `resource`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[must_use]
 pub enum Matches {
     /// Matches noting.
@@ -45,7 +45,7 @@ impl Matches {
 ///
 /// If no [`Self::include`]s are given, all but the [`Self::exclude`] will be matched.
 /// Simmilaraly, if no `exclude`s are given, all but the `include`s will be rejected.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Matcher {
     include: Matches,
@@ -120,6 +120,9 @@ impl Matcher {
     /// Get a reference to the exclude filter.
     pub fn get_exclude(&self) -> &Matches {
         &self.exclude
+    }
+    pub fn matches(&self, resource: &str) -> bool {
+        self.include.matches(resource) && !self.exclude.matches(resource)
     }
 }
 

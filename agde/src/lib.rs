@@ -207,10 +207,10 @@ pub enum MessageKind {
     Sync,
     /// The response with hashes of the specified resources.
     SyncReply,
-    /// Requests all the hashes of all the resources specified in the regex.
-    HashCheck(hash_check::Check),
+    /// Requests all the hashes of all the resources specified in [`resource::Matcher`].
+    HashCheck(hash_check::Request),
     /// A reply with all the hashes of all the requested files.
-    HashCheckReply(hash_check::Check),
+    HashCheckReply(hash_check::Response),
     /// Checks the internal event UUID log.
     ///
     /// # Replies
@@ -406,19 +406,9 @@ impl Manager {
             event_uuid_conversation_piers: log::EventUuidReplies::new(),
         }
     }
-    /// Get the random number generator of this manager.
-    fn rng(&self) -> impl DerefMut<Target = impl rand::Rng> + '_ {
-        self.rng.lock().unwrap()
-    }
     /// Gets the UUID of this client.
     pub fn uuid(&self) -> Uuid {
         self.capabilities.uuid()
-    }
-    /// Generates a UUID using the internal [`rand::Rng`].
-    #[inline]
-    pub(crate) fn generate_uuid(&mut self) -> Uuid {
-        let mut rng = self.rng();
-        Uuid::with_rng(&mut *rng)
     }
     /// Creates a [`Message`] with [`Self::uuid`] and a random message [`Uuid`].
     #[inline]
@@ -481,6 +471,14 @@ impl Manager {
 
         Some(self.process(MessageKind::EventUuidLogCheck { uuid, check }))
     }
+    pub fn process_hash_check(&mut self, pier: SelectedPier) -> Message {
+        Message::new(
+            MessageKind::HashCheck(hash_check::Request::all(pier)),
+            self.uuid(),
+            self.generate_uuid(),
+        )
+    }
+
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
     /// handle the events.
     ///
@@ -634,6 +632,24 @@ impl Manager {
             })
         }
     }
+    /// For each resource which [`hash_check::Request::matches`], execute
+    /// [`hash_check::ResponseBuilder::insert`]. When all are inserted, run
+    /// [`hash_check::ResponseBuilder::finish`].
+    pub fn apply_hash_check(&mut self, sender: Uuid) -> hash_check::ResponseBuilder {
+        hash_check::ResponseBuilder::new(sender)
+    }
+}
+impl Manager {
+    /// Get the random number generator of this manager.
+    fn rng(&self) -> impl DerefMut<Target = impl rand::Rng> + '_ {
+        self.rng.lock().unwrap()
+    }
+    /// Generates a UUID using the internal [`rand::Rng`].
+    #[inline]
+    pub(crate) fn generate_uuid(&mut self) -> Uuid {
+        let mut rng = self.rng();
+        Uuid::with_rng(&mut *rng)
+    }
 
     pub(crate) fn filter_piers<'a>(
         &'a self,
@@ -683,12 +699,16 @@ impl Manager {
 /// The appropriate pier selected from all piers [`Capabilities::help_desire`].
 ///
 /// Used for methods of [`Manager`] to send data to specific piers.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectedPier {
     uuid: Uuid,
 }
 impl SelectedPier {
     pub(crate) fn new(uuid: Uuid) -> Self {
         Self { uuid }
+    }
+    /// Get the UUID of the pier.
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
     }
 }
