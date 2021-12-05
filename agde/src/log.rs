@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
+use crate::event;
 use crate::{event::dur_now, section, DataSection, Event, EventKind, Section, SliceBuf, Uuid};
 
 /// A received event.
@@ -15,13 +16,13 @@ use crate::{event::dur_now, section, DataSection, Event, EventKind, Section, Sli
 /// Does not contain any raw data, as that's calculated by undoing all the events.
 #[derive(Debug)]
 #[must_use]
-struct ReceivedEvent {
-    event: Event<section::Empty>,
+pub(crate) struct ReceivedEvent {
+    pub(crate) event: Event<section::Empty>,
     /// A [`Duration`] of time after UNIX_EPOCH.
     /// [`Event::timestamp`]
-    timestamp: Duration,
+    pub(crate) timestamp: Duration,
     /// Message UUID.
-    uuid: Uuid,
+    pub(crate) uuid: Uuid,
 }
 impl PartialEq for ReceivedEvent {
     fn eq(&self, other: &Self) -> bool {
@@ -67,12 +68,14 @@ impl EventLog {
             lifetime,
         }
     }
+    /// Get a reference to the event log's lifetime.
+    pub(crate) fn lifetime(&self) -> Duration {
+        self.lifetime
+    }
     /// Requires the `self.list` is sorted.
     fn trim(&mut self) {
         let since_epoch = dur_now();
-        let limit = since_epoch
-            .checked_sub(self.lifetime)
-            .unwrap_or(Duration::ZERO);
+        let limit = since_epoch.saturating_sub(self.lifetime);
 
         let mut to_drop = 0;
 
@@ -90,22 +93,7 @@ impl EventLog {
         drop(self.list.drain(..to_drop));
     }
     /// `timestamp` should be the one in [`Event::timestamp`]
-    pub(crate) fn insert(
-        &mut self,
-        event: &Event<impl Section>,
-        message_uuid: Uuid,
-    ) -> Result<(), Error> {
-        let now = dur_now();
-        // The timestamp is after now!
-        if (event
-            .timestamp()
-            .checked_sub(Duration::new(10, 0))
-            .unwrap_or(Duration::ZERO))
-        .checked_sub(now)
-        .is_some()
-        {
-            return Err(Error::EventInFuture);
-        }
+    pub(crate) fn insert(&mut self, event: &Event<impl Section>, message_uuid: Uuid) {
         let timestamp = event.timestamp();
         let event = event.into();
         let received = ReceivedEvent {
@@ -116,7 +104,17 @@ impl EventLog {
         self.list.push(received);
         self.list.sort();
         self.trim();
-        Ok(())
+    }
+    /// Rewinds to `timestamp` or as far as we can.
+    pub(crate) fn unwind_to(&self, timestamp: Duration) -> event::Unwinder {
+        let mut cutoff = 0;
+        for (pos, received_ev) in self.list.iter().enumerate().rev() {
+            if received_ev.timestamp <= timestamp {
+                cutoff = pos + 1;
+            }
+        }
+
+        event::Unwinder::new(&self.list[cutoff..])
     }
     pub(crate) fn event_applier<'a, S: DataSection>(
         &'a mut self,
@@ -136,19 +134,6 @@ impl EventLog {
             // Event is not in list.
             // This is a slow push.
             0
-        }
-        fn name<'a>(events: &'a [ReceivedEvent], resource: &'a str) -> Option<&'a str> {
-            for log_event in events.iter() {
-                if log_event.event.resource() == resource {
-                    match &log_event.event.inner() {
-                        EventKind::Delete(_) | EventKind::Create(_) => return None,
-                        // Do nothing; the file is just modified.
-                        EventKind::Modify(_) => {}
-                    }
-                }
-            }
-
-            Some(resource)
         }
 
         let slice_index = slice_start(self, event.resource(), message_uuid);
@@ -181,7 +166,11 @@ impl EventLog {
         }
 
         let slice = &self.list[slice_index..];
-        let resource = name(slice, event.resource());
+        // This check is required for the code at [`EventApplier::apply`] to not panic.
+        let resource = event::Unwinder::new(slice)
+            .check_name(event.resource())
+            .ok()
+            .map(|_| event.resource());
         // Upholds the contracts described in the comment before [`EventApplier`].
         EventApplier {
             events: slice,
@@ -201,7 +190,7 @@ impl EventLog {
 #[must_use]
 pub struct EventApplier<'a, S: DataSection> {
     /// Ordered from last (temporally).
-    /// May not contain `Self::event`.
+    /// May possibly not contain `Self::event`.
     events: &'a [ReceivedEvent],
     modern_resource_name: Option<&'a str>,
     /// Needed because the event might be sorted out of the list; slow push.
@@ -240,52 +229,65 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
         &self,
         resource: &mut SliceBuf<T>,
     ) -> Result<(), section::ApplyError> {
-        // Create a stack of the data of the reverted things.
-        let mut reverted_stack = Vec::new();
+        let ev = if let EventKind::Modify(ev) = self.event.inner() {
+            ev
+        } else {
+            return Err(section::ApplyError::InvalidEvent);
+        };
         // Match only for the current resource.
         let current_resource_name = if let Some(name) = self.modern_resource_name {
             name
         } else {
             return Ok(());
         };
-        let ev = if let EventKind::Modify(ev) = self.event.inner() {
-            ev
-        } else {
-            return Err(section::ApplyError::InvalidEvent);
-        };
-        // On move events, only change resource.
-        // On delete messages, panic. A bug.
-        // ↑ should be contracted by the creator.
-        for received_ev in self
-            .events
-            .iter()
-            .rev()
-            .take(self.events.len().saturating_sub(1))
-        {
-            if received_ev.event.resource() != current_resource_name {
-                continue;
-            }
-            match received_ev.event.inner() {
-                EventKind::Modify(ev) => {
-                    for section in ev.sections().iter().rev() {
-                        let section = section.revert(resource)?;
-                        reverted_stack.push(section);
+
+        let events =
+            // Very pretty code.
+            {
+                let last = self.events.first();
+
+                if let Some(last) = last {
+                    if last.timestamp == self.event.timestamp() {
+                        if let EventKind::Modify(modify) = last.event.inner() {
+                            if ev.sections().len() == modify.sections().len()
+                                && modify.sections().iter().zip(ev.sections().iter()).all(
+                                    |(a, b)| {
+                                        a.start() == b.start()
+                                            && a.end() == b.end()
+                                            && a.new_len() == b.new_len()
+                                    },
+                                )
+                            {
+                                &self.events[1..]
+                            } else {
+                                self.events
+                            }
+                        } else {
+                            self.events
+                        }
+                    } else {
+                        self.events
                     }
+                } else {
+                    self.events
                 }
-                EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
-                    "Unexpected delete or create event in unwinding of event log.\
-                    Please report this bug."
-                ),
+            };
+        let mut unwinder = event::Unwinder::new(events);
+
+        match unwinder.unwind(resource, current_resource_name) {
+            Ok(()) => {}
+            Err(event::RewindError::Apply(err)) => return Err(err),
+            Err(event::RewindError::ResourceDestroyed) => {
+                unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
         }
+
         // When back there, implement the event.
         for section in ev.sections() {
             section.apply(resource)?;
         }
-        // Unwind the stack, redoing all the events.
-        while let Some(section) = reverted_stack.pop() {
-            section.apply(resource)?;
-        }
+
+        unwinder.rewind(resource)?;
 
         // How will the revert and implement functions on modify work?
         // Can revert be a inverse and just call implement?

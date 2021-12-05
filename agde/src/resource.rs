@@ -121,6 +121,7 @@ impl Matcher {
     pub fn get_exclude(&self) -> &Matches {
         &self.exclude
     }
+    #[must_use]
     pub fn matches(&self, resource: &str) -> bool {
         self.include.matches(resource) && !self.exclude.matches(resource)
     }

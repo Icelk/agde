@@ -1,11 +1,13 @@
 //! Checking of hashes of [`crate::resource`]s.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::hash::Hasher;
+use std::time::Duration;
 
 use twox_hash::xxh3::HasherExt;
 
-use crate::{resource, Deserialize, SelectedPier, Serialize, Uuid};
+use crate::{event, resource, SelectedPier, Uuid};
 
 /// A check to affirm the selected resources contain the same data.
 ///
@@ -21,30 +23,48 @@ use crate::{resource, Deserialize, SelectedPier, Serialize, Uuid};
 pub struct Request {
     pier: Uuid,
     resources: resource::Matcher,
+    /// The actual timestamp
+    cutoff_timestamp: Duration,
+    /// The offset to get `cutoff_timestamp` from `now`.
+    /// To get when this was created, take `cutoff_timestamp + offset`.
+    offset: Duration,
 }
 impl Request {
     /// Creates a new request which tells `pier` to return all resources according to the `filter`.
-    pub fn new(pier: SelectedPier, filter: resource::Matcher) -> Self {
+    /// Targets `now() - timestamp` as the rewind position.
+    ///
+    /// `timestamp` should be before the middle of the log lifetime of the two piers conversing.
+    pub(crate) fn new(
+        pier: SelectedPier,
+        filter: resource::Matcher,
+        timestamp_offset: Duration,
+    ) -> Self {
         Self {
             pier: pier.uuid(),
             resources: filter,
+            cutoff_timestamp: event::dur_now().saturating_sub(timestamp_offset),
+            offset: timestamp_offset,
         }
-    }
-    /// Requests the `pier` to send back the hashes of all it's resources.
-    pub fn all(pier: SelectedPier) -> Self {
-        Self::new(pier, resource::Matcher::all())
     }
     /// Get the receiver's UUID.
     pub fn pier(&self) -> Uuid {
         self.pier
     }
+    #[must_use]
     pub fn matches(&self, resource: &str) -> bool {
         self.resources.matches(resource)
+    }
+
+    /// Get the request's cutoff offset.
+    pub(crate) fn cutoff_offset(&self) -> Duration {
+        self.offset
     }
 }
 impl PartialEq for Request {
     fn eq(&self, other: &Self) -> bool {
         self.pier == other.pier
+            && self.cutoff_timestamp == other.cutoff_timestamp
+            && self.offset == other.offset
     }
 }
 impl Eq for Request {}
@@ -54,18 +74,20 @@ pub type ResponseHash = [u8; 16];
 
 /// A response to [`Request`].
 ///
-/// Contains the [`Self::hashes`] for all the [`Request::resouces`] the sender has.
+/// Contains the [`Self::hashes`] for all the resources the sender wants.
 ///
 /// # Eq implementation
 ///
 /// If the [receiver](Self::pier) is the same, this is considered equal.
 /// Only one of these conversations should be communicated at once, therefore the filter doesn't
 /// matter.
-#[must_use]
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[must_use]
 pub struct Response {
     pier: Uuid,
     hashes: BTreeMap<String, ResponseHash>,
+    requested_cutoff_timestamp: Duration,
+    cutoff_timestamp: Duration,
 }
 
 impl Response {
@@ -78,6 +100,10 @@ impl Response {
     pub fn hashes(&self) -> &BTreeMap<String, ResponseHash> {
         &self.hashes
     }
+    #[must_use]
+    pub fn different_cutoff(&self) -> bool {
+        self.requested_cutoff_timestamp == self.cutoff_timestamp
+    }
 }
 impl PartialEq for Response {
     fn eq(&self, other: &Self) -> bool {
@@ -85,16 +111,20 @@ impl PartialEq for Response {
     }
 }
 impl Eq for Response {}
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct ResponseBuilder(Response);
 impl ResponseBuilder {
-    pub(crate) fn new(pier: Uuid) -> Self {
+    pub(crate) fn new(pier: Uuid, request: &Request, selected_cutoff_offset: Duration) -> Self {
         Self(Response {
             pier,
             hashes: BTreeMap::new(),
+            requested_cutoff_timestamp: request.cutoff_timestamp,
+            cutoff_timestamp: (request.cutoff_timestamp + request.offset)
+                .saturating_sub(selected_cutoff_offset),
         })
     }
+    #[allow(clippy::needless_pass_by_value)] // The hasher is consumed for one resource.
     pub fn insert(&mut self, resource: String, hash: ResponseHasher) {
         self.0
             .hashes
@@ -105,6 +135,7 @@ impl ResponseBuilder {
     }
 }
 #[allow(missing_debug_implementations)]
+#[must_use]
 pub struct ResponseHasher(twox_hash::Xxh3Hash128);
 impl ResponseHasher {
     pub fn new() -> Self {

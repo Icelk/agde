@@ -17,7 +17,7 @@
     clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
-    missing_docs
+    /* missing_docs */
 )]
 
 pub mod diff;
@@ -26,10 +26,11 @@ pub mod hash_check;
 pub mod log;
 pub mod resource;
 pub mod section;
+pub mod sync;
 
 use std::borrow::Cow;
 use std::cmp;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -368,6 +369,7 @@ impl Message {
 ///
 /// The `process_*` methods are for creating [`Message`]s from internal data.
 /// The `apply_*` methods are for accepting and evaluating [`Message`]s.
+// `TODO`: Merge logs
 #[derive(Debug)]
 #[must_use]
 pub struct Manager {
@@ -385,7 +387,7 @@ impl Manager {
     /// Call [`Self::process_hello()`] to get a hello message.
     ///
     /// The options are partially explained in [`Capabilities::new`].
-    /// I recommend a default of `60s` for `log_lifetime` and `512` for `message_log_limit`.
+    /// I recommend a default of `60s` for `log_lifetime` and `512` for `event_log_limit`.
     pub fn new(
         persistent: bool,
         help_desire: i16,
@@ -425,7 +427,14 @@ impl Manager {
     /// [`EventKind::Create`] before it on the same resource.
     #[inline]
     pub fn process_event(&mut self, event: impl IntoEvent<VecSection>) -> Message {
-        self.process(MessageKind::Event(event.into_ev(self)))
+        let event = event.into_ev(self);
+
+        let uuid = self.generate_uuid();
+
+        self.event_log.insert(&event, uuid);
+        self.event_uuid_log.insert(uuid, event.timestamp());
+
+        Message::new(MessageKind::Event(event), self.uuid(), uuid)
     }
     /// May return a message with it's `count` set lower than this.
     ///
@@ -472,11 +481,17 @@ impl Manager {
         Some(self.process(MessageKind::EventUuidLogCheck { uuid, check }))
     }
     pub fn process_hash_check(&mut self, pier: SelectedPier) -> Message {
-        Message::new(
-            MessageKind::HashCheck(hash_check::Request::all(pier)),
-            self.uuid(),
-            self.generate_uuid(),
-        )
+        self.process(MessageKind::HashCheck(hash_check::Request::new(
+            pier,
+            resource::Matcher::all(),
+            cmp::min(
+                event::dur_now().saturating_sub(Duration::from_secs(15)),
+                self.event_log.lifetime() / 2,
+            ),
+        )))
+    }
+    pub fn process_hash_check_reply(&mut self, response: hash_check::Response) -> Message {
+        self.process(MessageKind::HashCheckReply(response))
     }
 
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
@@ -493,7 +508,13 @@ impl Manager {
         event: &'a DatafulEvent,
         message_uuid: Uuid,
     ) -> Result<log::EventApplier<'a, VecSection>, log::Error> {
-        self.event_log.insert(event, message_uuid)?;
+        let now = event::dur_now();
+        // The timestamp is after now!
+        if event.timestamp().saturating_sub(Duration::new(10, 0)) >= now {
+            return Err(log::Error::EventInFuture);
+        }
+
+        self.event_log.insert(event, message_uuid);
         self.event_uuid_log.insert(message_uuid, event.timestamp());
         Ok(self.event_log.event_applier(event, message_uuid))
     }
@@ -632,11 +653,98 @@ impl Manager {
             })
         }
     }
+    /// Use the [`event::Unwinder`] before inserting any hashes.
+    ///
     /// For each resource which [`hash_check::Request::matches`], execute
     /// [`hash_check::ResponseBuilder::insert`]. When all are inserted, run
     /// [`hash_check::ResponseBuilder::finish`].
-    pub fn apply_hash_check(&mut self, sender: Uuid) -> hash_check::ResponseBuilder {
-        hash_check::ResponseBuilder::new(sender)
+    ///
+    /// `sender` is the UUID of the pier who sent this, [`Message::sender`].
+    #[allow(clippy::unused_self)] // Consistency between functions.
+    pub fn apply_hash_check(
+        &mut self,
+        check: &hash_check::Request,
+        sender: Uuid,
+    ) -> (hash_check::ResponseBuilder, event::Unwinder) {
+        let cutoff = cmp::min(check.cutoff_offset(), self.event_log.lifetime() / 2);
+
+        let unwinder = self
+            .event_log
+            .unwind_to(event::dur_now().saturating_sub(cutoff));
+        (
+            hash_check::ResponseBuilder::new(sender, check, cutoff),
+            unwinder,
+        )
+    }
+    /// If the returned [`sync::Request`] is [`Some`], execute [`Self::process_sync`].
+    /// If it's [`None`], the data matches.
+    ///
+    /// Delete all the resources in the returned [`Vec`] of [`String`].
+    #[allow(clippy::unused_self)] // method consistency
+    pub fn apply_hash_check_reply(
+        &mut self,
+        response: &hash_check::Response,
+        sender: Uuid,
+        our_hashes: &hash_check::Response,
+    ) -> (Option<sync::Request>, Vec<String>) {
+        fn btreemap_difference(
+            matches: &mut Vec<resource::Matches>,
+            mut to_delete: Option<&mut Vec<String>>,
+            source: &BTreeMap<String, hash_check::ResponseHash>,
+            other: &BTreeMap<String, hash_check::ResponseHash>,
+        ) {
+            fn has_exact(matches: &[resource::Matches], resource: &str) -> bool {
+                for item in matches {
+                    if let resource::Matches::Exact(item_exact) = item {
+                        if item_exact == resource {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            for (resource, hash) in source.iter() {
+                if let Some(other_hash) = other.get(resource) {
+                    if hash != other_hash && !has_exact(matches, resource) {
+                        matches.push(resource::Matches::Exact(resource.clone()));
+                    }
+                    // else, we have the same hash. Good.
+                } else {
+                    // the other doesn't have the item
+                    if let Some(delete) = &mut to_delete {
+                        delete.push(resource.clone());
+                    } else {
+                        matches.push(resource::Matches::Exact(resource.clone()));
+                    }
+                }
+            }
+        }
+        let mut differing_data = vec![];
+        let mut delete = vec![];
+        // See which items in response we don't have.
+        btreemap_difference(
+            &mut differing_data,
+            None,
+            response.hashes(),
+            our_hashes.hashes(),
+        );
+        // See which items the response doesn't have.
+        btreemap_difference(
+            &mut differing_data,
+            Some(&mut delete),
+            our_hashes.hashes(),
+            response.hashes(),
+        );
+
+        let request = if differing_data.is_empty() {
+            None
+        } else {
+            Some(sync::Request::new(
+                sender,
+                resource::Matcher::new().set_include(resource::Matches::List(differing_data)),
+            ))
+        };
+        (request, delete)
     }
 }
 impl Manager {

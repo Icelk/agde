@@ -1,8 +1,8 @@
 //! Events are a type of message which manipulate a resource.
 
 use crate::{
-    diff, section, Cow, DataSection, Deserialize, Duration, IntoEvent, Manager, Section, Serialize,
-    SliceBuf, SystemTime, Uuid, VecSection, UNIX_EPOCH,
+    diff, log, section, Cow, DataSection, Deserialize, Duration, EventKind, IntoEvent, Manager,
+    Section, Serialize, SliceBuf, SystemTime, Uuid, VecSection, UNIX_EPOCH,
 };
 
 /// A modification to a resource.
@@ -293,3 +293,111 @@ impl<S: Section> From<&Event<S>> for Event<section::Empty> {
 ///
 /// This is the type that is sent between clients.
 pub type Dataful = Event<VecSection>;
+
+#[derive(Debug)]
+pub enum RewindError {
+    /// The resource has previously been destroyed.
+    ResourceDestroyed,
+    /// An error during an application of a section.
+    /// See [`log::EventApplier::apply`] for considerations about this.
+    Apply(section::ApplyError),
+}
+impl From<section::ApplyError> for RewindError {
+    fn from(err: section::ApplyError) -> Self {
+        Self::Apply(err)
+    }
+}
+
+#[derive(Debug)]
+pub struct Unwinder<'a> {
+    /// Ordered from last (temporally).
+    /// May possibly not contain `Self::event`.
+    events: &'a [log::ReceivedEvent],
+    rewound_events: Vec<VecSection>,
+}
+impl<'a> Unwinder<'a> {
+    pub(crate) fn new(events: &'a [log::ReceivedEvent]) -> Self {
+        Self {
+            events,
+            rewound_events: vec![],
+        }
+    }
+    /// # Errors
+    ///
+    /// Will never return [`RewindError::Apply`]
+    pub(crate) fn check_name(&self, modern_resource_name: &'a str) -> Result<(), RewindError> {
+        for log_event in self.events {
+            if log_event.event.resource() == modern_resource_name {
+                match &log_event.event.inner() {
+                    EventKind::Delete(_) | EventKind::Create(_) => {
+                        return Err(RewindError::ResourceDestroyed)
+                    }
+                    // Do nothing; the file is just modified.
+                    EventKind::Modify(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Reverts the `resource` with `modern_resource_name` to the bottom of the internal list.
+    ///
+    /// # Panics
+    ///
+    /// If you called this before and didn't call [`Self::unwind`], this panics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RewindError::ResourceDestroyed`] if `modern_resource_name` has been re-created or
+    /// destroyed during the timeline of this unwinder.
+    /// Returns an error if the new data cannot fit in `resource`.
+    pub fn unwind(
+        &mut self,
+        resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
+        modern_resource_name: &'a str,
+    ) -> Result<(), RewindError> {
+        assert_eq!(
+            self.rewound_events.len(),
+            0,
+            "The rewinding stack must be empty!"
+        );
+
+        self.check_name(modern_resource_name)?;
+
+        // On move events, only change resource.
+        // On delete messages, panic. A bug.
+        // ↑ should be contracted by the creator.
+        for received_ev in self.events.iter().rev() {
+            if received_ev.event.resource() != modern_resource_name {
+                continue;
+            }
+            match received_ev.event.inner() {
+                EventKind::Modify(ev) => {
+                    for section in ev.sections().iter().rev() {
+                        let section = section.revert(resource)?;
+                        self.rewound_events.push(section);
+                    }
+                }
+                EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
+                    "Unexpected delete or create event in unwinding of event log.\
+                    Please report this bug."
+                ),
+            }
+        }
+        Ok(())
+    }
+    /// Rewinds the `resource` back up.
+    ///
+    /// # Errors
+    ///
+    /// Passes errors from [`DataSection::apply`].
+    pub fn rewind(
+        &mut self,
+        resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
+    ) -> Result<(), section::ApplyError> {
+        // Unwind the stack, redoing all the events.
+        while let Some(section) = self.rewound_events.pop() {
+            section.apply(resource)?;
+        }
+        Ok(())
+    }
+}
