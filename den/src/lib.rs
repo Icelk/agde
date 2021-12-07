@@ -242,7 +242,7 @@ macro_rules! hash_result {
             ),
         )+
     ) => {
-        #[derive(PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
         #[repr(u8)]
         #[must_use]
         enum HashResult {
@@ -366,7 +366,7 @@ impl SignatureBuilder {
 /// A identifier of a file, much smaller than the file itself.
 ///
 /// See [crate-level documentation](crate) for more details.
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Signature {
     algo: HashAlgorithm,
@@ -565,7 +565,7 @@ struct BlockData {
 ///
 /// Use [`SegmentBlockRef`] if several blocks in succession reference the same successive data in
 /// the base data.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 #[must_use]
 pub struct SegmentRef {
     /// Start of segment with a length of the [`Signature::block_size`].
@@ -589,7 +589,7 @@ impl SegmentRef {
 /// Several [`SegmentRef`] after each other.
 ///
 /// This is a separate struct to limit serialized size.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 #[must_use]
 pub struct SegmentBlockRef {
     /// Start of segment with a length of [`Self::block_count`]*[`Signature::block_size`].
@@ -636,7 +636,7 @@ impl From<SegmentRef> for SegmentBlockRef {
     }
 }
 /// A segment with unknown contents. This will transmit the data.
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct SegmentUnknown {
     source: Vec<u8>,
@@ -665,7 +665,7 @@ impl Debug for SegmentUnknown {
     }
 }
 /// A segment of data corresponding to a multiple of [`Difference::block_size`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum Segment {
     /// A reference to a block of data.
@@ -691,7 +691,8 @@ impl Segment {
     }
 }
 /// A delta between the local data and the data the [`Signature`] represents.
-#[derive(Debug, PartialEq, Eq)]
+#[allow(clippy::unsafe_derive_deserialize)] // See SAFETY notes.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Difference {
     segments: Vec<Segment>,
