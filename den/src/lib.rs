@@ -251,10 +251,10 @@ macro_rules! hash_result {
             )+
         }
         impl HashResult {
-            fn to_bytes(&self) -> [u8; 16] {
+            fn to_bytes(self) -> [u8; 16] {
                 match self {
                     $(
-                        Self::$name(bytes) => to_16_bytes(bytes),
+                        Self::$name(bytes) => to_16_bytes(&bytes),
                     )+
                 }
             }
