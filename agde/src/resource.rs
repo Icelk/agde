@@ -24,6 +24,7 @@ pub enum Matches {
 impl Matches {
     /// Checks if this `resource` is allowed with the filter.
     #[must_use]
+    #[inline]
     pub fn matches(&self, resource: &str) -> bool {
         match self {
             Self::All => true,
@@ -33,6 +34,7 @@ impl Matches {
             Self::List(list) => list.iter().any(|matches| matches.matches(resource)),
         }
     }
+    #[inline]
     fn make_list(&mut self) {
         let mut vec = Vec::with_capacity(2);
         let included = std::mem::replace(self, Matches::None);
@@ -66,6 +68,7 @@ impl Matcher {
     /// Set the included matches.
     ///
     /// See [`Self`] for more info.
+    #[inline]
     pub fn set_include(mut self, include: Matches) -> Self {
         self.include = include;
         self
@@ -73,6 +76,7 @@ impl Matcher {
     /// Set the excluded matches.
     ///
     /// See [`Self`] for more info.
+    #[inline]
     pub fn set_exclude(mut self, exclude: Matches) -> Self {
         self.exclude = exclude;
         self
@@ -80,6 +84,7 @@ impl Matcher {
     /// Additionally includes `include`.
     ///
     /// If [`Self::get_include`] is [`Matches::All`], this does nothing.
+    #[inline]
     pub fn include(mut self, include: Matches) -> Self {
         match &mut self.include {
             Matches::All => self,
@@ -97,6 +102,7 @@ impl Matcher {
     /// Additionally excludes `exclude`.
     ///
     /// If [`Self::get_exclude`] is [`Matches::All`], this does nothing.
+    #[inline]
     pub fn exclude(mut self, exclude: Matches) -> Self {
         match &mut self.include {
             Matches::All => self,
@@ -113,15 +119,19 @@ impl Matcher {
     }
 
     /// Get a reference to the include filter.
+    #[inline]
     pub fn get_include(&self) -> &Matches {
         &self.include
     }
 
     /// Get a reference to the exclude filter.
+    #[inline]
     pub fn get_exclude(&self) -> &Matches {
         &self.exclude
     }
     #[must_use]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn matches(&self, resource: &str) -> bool {
         self.include.matches(resource) && !self.exclude.matches(resource)
     }

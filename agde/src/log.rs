@@ -69,6 +69,7 @@ impl EventLog {
         }
     }
     /// Get a reference to the event log's lifetime.
+    #[inline]
     pub(crate) fn lifetime(&self) -> Duration {
         self.lifetime
     }
@@ -93,6 +94,7 @@ impl EventLog {
         drop(self.list.drain(..to_drop));
     }
     /// `timestamp` should be the one in [`Event::timestamp`]
+    #[inline]
     pub(crate) fn insert(&mut self, event: &Event<impl Section>, message_uuid: Uuid) {
         let timestamp = event.timestamp();
         let event = event.into();
@@ -106,6 +108,7 @@ impl EventLog {
         self.trim();
     }
     /// Rewinds to `timestamp` or as far as we can.
+    #[inline]
     pub(crate) fn unwind_to(&self, timestamp: Duration) -> event::Unwinder {
         let mut cutoff = 0;
         for (pos, received_ev) in self.list.iter().enumerate().rev() {
@@ -201,10 +204,12 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     /// If this is [`None`], the resource this event applies to has been deleted since.
     /// Don't call [`Self::apply`] if that's the case.
     #[must_use]
+    #[inline]
     pub fn resource(&self) -> Option<&str> {
         self.modern_resource_name
     }
     /// Gets a reference to the event to be applied.
+    #[inline]
     pub fn event(&self) -> &Event<S> {
         self.event
     }
@@ -320,11 +325,13 @@ impl EventUuidLog {
             limit,
         }
     }
+    #[inline]
     pub(crate) fn insert(&mut self, message_uuid: Uuid, event_timestamp: Duration) {
         self.trim();
         self.list.push_front((message_uuid, event_timestamp));
         self.sort_last();
     }
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.list.len()
     }
@@ -348,11 +355,13 @@ impl EventUuidLog {
         }
         self.list.swap(0, position);
     }
+    #[inline]
     pub(crate) fn trim(&mut self) {
         while self.len() > self.limit as usize {
             self.list.pop_back();
         }
     }
+    #[inline]
     pub(crate) fn cutoff_from_uuid(&self, cutoff_uuid: Uuid) -> Option<usize> {
         for (pos, (uuid, _)) in self.list.iter().copied().enumerate() {
             if uuid == cutoff_uuid {
@@ -361,6 +370,7 @@ impl EventUuidLog {
         }
         None
     }
+    #[inline]
     pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
         for (pos, (_, time)) in self.list.iter().copied().enumerate() {
             if time <= cutoff {
@@ -373,6 +383,7 @@ impl EventUuidLog {
     /// it's position from the start (front) of the list and the target cutoff timestamp.
     ///
     /// Returns [`None`] if `self.list` has no elements.
+    #[inline]
     pub(crate) fn appropriate_cutoff(&self) -> Option<(usize, Duration)> {
         let now = dur_now();
         let target = now - Duration::from_secs(2);
@@ -432,20 +443,24 @@ pub struct EventUuidLogCheck {
 impl EventUuidLogCheck {
     /// Gets the count of events to be included, temporally before the [`Self::cutoff`].
     #[must_use]
+    #[inline]
     pub fn count(&self) -> u32 {
         self.count
     }
     /// Gets the UUID of the latest event to be included.
+    #[inline]
     pub fn cutoff(&self) -> Uuid {
         self.cutoff
     }
     /// Gets the timestamp before or at which all events are included.
     #[must_use]
+    #[inline]
     pub fn cutoff_timestamp(&self) -> Duration {
         self.cutoff_timestamp
     }
     /// Gets a reference to the 16-byte long hash.
     #[must_use]
+    #[inline]
     pub fn hash(&self) -> &[u8; 16] {
         &self.log_hash
     }
@@ -476,6 +491,7 @@ impl EventUuidReplies {
         }
     }
     /// `conversation` is the UUID of the current conversation. `check` is the data `source` sent.
+    #[inline]
     pub(crate) fn insert(&mut self, conversation: Uuid, check: EventUuidLogCheck, source: Uuid) {
         let conversation = self
             .conversations

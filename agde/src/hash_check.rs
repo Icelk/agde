@@ -47,15 +47,18 @@ impl Request {
         }
     }
     /// Get the receiver's UUID.
+    #[inline]
     pub fn pier(&self) -> Uuid {
         self.pier
     }
     #[must_use]
+    #[inline]
     pub fn matches(&self, resource: &str) -> bool {
         self.resources.matches(resource)
     }
 
     /// Get the request's cutoff offset.
+    #[inline]
     pub(crate) fn cutoff_offset(&self) -> Duration {
         self.offset
     }
@@ -92,15 +95,18 @@ pub struct Response {
 
 impl Response {
     /// Get the receiver's UUID.
+    #[inline]
     pub fn pier(&self) -> Uuid {
         self.pier
     }
     /// Get a reference to the response's hashes.
     #[must_use]
+    #[inline]
     pub fn hashes(&self) -> &BTreeMap<String, ResponseHash> {
         &self.hashes
     }
     #[must_use]
+    #[inline]
     pub fn different_cutoff(&self) -> bool {
         self.requested_cutoff_timestamp == self.cutoff_timestamp
     }
@@ -125,11 +131,13 @@ impl ResponseBuilder {
         })
     }
     #[allow(clippy::needless_pass_by_value)] // The hasher is consumed for one resource.
+    #[inline]
     pub fn insert(&mut self, resource: String, hash: ResponseHasher) {
         self.0
             .hashes
             .insert(resource, hash.0.finish_ext().to_le_bytes());
     }
+    #[inline]
     pub fn finish(self) -> Response {
         self.0
     }
@@ -138,9 +146,12 @@ impl ResponseBuilder {
 #[must_use]
 pub struct ResponseHasher(twox_hash::Xxh3Hash128);
 impl ResponseHasher {
+    #[inline]
     pub fn new() -> Self {
         Self(twox_hash::Xxh3Hash128::default())
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn write(&mut self, bytes: &[u8]) {
         self.0.write(bytes);
     }
