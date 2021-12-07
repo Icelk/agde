@@ -205,9 +205,9 @@ pub enum MessageKind {
     /// A reply to a [`Self::FastForward`] request.
     FastForwardReply,
     /// A request to get the diffs and sync the specified resources.
-    Sync,
+    Sync(sync::Request),
     /// The response with hashes of the specified resources.
-    SyncReply,
+    SyncReply(sync::Response),
     /// Requests all the hashes of all the resources specified in [`resource::Matcher`].
     HashCheck(hash_check::Request),
     /// A reply with all the hashes of all the requested files.
@@ -493,6 +493,11 @@ impl Manager {
     pub fn process_hash_check_reply(&mut self, response: hash_check::Response) -> Message {
         self.process(MessageKind::HashCheckReply(response))
     }
+    /// You MUST pause the [`Self::apply_event`] between when the `signature` is created for
+    /// [`sync::RequestBuilder::finish`] and when the [`sync::Response`] is applied.
+    pub fn process_sync(&mut self, request: sync::Request) -> Message {
+        self.process(MessageKind::Sync(request))
+    }
 
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
     /// handle the events.
@@ -676,7 +681,9 @@ impl Manager {
             unwinder,
         )
     }
-    /// If the returned [`sync::Request`] is [`Some`], execute [`Self::process_sync`].
+    /// If the returned [`sync::RequestBuilder`] is [`Some`],
+    /// produce a [`den::Signature`] and call [`sync::RequestBuilder::finish`].
+    /// Then, execute [`Self::process_sync`] with the [`sync::Request`].
     /// If it's [`None`], the data matches.
     ///
     /// Delete all the resources in the returned [`Vec`] of [`String`].
@@ -686,7 +693,7 @@ impl Manager {
         response: &hash_check::Response,
         sender: Uuid,
         our_hashes: &hash_check::Response,
-    ) -> (Option<sync::Request>, Vec<String>) {
+    ) -> (Option<sync::RequestBuilder>, Vec<String>) {
         fn btreemap_difference(
             matches: &mut Vec<resource::Matches>,
             mut to_delete: Option<&mut Vec<String>>,
@@ -739,7 +746,7 @@ impl Manager {
         let request = if differing_data.is_empty() {
             None
         } else {
-            Some(sync::Request::new(
+            Some(sync::RequestBuilder::new(
                 sender,
                 resource::Matcher::new().set_include(resource::Matches::List(differing_data)),
             ))
