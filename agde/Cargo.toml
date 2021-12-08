@@ -20,7 +20,7 @@ den = { path = "../den" }
 semver = { version = "^1", features = ["serde"] }
 serde = { version = "^1", features = ["derive"] }
 serde_regex = "^1.1"
-sha3 = "^0.9"
+sha3 = "^0.10"
 twox-hash = "^1.6"
 rand = "^0.8"
 regex = "^1.5"
