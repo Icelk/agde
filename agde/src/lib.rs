@@ -495,8 +495,14 @@ impl Manager {
     }
     /// You MUST pause the [`Self::apply_event`] between when the `signature` is created for
     /// [`sync::RequestBuilder::finish`] and when the [`sync::Response`] is applied.
+    ///
+    /// When you receive the [`sync::Response`], call the appropriate functions on it to apply data
+    /// and [`Self::apply_sync_reply`].
     pub fn process_sync(&mut self, request: sync::Request) -> Message {
         self.process(MessageKind::Sync(request))
+    }
+    pub fn process_sync_reply(&mut self, response: sync::ResponseBuilder) -> Message {
+        self.process(MessageKind::SyncReply(response.finish()))
     }
 
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
@@ -752,6 +758,19 @@ impl Manager {
             ))
         };
         (request, delete)
+    }
+    #[allow(clippy::unused_self)] // method consistency
+    pub fn apply_sync<'a>(
+        &mut self,
+        request: &'a sync::Request,
+        sender: Uuid,
+    ) -> sync::ResponseBuilder<'a> {
+        sync::ResponseBuilder::new(request, sender)
+    }
+    #[allow(clippy::unused_self)] // `TODO`: Remove this
+    pub fn apply_sync_reply(&mut self, _response: &sync::Response) {
+        // Apply event log from remote
+        // Make sure to "merge" buffered events and the incoming.
     }
 }
 impl Manager {

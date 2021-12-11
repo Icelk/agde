@@ -130,6 +130,7 @@ impl ResponseBuilder {
                 .saturating_sub(selected_cutoff_offset),
         })
     }
+    /// It's a logic error to pass a `resource` that isn't included in the [`Request::matches`].
     #[allow(clippy::needless_pass_by_value)] // The hasher is consumed for one resource.
     #[inline]
     pub fn insert(&mut self, resource: String, hash: ResponseHasher) {

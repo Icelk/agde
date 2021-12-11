@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{resource, Uuid};
 
-// `TODO`: Resolve multiple diffs. Enum for remove/create with data/den::Diff
-// `TODO`: apply the response, returning a iterator of the enum above?
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Request {
@@ -63,7 +61,81 @@ impl RequestBuilder {
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
+// `TODO`: apply the response, returning a iterator of the enum above?
+// `TODO`: Also sync event log
 pub struct Response {
     pier: Uuid,
-    diff: den::Difference,
+    diff: Vec<(String, den::Difference)>,
+    create: Vec<(String, Vec<u8>)>,
+    delete: Vec<String>,
+}
+#[derive(Debug)]
+pub struct ResponseBuilder<'a> {
+    request: &'a Request,
+    pier: Uuid,
+    /// Binary sorted by String
+    diff: Vec<(String, den::Difference)>,
+    /// Binary sorted by String
+    create: Vec<(String, Vec<u8>)>,
+}
+impl<'a> ResponseBuilder<'a> {
+    pub(crate) fn new(request: &'a Request, pier: Uuid) -> Self {
+        Self {
+            request,
+            pier,
+            diff: Vec::new(),
+            create: Vec::new(),
+        }
+    }
+    pub fn matches(&self, resource: &str) -> ResponseBuilderAction {
+        if self.request.resources.matches(resource) {
+            match self.request.signature.get(resource) {
+                Some(_) => ResponseBuilderAction::Difference,
+                None => ResponseBuilderAction::Create,
+            }
+        } else {
+            ResponseBuilderAction::Ignore
+        }
+    }
+    pub fn diff(&mut self, resource: String, diff: den::Difference) -> &mut Self {
+        self.diff.push((resource, diff));
+        self
+    }
+    pub fn create(&mut self, resource: String, content: Vec<u8>) -> &mut Self {
+        self.create.push((resource, content));
+        self
+    }
+    pub(crate) fn finish(self) -> Response {
+        let mut delete = Vec::new();
+        for resource in self.request.signature.keys() {
+            if !(self
+                .diff
+                .binary_search_by(|item| item.0.cmp(resource))
+                .is_ok()
+                || self
+                    .create
+                    .binary_search_by(|item| item.0.cmp(resource))
+                    .is_ok())
+            {
+                delete.push(resource.clone());
+            }
+        }
+        Response {
+            pier: self.pier,
+            diff: self.diff,
+            create: self.create,
+            delete,
+        }
+    }
+}
+/// An action to take for a local resource, dictated by the [`Request`].
+#[derive(Debug, Clone, Copy)]
+#[must_use]
+pub enum ResponseBuilderAction {
+    /// Ignore this resource
+    Ignore,
+    /// Call [`ResponseBuilder::diff`]
+    Difference,
+    /// Call [`ResponseBuilder::create`]
+    Create,
 }
