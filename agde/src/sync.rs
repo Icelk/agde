@@ -15,7 +15,11 @@ pub struct Request {
     resources: resource::Matcher,
     signature: HashMap<String, den::Signature>,
 }
-impl Request {}
+impl Request {
+    pub(crate) fn recipient(&self) -> Uuid {
+        self.pier
+    }
+}
 impl PartialEq for Request {
     fn eq(&self, other: &Self) -> bool {
         self.pier == other.pier && self.signature == other.signature
@@ -68,6 +72,11 @@ pub struct Response {
     diff: Vec<(String, den::Difference)>,
     create: Vec<(String, Vec<u8>)>,
     delete: Vec<String>,
+}
+impl Response {
+    pub(crate) fn recipient(&self) -> Uuid {
+        self.pier
+    }
 }
 #[derive(Debug)]
 pub struct ResponseBuilder<'a> {

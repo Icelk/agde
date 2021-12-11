@@ -244,8 +244,8 @@ pub enum MessageKind {
     /// This may be the result of too many requests.
     /// Should not be sent as a signal of not supporting the feature.
     ///
-    /// If a pier request a check from all and we've reached our limit, don't send this.
-    Canceled,
+    /// If a pier requests a check from all and we've reached our limit, don't send this.
+    Canceled(Uuid),
 }
 /// A message to be communicated between clients.
 ///
@@ -283,6 +283,22 @@ impl Message {
     #[inline]
     pub fn inner(&self) -> &MessageKind {
         &self.kind
+    }
+
+    /// Get the specific recipient if the [`MessageKind`] is targeted.
+    ///
+    /// Can be used to determine to send this message to only one pier or all.
+    #[inline]
+    #[must_use]
+    pub fn recipient(&self) -> Option<Uuid> {
+        Some(match self.inner() {
+            MessageKind::Sync(sync) => sync.recipient(),
+            MessageKind::SyncReply(sync) => sync.recipient(),
+            MessageKind::HashCheck(request) => request.recipient(),
+            MessageKind::HashCheckReply(response) => response.recipient(),
+            MessageKind::Canceled(uuid) => *uuid,
+            _ => return None,
+        })
     }
 
     /// Converts the message to bytes.

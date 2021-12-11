@@ -48,7 +48,7 @@ impl Request {
     }
     /// Get the receiver's UUID.
     #[inline]
-    pub fn pier(&self) -> Uuid {
+    pub fn recipient(&self) -> Uuid {
         self.pier
     }
     #[must_use]
@@ -96,7 +96,7 @@ pub struct Response {
 impl Response {
     /// Get the receiver's UUID.
     #[inline]
-    pub fn pier(&self) -> Uuid {
+    pub fn recipient(&self) -> Uuid {
         self.pier
     }
     /// Get a reference to the response's hashes.
