@@ -15,7 +15,7 @@ use crate::{event, resource, SelectedPier, Uuid};
 ///
 /// # Eq implementation
 ///
-/// If the [receiver](Self::pier) is the same, this is considered equal.
+/// If the [receiver](Self::recipient) is the same, this is considered equal.
 /// Only one of these conversations should be communicated at once, therefore the filter doesn't
 /// matter.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -81,7 +81,7 @@ pub type ResponseHash = [u8; 16];
 ///
 /// # Eq implementation
 ///
-/// If the [receiver](Self::pier) is the same, this is considered equal.
+/// If the [receiver](Self::recipient) is the same, this is considered equal.
 /// Only one of these conversations should be communicated at once, therefore the filter doesn't
 /// matter.
 #[derive(Debug, Clone, Deserialize, Serialize)]
