@@ -313,7 +313,7 @@ impl<S: DataSection + ?Sized> Section for S {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Empty {
     start: usize,
     end: usize,

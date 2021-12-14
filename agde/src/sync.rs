@@ -3,10 +3,11 @@
 //! This occurs when the hashes don't line up or when fast forwarding on a new connection.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{resource, Uuid};
+use crate::{log, resource, Uuid};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
@@ -14,6 +15,7 @@ pub struct Request {
     pier: Uuid,
     resources: resource::Matcher,
     signature: HashMap<String, den::Signature>,
+    log_settings: (Duration, u32),
 }
 impl Request {
     pub(crate) fn recipient(&self) -> Uuid {
@@ -32,13 +34,20 @@ pub struct RequestBuilder {
     pier: Uuid,
     resources: resource::Matcher,
     signature: HashMap<String, den::Signature>,
+    log_settings: (Duration, u32),
 }
 impl RequestBuilder {
-    pub(crate) fn new(pier: Uuid, resources: resource::Matcher) -> Self {
+    pub(crate) fn new(
+        pier: Uuid,
+        resources: resource::Matcher,
+        log_cutoff: Duration,
+        log_limit: u32,
+    ) -> Self {
         Self {
             pier,
             resources,
             signature: HashMap::new(),
+            log_settings: (log_cutoff, log_limit),
         }
     }
     pub fn insert(&mut self, resource: String, signature: den::Signature) -> &mut Self {
@@ -53,6 +62,7 @@ impl RequestBuilder {
             pier: self.pier,
             resources: self.resources,
             signature: self.signature,
+            log_settings: self.log_settings,
         }
     }
     /// Test if this `resource` should be part of the `signature` in [`Self::finish`].
@@ -69,7 +79,7 @@ impl RequestBuilder {
 // `TODO`: Also sync event log
 pub struct Response {
     pier: Uuid,
-    // event_log:
+    log: Vec<log::ReceivedEvent>,
     diff: Vec<(String, den::Difference)>,
     create: Vec<(String, Vec<u8>)>,
     delete: Vec<String>,
@@ -115,7 +125,7 @@ impl<'a> ResponseBuilder<'a> {
         self.create.push((resource, content));
         self
     }
-    pub(crate) fn finish(self) -> Response {
+    pub(crate) fn finish(self, log: &log::Log) -> Response {
         let mut delete = Vec::new();
         for resource in self.request.signature.keys() {
             if !(self
@@ -130,6 +140,8 @@ impl<'a> ResponseBuilder<'a> {
                 delete.push(resource.clone());
             }
         }
+        let max = log.cutoff_from_time(self.request.log_settings.0);
+        let log = log.get_max(max);
         Response {
             pier: self.pier,
             diff: self.diff,

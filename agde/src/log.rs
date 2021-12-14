@@ -14,7 +14,7 @@ use crate::{event::dur_now, section, DataSection, Event, EventKind, Section, Sli
 ///
 /// Contains the necessary metadata to sort the event.
 /// Does not contain any raw data, as that's calculated by undoing all the events.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub(crate) struct ReceivedEvent {
     pub(crate) event: Event<section::Empty>,
