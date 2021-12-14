@@ -69,7 +69,7 @@ impl RequestBuilder {
 // `TODO`: Also sync event log
 pub struct Response {
     pier: Uuid,
-    // event_log: 
+    // event_log:
     diff: Vec<(String, den::Difference)>,
     create: Vec<(String, Vec<u8>)>,
     delete: Vec<String>,

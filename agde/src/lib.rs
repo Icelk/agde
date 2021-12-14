@@ -553,11 +553,7 @@ impl Manager {
         conversation_uuid: Uuid,
         remote_uuid: Uuid,
     ) -> UuidCheckAction {
-        fn new_cutoff(
-            log: &log::Log,
-            cutoff: Duration,
-            count: u32,
-        ) -> UuidCheckAction {
+        fn new_cutoff(log: &log::Log, cutoff: Duration, count: u32) -> UuidCheckAction {
             let pos = if let Some(pos) = log.cutoff_from_time(cutoff) {
                 pos
             } else {
@@ -575,29 +571,24 @@ impl Manager {
         let cutoff = if let Some(cutoff) = self.event_log.cutoff_from_uuid(check.cutoff()) {
             cutoff
         } else {
-            return new_cutoff(
-                &self.event_log,
-                check.cutoff_timestamp(),
-                check.count(),
-            );
+            return new_cutoff(&self.event_log, check.cutoff_timestamp(), check.count());
         };
-        let action = match self
-            .event_log
-            .get_uuid_hash(check.count(), cutoff, check.cutoff_timestamp())
-        {
-            Ok(check) => UuidCheckAction::Send(check),
-            Err(err) => match err {
-                // We don't have a large enough log. Ignore.
-                // See comment in [`Self::process_event_uuid_log_check`].
-                log::UuidError::CountTooBig => UuidCheckAction::Nothing,
-                // We don't have the UUID of the cutoff!
-                log::UuidError::CutoffMissing => new_cutoff(
-                    &self.event_log,
-                    check.cutoff_timestamp(),
-                    check.count(),
-                ),
-            },
-        };
+        let action =
+            match self
+                .event_log
+                .get_uuid_hash(check.count(), cutoff, check.cutoff_timestamp())
+            {
+                Ok(check) => UuidCheckAction::Send(check),
+                Err(err) => match err {
+                    // We don't have a large enough log. Ignore.
+                    // See comment in [`Self::process_event_uuid_log_check`].
+                    log::UuidError::CountTooBig => UuidCheckAction::Nothing,
+                    // We don't have the UUID of the cutoff!
+                    log::UuidError::CutoffMissing => {
+                        new_cutoff(&self.event_log, check.cutoff_timestamp(), check.count())
+                    }
+                },
+            };
 
         self.event_uuid_conversation_piers
             .insert(conversation_uuid, check, remote_uuid);
