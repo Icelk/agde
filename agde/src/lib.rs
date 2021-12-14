@@ -394,7 +394,6 @@ pub struct Manager {
     piers: HashMap<Uuid, Capabilities>,
 
     event_log: log::EventLog,
-    event_uuid_log: log::EventUuidLog,
     event_uuid_conversation_piers: log::EventUuidReplies,
 }
 impl Manager {
@@ -419,8 +418,7 @@ impl Manager {
             rng: Mutex::new(rng),
             piers: HashMap::new(),
 
-            event_log: log::EventLog::new(log_lifetime),
-            event_uuid_log: log::EventUuidLog::new(event_log_limit),
+            event_log: log::EventLog::new(log_lifetime, event_log_limit),
             event_uuid_conversation_piers: log::EventUuidReplies::new(),
         }
     }
@@ -448,7 +446,6 @@ impl Manager {
         let uuid = self.generate_uuid();
 
         self.event_log.insert(&event, uuid);
-        self.event_uuid_log.insert(uuid, event.timestamp());
 
         Message::new(MessageKind::Event(event), self.uuid(), uuid)
     }
@@ -472,10 +469,10 @@ impl Manager {
     /// You must call [`Self::assure_event_uuid_log`] after calling this.
     pub fn process_event_uuid_log_check(&mut self, count: u32) -> Option<Message> {
         // after this call, we are guaranteed to have at least 1 event in the log.
-        let (pos, cutoff_timestamp) = self.event_uuid_log.appropriate_cutoff()?;
+        let (pos, cutoff_timestamp) = self.event_log.appropriate_cutoff()?;
         // this should NEVER not fit inside an u32 as the limit is an u32.
         #[allow(clippy::cast_possible_truncation)]
-        let possible_count = (self.event_uuid_log.len() - 1 - pos) as u32;
+        let possible_count = (self.event_log.len() - 1 - pos) as u32;
         // If possible_count is less than half the requested, return nothing.
         if possible_count * 2 < count {
             return None;
@@ -484,8 +481,8 @@ impl Manager {
         let count = cmp::min(count, possible_count);
 
         let check = self
-            .event_uuid_log
-            .get(count, pos, cutoff_timestamp)
+            .event_log
+            .get_uuid_hash(count, pos, cutoff_timestamp)
             .expect(
                 "with the values we give, this shouldn't panic. Report this bug if it has occured.",
             );
@@ -542,7 +539,6 @@ impl Manager {
         }
 
         self.event_log.insert(event, message_uuid);
-        self.event_uuid_log.insert(message_uuid, event.timestamp());
         Ok(self.event_log.event_applier(event, message_uuid))
     }
     /// Handles a [`MessageKind::EventUuidLogCheck`].
@@ -558,7 +554,7 @@ impl Manager {
         remote_uuid: Uuid,
     ) -> EventUuidLogCheckAction {
         fn new_cutoff(
-            log: &log::EventUuidLog,
+            log: &log::EventLog,
             cutoff: Duration,
             count: u32,
         ) -> EventUuidLogCheckAction {
@@ -567,7 +563,7 @@ impl Manager {
             } else {
                 return EventUuidLogCheckAction::Nothing;
             };
-            match log.get(count, pos, cutoff) {
+            match log.get_uuid_hash(count, pos, cutoff) {
                 Ok(check) => EventUuidLogCheckAction::SendAndFurtherCheck(check),
                 Err(log::EventUuidLogError::CountTooBig) => EventUuidLogCheckAction::Nothing,
                 Err(log::EventUuidLogError::CutoffMissing) => {
@@ -576,18 +572,18 @@ impl Manager {
             }
         }
 
-        let cutoff = if let Some(cutoff) = self.event_uuid_log.cutoff_from_uuid(check.cutoff()) {
+        let cutoff = if let Some(cutoff) = self.event_log.cutoff_from_uuid(check.cutoff()) {
             cutoff
         } else {
             return new_cutoff(
-                &self.event_uuid_log,
+                &self.event_log,
                 check.cutoff_timestamp(),
                 check.count(),
             );
         };
         let action = match self
-            .event_uuid_log
-            .get(check.count(), cutoff, check.cutoff_timestamp())
+            .event_log
+            .get_uuid_hash(check.count(), cutoff, check.cutoff_timestamp())
         {
             Ok(check) => EventUuidLogCheckAction::Send(check),
             Err(err) => match err {
@@ -596,7 +592,7 @@ impl Manager {
                 log::EventUuidLogError::CountTooBig => EventUuidLogCheckAction::Nothing,
                 // We don't have the UUID of the cutoff!
                 log::EventUuidLogError::CutoffMissing => new_cutoff(
-                    &self.event_uuid_log,
+                    &self.event_log,
                     check.cutoff_timestamp(),
                     check.count(),
                 ),

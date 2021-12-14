@@ -1,6 +1,6 @@
 //! Logs for [`crate::Manager`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::Hasher;
 use std::time::Duration;
 
@@ -57,12 +57,14 @@ pub enum Error {
 pub(crate) struct EventLog {
     list: Vec<ReceivedEvent>,
     lifetime: Duration,
+    limit: u32,
 }
 impl EventLog {
-    pub(crate) fn new(lifetime: Duration) -> Self {
+    pub(crate) fn new(lifetime: Duration, limit: u32) -> Self {
         Self {
             list: Vec::new(),
             lifetime,
+            limit,
         }
     }
     /// Get a reference to the event log's lifetime.
@@ -70,7 +72,7 @@ impl EventLog {
     pub(crate) fn lifetime(&self) -> Duration {
         self.lifetime
     }
-    /// Requires the `self.list` is sorted.
+    /// Requires the `self.list` to be sorted.
     fn trim(&mut self) {
         let since_epoch = dur_now();
         let limit = since_epoch.saturating_sub(self.lifetime);
@@ -79,6 +81,10 @@ impl EventLog {
 
         loop {
             let last = self.list.get(to_drop);
+            if self.list.len() > self.limit as usize {
+                to_drop += 1;
+                continue;
+            }
             if let Some(last) = last {
                 if last.event.timestamp() < limit {
                     to_drop += 1;
@@ -102,6 +108,79 @@ impl EventLog {
         self.list.sort();
         self.trim();
     }
+    pub(crate) fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    #[inline]
+    pub(crate) fn cutoff_from_uuid(&self, cutoff_uuid: Uuid) -> Option<usize> {
+        for (pos, ev) in self.list.iter().enumerate() {
+            if ev.uuid == cutoff_uuid {
+                return Some(pos);
+            }
+        }
+        None
+    }
+    #[inline]
+    pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
+        for (pos, ev) in self.list.iter().enumerate() {
+            if ev.event.timestamp() <= cutoff {
+                return Some(pos);
+            }
+        }
+        None
+    }
+    /// Returns an appropriate cutoff for [`Self::get`] represented as
+    /// it's position from the start (front) of the list and the target cutoff timestamp.
+    ///
+    /// Returns [`None`] if `self.list` has no elements.
+    #[inline]
+    pub(crate) fn appropriate_cutoff(&self) -> Option<(usize, Duration)> {
+        let now = dur_now();
+        let target = now - Duration::from_secs(2);
+        self.cutoff_from_time(target).map(|cutoff| (cutoff, target))
+    }
+
+    /// Gets the hashed log with `count` events and `cutoff` as the latest event to be included.
+    ///
+    /// # Errors
+    ///
+    /// `cutoff` must exist in the internal list and
+    /// `count` events must exist in the remaining list.
+    pub(crate) fn get_uuid_hash(
+        &self,
+        count: u32,
+        cutoff: usize,
+        cutoff_timestamp: Duration,
+    ) -> Result<EventUuidLogCheck, EventUuidLogError> {
+        let uuid = if let Some(ev) = self.list.get(cutoff) {
+            ev.uuid
+        } else {
+            return Err(EventUuidLogError::CutoffMissing);
+        };
+        let end = cutoff;
+        let start = if let Some(start) = end.checked_sub(count as usize) {
+            start
+        } else {
+            return Err(EventUuidLogError::CountTooBig);
+        };
+        // UNWRAP: We've checked the conditions above.
+        let iter = self.list.get(start..end).unwrap();
+        let mut hasher = twox_hash::xxh3::Hash128::default();
+        for ev in iter {
+            hasher.write(&ev.uuid.inner().to_le_bytes());
+        }
+        let hash = hasher.finish_ext();
+
+        let check = EventUuidLogCheck {
+            log_hash: hash.to_le_bytes(),
+            count,
+            cutoff: uuid,
+            cutoff_timestamp,
+        };
+        Ok(check)
+    }
+
     /// Rewinds to `timestamp` or as far as we can.
     #[inline]
     pub(crate) fn unwind_to(&self, timestamp: Duration) -> event::Unwinder {
@@ -305,124 +384,6 @@ pub(crate) enum EventUuidLogError {
     CutoffMissing,
 }
 
-#[derive(Debug)]
-#[must_use]
-pub(crate) struct EventUuidLog {
-    // We need ordering and fast insertions at the front and deletions at the back, here a
-    // `VecDeque` is a perfect fit!
-    list: VecDeque<(Uuid, Duration)>,
-    limit: u32,
-}
-impl EventUuidLog {
-    pub(crate) fn new(limit: u32) -> Self {
-        Self {
-            list: VecDeque::new(),
-            limit,
-        }
-    }
-    #[inline]
-    pub(crate) fn insert(&mut self, message_uuid: Uuid, event_timestamp: Duration) {
-        self.trim();
-        self.list.push_front((message_uuid, event_timestamp));
-        self.sort_last();
-    }
-    #[inline]
-    pub(crate) fn len(&self) -> usize {
-        self.list.len()
-    }
-    /// # Panics
-    ///
-    /// Panics if `self.list` has no items.
-    fn sort_last(&mut self) {
-        use std::cmp::Ordering;
-
-        let last = self.list.front().unwrap();
-        let mut position = 0;
-        for (pos, (uuid, timestamp)) in self.list.iter().enumerate() {
-            match timestamp.cmp(&last.1) {
-                Ordering::Less => break,
-                Ordering::Greater => position = pos,
-                Ordering::Equal => match uuid.cmp(&last.0) {
-                    Ordering::Less | Ordering::Equal => break, // Well, fuck. Two identical event UUIDs. Not probable.
-                    Ordering::Greater => position = pos,
-                },
-            }
-        }
-        self.list.swap(0, position);
-    }
-    #[inline]
-    pub(crate) fn trim(&mut self) {
-        while self.len() > self.limit as usize {
-            self.list.pop_back();
-        }
-    }
-    #[inline]
-    pub(crate) fn cutoff_from_uuid(&self, cutoff_uuid: Uuid) -> Option<usize> {
-        for (pos, (uuid, _)) in self.list.iter().copied().enumerate() {
-            if uuid == cutoff_uuid {
-                return Some(pos);
-            }
-        }
-        None
-    }
-    #[inline]
-    pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
-        for (pos, (_, time)) in self.list.iter().copied().enumerate() {
-            if time <= cutoff {
-                return Some(pos);
-            }
-        }
-        None
-    }
-    /// Returns an appropriate cutoff for [`Self::get`] represented as
-    /// it's position from the start (front) of the list and the target cutoff timestamp.
-    ///
-    /// Returns [`None`] if `self.list` has no elements.
-    #[inline]
-    pub(crate) fn appropriate_cutoff(&self) -> Option<(usize, Duration)> {
-        let now = dur_now();
-        let target = now - Duration::from_secs(2);
-        self.cutoff_from_time(target).map(|cutoff| (cutoff, target))
-    }
-    /// Gets the hashed log with `count` events and `cutoff` as the latest event to be included.
-    ///
-    /// # Errors
-    ///
-    /// `cutoff` must exist in the internal list and
-    /// `count` events must exist in the remaining list.
-    pub(crate) fn get(
-        &self,
-        count: u32,
-        cutoff: usize,
-        cutoff_timestamp: Duration,
-    ) -> Result<EventUuidLogCheck, EventUuidLogError> {
-        let uuid = if let Some(uuid) = self.list.get(cutoff) {
-            uuid.0
-        } else {
-            return Err(EventUuidLogError::CutoffMissing);
-        };
-        let end = cutoff;
-        let start = if let Some(start) = end.checked_sub(count as usize) {
-            start
-        } else {
-            return Err(EventUuidLogError::CountTooBig);
-        };
-        let iter = self.list.range(start..end);
-        let mut hasher = twox_hash::xxh3::Hash128::default();
-        for (uuid, _) in iter {
-            hasher.write(&uuid.inner().to_le_bytes());
-        }
-        let hash = hasher.finish_ext();
-
-        let check = EventUuidLogCheck {
-            log_hash: hash.to_le_bytes(),
-            count,
-            cutoff: uuid,
-            cutoff_timestamp,
-        };
-        Ok(check)
-    }
-}
 /// A check of the event UUID log.
 ///
 /// A discrepancy indicates differing thought of what the data should be.
