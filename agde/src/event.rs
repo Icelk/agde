@@ -189,6 +189,7 @@ pub(crate) fn dur_now() -> Duration {
 
 /// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[repr(u8)]
 #[must_use]
 pub enum Kind<S> {
     /// Modification.
@@ -213,7 +214,7 @@ pub enum Kind<S> {
 #[must_use]
 pub struct Event<S> {
     kind: Kind<S>,
-    /// Duration since UNIX_EPOCH
+    /// A [`Duration`] of time after UNIX_EPOCH.
     timestamp: Duration,
     sender: Uuid,
 }

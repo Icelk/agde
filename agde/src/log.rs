@@ -18,15 +18,12 @@ use crate::{event::dur_now, section, DataSection, Event, EventKind, Section, Sli
 #[must_use]
 pub(crate) struct ReceivedEvent {
     pub(crate) event: Event<section::Empty>,
-    /// A [`Duration`] of time after UNIX_EPOCH.
-    /// [`Event::timestamp`]
-    pub(crate) timestamp: Duration,
     /// Message UUID.
     pub(crate) uuid: Uuid,
 }
 impl PartialEq for ReceivedEvent {
     fn eq(&self, other: &Self) -> bool {
-        self.timestamp == other.timestamp && self.uuid == other.uuid
+        self.event.timestamp() == other.event.timestamp() && self.uuid == other.uuid
     }
 }
 impl Eq for ReceivedEvent {}
@@ -39,7 +36,7 @@ impl Ord for ReceivedEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering::Equal;
 
-        match self.timestamp.cmp(&other.timestamp) {
+        match self.event.timestamp().cmp(&other.event.timestamp()) {
             Equal => self.uuid.cmp(&other.uuid),
             ord => ord,
         }
@@ -83,7 +80,7 @@ impl EventLog {
         loop {
             let last = self.list.get(to_drop);
             if let Some(last) = last {
-                if last.timestamp < limit {
+                if last.event.timestamp() < limit {
                     to_drop += 1;
                     continue;
                 }
@@ -96,11 +93,9 @@ impl EventLog {
     /// `timestamp` should be the one in [`Event::timestamp`]
     #[inline]
     pub(crate) fn insert(&mut self, event: &Event<impl Section>, message_uuid: Uuid) {
-        let timestamp = event.timestamp();
         let event = event.into();
         let received = ReceivedEvent {
             event,
-            timestamp,
             uuid: message_uuid,
         };
         self.list.push(received);
@@ -112,7 +107,7 @@ impl EventLog {
     pub(crate) fn unwind_to(&self, timestamp: Duration) -> event::Unwinder {
         let mut cutoff = 0;
         for (pos, received_ev) in self.list.iter().enumerate().rev() {
-            if received_ev.timestamp <= timestamp {
+            if received_ev.event.timestamp() <= timestamp {
                 cutoff = pos + 1;
             }
         }
@@ -252,7 +247,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
                 let last = self.events.first();
 
                 if let Some(last) = last {
-                    if last.timestamp == self.event.timestamp() {
+                    if last.event.timestamp() == self.event.timestamp() {
                         if let EventKind::Modify(modify) = last.event.inner() {
                             if ev.sections().len() == modify.sections().len()
                                 && modify.sections().iter().zip(ev.sections().iter()).all(
