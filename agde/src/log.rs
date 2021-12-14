@@ -54,12 +54,12 @@ pub enum Error {
 
 #[derive(Debug)]
 #[must_use]
-pub(crate) struct EventLog {
+pub(crate) struct Log {
     list: Vec<ReceivedEvent>,
     lifetime: Duration,
     limit: u32,
 }
-impl EventLog {
+impl Log {
     pub(crate) fn new(lifetime: Duration, limit: u32) -> Self {
         Self {
             list: Vec::new(),
@@ -108,6 +108,7 @@ impl EventLog {
         self.list.sort();
         self.trim();
     }
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.list.len()
     }
@@ -130,7 +131,7 @@ impl EventLog {
         }
         None
     }
-    /// Returns an appropriate cutoff for [`Self::get`] represented as
+    /// Returns an appropriate cutoff for [`Self::get_uuid_hash`] represented as
     /// it's position from the start (front) of the list and the target cutoff timestamp.
     ///
     /// Returns [`None`] if `self.list` has no elements.
@@ -152,17 +153,17 @@ impl EventLog {
         count: u32,
         cutoff: usize,
         cutoff_timestamp: Duration,
-    ) -> Result<EventUuidLogCheck, EventUuidLogError> {
+    ) -> Result<UuidCheck, UuidError> {
         let uuid = if let Some(ev) = self.list.get(cutoff) {
             ev.uuid
         } else {
-            return Err(EventUuidLogError::CutoffMissing);
+            return Err(UuidError::CutoffMissing);
         };
         let end = cutoff;
         let start = if let Some(start) = end.checked_sub(count as usize) {
             start
         } else {
-            return Err(EventUuidLogError::CountTooBig);
+            return Err(UuidError::CountTooBig);
         };
         // UNWRAP: We've checked the conditions above.
         let iter = self.list.get(start..end).unwrap();
@@ -172,7 +173,7 @@ impl EventLog {
         }
         let hash = hasher.finish_ext();
 
-        let check = EventUuidLogCheck {
+        let check = UuidCheck {
             log_hash: hash.to_le_bytes(),
             count,
             cutoff: uuid,
@@ -198,7 +199,7 @@ impl EventLog {
         event: &'a Event<S>,
         message_uuid: Uuid,
     ) -> EventApplier<'a, S> {
-        fn slice_start(log: &EventLog, resource: &str, uuid: Uuid) -> usize {
+        fn slice_start(log: &Log, resource: &str, uuid: Uuid) -> usize {
             // `pos` is from the end of the list.
             for (pos, event) in log.list.iter().enumerate().rev() {
                 if event.uuid == uuid && event.event.resource() == resource {
@@ -378,7 +379,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
 }
 
 #[derive(Debug)]
-pub(crate) enum EventUuidLogError {
+pub(crate) enum UuidError {
     CountTooBig,
     /// Cutoff is missing in list.
     CutoffMissing,
@@ -390,13 +391,13 @@ pub(crate) enum EventUuidLogError {
 /// Often, a [`crate::MessageKind::HashCheck`] is sent if that's the case.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
 #[must_use]
-pub struct EventUuidLogCheck {
+pub struct UuidCheck {
     log_hash: [u8; 16],
     count: u32,
     cutoff: Uuid,
     cutoff_timestamp: Duration,
 }
-impl EventUuidLogCheck {
+impl UuidCheck {
     /// Gets the count of events to be included, temporally before the [`Self::cutoff`].
     #[must_use]
     #[inline]
@@ -424,23 +425,23 @@ impl EventUuidLogCheck {
 /// The action to execute after receiving a [`crate::MessageKind::EventUuidLogCheck`].
 #[derive(Debug)]
 #[must_use]
-pub enum EventUuidLogCheckAction {
+pub enum UuidCheckAction {
     /// The logs match. Send a [`crate::MessageKind::EventUuidLogCheckReply`] with this
-    /// [`EventUuidLogCheck`].
-    Send(EventUuidLogCheck),
+    /// [`UuidCheck`].
+    Send(UuidCheck),
     /// The logs don't match. Do the same as with [`Self::Send`] AND wait a few seconds (e.g. 10)
     /// and then do a full check of the files. Something's not adding up.
-    SendAndFurtherCheck(EventUuidLogCheck),
+    SendAndFurtherCheck(UuidCheck),
     /// Our log was too small. We can therefore not participate in this exchange.
     /// Do nothing.
     Nothing,
 }
-type Conversation = HashMap<Uuid, EventUuidLogCheck>;
+type Conversation = HashMap<Uuid, UuidCheck>;
 #[derive(Debug)]
-pub(crate) struct EventUuidReplies {
+pub(crate) struct UuidReplies {
     conversations: HashMap<Uuid, Conversation>,
 }
-impl EventUuidReplies {
+impl UuidReplies {
     pub(crate) fn new() -> Self {
         Self {
             conversations: HashMap::new(),
@@ -448,18 +449,18 @@ impl EventUuidReplies {
     }
     /// `conversation` is the UUID of the current conversation. `check` is the data `source` sent.
     #[inline]
-    pub(crate) fn insert(&mut self, conversation: Uuid, check: EventUuidLogCheck, source: Uuid) {
+    pub(crate) fn insert(&mut self, conversation: Uuid, check: UuidCheck, source: Uuid) {
         let conversation = self
             .conversations
             .entry(conversation)
             .or_insert_with(HashMap::new);
         conversation.insert(source, check);
     }
-    pub(crate) fn get(&self, conversation: Uuid) -> Option<&HashMap<Uuid, EventUuidLogCheck>> {
+    pub(crate) fn get(&self, conversation: Uuid) -> Option<&HashMap<Uuid, UuidCheck>> {
         self.conversations.get(&conversation)
     }
 }
-impl Default for EventUuidReplies {
+impl Default for UuidReplies {
     fn default() -> Self {
         Self::new()
     }

@@ -39,7 +39,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 pub use event::{Dataful as DatafulEvent, Event, Into as IntoEvent, Kind as EventKind};
-pub use log::{EventUuidLogCheck, EventUuidLogCheckAction};
+pub use log::{UuidCheck, UuidCheckAction};
 pub use section::{DataSection, Section, SliceBuf, VecSection};
 
 /// The current version of this `agde` library.
@@ -226,7 +226,7 @@ pub enum MessageKind {
         /// The UUID of this check conversation.
         uuid: Uuid,
         /// The data of the check.
-        check: EventUuidLogCheck,
+        check: UuidCheck,
     },
     /// A reply to [`Self::EventUuidLogCheck`].
     ///
@@ -237,7 +237,7 @@ pub enum MessageKind {
         /// The UUID of this check conversation.
         uuid: Uuid,
         /// The data of the check.
-        check: EventUuidLogCheck,
+        check: UuidCheck,
     },
     /// The target client cancelled the request.
     ///
@@ -393,8 +393,8 @@ pub struct Manager {
     rng: Mutex<rand::rngs::ThreadRng>,
     piers: HashMap<Uuid, Capabilities>,
 
-    event_log: log::EventLog,
-    event_uuid_conversation_piers: log::EventUuidReplies,
+    event_log: log::Log,
+    event_uuid_conversation_piers: log::UuidReplies,
 }
 impl Manager {
     /// Creates a empty manager.
@@ -418,8 +418,8 @@ impl Manager {
             rng: Mutex::new(rng),
             piers: HashMap::new(),
 
-            event_log: log::EventLog::new(log_lifetime, event_log_limit),
-            event_uuid_conversation_piers: log::EventUuidReplies::new(),
+            event_log: log::Log::new(log_lifetime, event_log_limit),
+            event_uuid_conversation_piers: log::UuidReplies::new(),
         }
     }
     /// Gets the UUID of this client.
@@ -542,31 +542,31 @@ impl Manager {
         Ok(self.event_log.event_applier(event, message_uuid))
     }
     /// Handles a [`MessageKind::EventUuidLogCheck`].
-    /// This will return an [`EventUuidLogCheckAction`] which tells you what to do.
+    /// This will return an [`UuidCheckAction`] which tells you what to do.
     ///
     /// # Memory leaks
     ///
     /// You must call [`Self::assure_event_uuid_log`] after calling this.
     pub fn apply_event_uuid_log_check(
         &mut self,
-        check: EventUuidLogCheck,
+        check: UuidCheck,
         conversation_uuid: Uuid,
         remote_uuid: Uuid,
-    ) -> EventUuidLogCheckAction {
+    ) -> UuidCheckAction {
         fn new_cutoff(
-            log: &log::EventLog,
+            log: &log::Log,
             cutoff: Duration,
             count: u32,
-        ) -> EventUuidLogCheckAction {
+        ) -> UuidCheckAction {
             let pos = if let Some(pos) = log.cutoff_from_time(cutoff) {
                 pos
             } else {
-                return EventUuidLogCheckAction::Nothing;
+                return UuidCheckAction::Nothing;
             };
             match log.get_uuid_hash(count, pos, cutoff) {
-                Ok(check) => EventUuidLogCheckAction::SendAndFurtherCheck(check),
-                Err(log::EventUuidLogError::CountTooBig) => EventUuidLogCheckAction::Nothing,
-                Err(log::EventUuidLogError::CutoffMissing) => {
+                Ok(check) => UuidCheckAction::SendAndFurtherCheck(check),
+                Err(log::UuidError::CountTooBig) => UuidCheckAction::Nothing,
+                Err(log::UuidError::CutoffMissing) => {
                     unreachable!("we got the cutoff above, this must exist in the log.")
                 }
             }
@@ -585,13 +585,13 @@ impl Manager {
             .event_log
             .get_uuid_hash(check.count(), cutoff, check.cutoff_timestamp())
         {
-            Ok(check) => EventUuidLogCheckAction::Send(check),
+            Ok(check) => UuidCheckAction::Send(check),
             Err(err) => match err {
                 // We don't have a large enough log. Ignore.
                 // See comment in [`Self::process_event_uuid_log_check`].
-                log::EventUuidLogError::CountTooBig => EventUuidLogCheckAction::Nothing,
+                log::UuidError::CountTooBig => UuidCheckAction::Nothing,
                 // We don't have the UUID of the cutoff!
-                log::EventUuidLogError::CutoffMissing => new_cutoff(
+                log::UuidError::CutoffMissing => new_cutoff(
                     &self.event_log,
                     check.cutoff_timestamp(),
                     check.count(),
