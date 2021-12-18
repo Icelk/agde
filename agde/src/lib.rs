@@ -319,6 +319,7 @@ impl Message {
     /// Returns an appropriate error if the deserialisation failed.
     pub fn from_bin(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
         bincode::serde::decode_from_slice(slice, bincode::config::Configuration::standard())
+            .map(|(message, _)| message)
     }
     /// Converts the message to a plain text compatible encoding, namely Base64.
     ///
