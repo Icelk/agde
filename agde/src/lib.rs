@@ -385,7 +385,6 @@ impl Message {
 ///
 /// The `process_*` methods are for creating [`Message`]s from internal data.
 /// The `apply_*` methods are for accepting and evaluating [`Message`]s.
-// `TODO`: Merge logs
 #[derive(Debug)]
 #[must_use]
 pub struct Manager {
@@ -775,6 +774,10 @@ impl Manager {
     ) -> sync::ResponseBuilder<'a> {
         sync::ResponseBuilder::new(request, sender)
     }
+    /// Applies the event log.
+    ///
+    /// You **MUST** also call the methods on [`sync::Response`] to actually make changes to the
+    /// resources returned.
     pub fn apply_sync_reply(&mut self, response: &mut sync::Response) {
         self.event_log.replace(response.take_event_log());
     }

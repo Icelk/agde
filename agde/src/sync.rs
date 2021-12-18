@@ -80,7 +80,6 @@ impl RequestBuilder {
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-// `TODO`: apply the response, returning a iterator of the enum above?
 pub struct Response {
     pier: Uuid,
     log: Vec<log::ReceivedEvent>,
@@ -95,6 +94,24 @@ impl Response {
     /// Extract the event log. After this function, it's reset to an empty list.
     pub(crate) fn take_event_log(&mut self) -> Vec<log::ReceivedEvent> {
         std::mem::take(&mut self.log)
+    }
+    /// Returns a list with `(resource, diff)`,
+    /// where you should call [`den::Difference::apply`] on the data
+    /// `resource` holds.
+    pub fn diff(&self) -> &[(impl AsRef<str>, den::Difference)] {
+        &self.diff
+    }
+    /// Returns a list with `(resource, data)`,
+    /// where you should set the contents of `resource` to `data`.
+    #[must_use]
+    pub fn create(&self) -> &[(impl AsRef<str>, impl AsRef<[u8]>)] {
+        &self.create
+    }
+    /// Returns a list with `resource`,
+    /// where you should delete `resource`.
+    #[must_use]
+    pub fn delete(&self) -> &[impl AsRef<str>] {
+        &self.delete
     }
 }
 #[derive(Debug)]

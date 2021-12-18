@@ -108,6 +108,8 @@ impl Log {
             return;
         }
         self.list.push(ev);
+        // `TODO`: optimize sort to stop when the one new added has been found.
+        // Sort from latest.
         self.list.sort();
         self.trim();
     }
@@ -122,7 +124,10 @@ impl Log {
         self._insert(received);
     }
     pub(crate) fn replace(&mut self, new_log: Vec<ReceivedEvent>) -> Vec<ReceivedEvent> {
-        std::mem::replace(&mut self.list, new_log)
+        let old_log = std::mem::replace(&mut self.list, new_log);
+        self.list.sort();
+        self.trim();
+        old_log
     }
     #[inline]
     pub(crate) fn len(&self) -> usize {

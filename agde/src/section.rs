@@ -414,8 +414,7 @@ impl Section for Empty {
 /// A selection of data in a resource.
 ///
 /// Comparable to `slice` functions in various languages (e.g. [JS](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/splice)).
-// We can deserialize this this data without fear of getting an incorrect buffer - 
-// serde `Vec::push`es elements.
+// We can deserialize this this data without fear of getting an incorrect buffer - serde `Vec::push`es elements.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 #[allow(clippy::module_name_repetitions)]
