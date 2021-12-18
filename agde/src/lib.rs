@@ -776,7 +776,7 @@ impl Manager {
         sync::ResponseBuilder::new(request, sender)
     }
     pub fn apply_sync_reply(&mut self, response: &mut sync::Response) {
-        self.event_log.merge(response.take_event_log().into_iter());
+        self.event_log.replace(response.take_event_log());
     }
 }
 impl Manager {

@@ -121,14 +121,8 @@ impl Log {
         };
         self._insert(received);
     }
-    #[inline]
-    pub(crate) fn merge(&mut self, other: impl Iterator<Item = ReceivedEvent>) {
-        // `TODO`: Optimize; walk internal list and check if an element should be added?
-        // List merge built in to Rust?
-        // Make sure to "merge" buffered events and the incoming.
-        for ev in other {
-            self._insert(ev);
-        }
+    pub(crate) fn replace(&mut self, new_log: Vec<ReceivedEvent>) -> Vec<ReceivedEvent> {
+        std::mem::replace(&mut self.list, new_log)
     }
     #[inline]
     pub(crate) fn len(&self) -> usize {
