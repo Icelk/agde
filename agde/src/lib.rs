@@ -515,7 +515,7 @@ impl Manager {
         self.process(MessageKind::Sync(request))
     }
     pub fn process_sync_reply(&mut self, response: sync::ResponseBuilder) -> Message {
-        self.process(MessageKind::SyncReply(response.finish()))
+        self.process(MessageKind::SyncReply(response.finish(&self.event_log)))
     }
 
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
@@ -690,12 +690,14 @@ impl Manager {
             unwinder,
         )
     }
-    /// If the returned [`sync::RequestBuilder`] is [`Some`],
-    /// produce a [`den::Signature`] and call [`sync::RequestBuilder::finish`].
-    /// Then, execute [`Self::process_sync`] with the [`sync::Request`].
+    /// If the returned [`sync::RequestBuilder`] is [`Some`], loop over each resource,
+    /// call [`sync::RequestBuilder::matches`] to check if the resource should be included.
+    /// Run [`sync::RequestBuilder::finish`] once every [`den::Signature`] has been added.
+    /// Then, execute [`Self::process_sync`] with the [`sync::RequestBuilder`].
     /// If it's [`None`], the data matches.
     ///
     /// Delete all the resources in the returned [`Vec`] of [`String`].
+    /// Even if this doesn't return a [`sync::RequestBuilder`].
     #[allow(clippy::unused_self)] // method consistency
     pub fn apply_hash_check_reply(
         &mut self,
@@ -758,6 +760,9 @@ impl Manager {
             Some(sync::RequestBuilder::new(
                 sender,
                 resource::Matcher::new().set_include(resource::Matches::List(differing_data)),
+                // Get all events in the log, up to `self.event_log.limit()`
+                Duration::ZERO,
+                self.event_log.limit(),
             ))
         };
         (request, delete)
@@ -770,10 +775,8 @@ impl Manager {
     ) -> sync::ResponseBuilder<'a> {
         sync::ResponseBuilder::new(request, sender)
     }
-    #[allow(clippy::unused_self)] // `TODO`: Remove this
-    pub fn apply_sync_reply(&mut self, _response: &sync::Response) {
-        // Apply event log from remote
-        // Make sure to "merge" buffered events and the incoming.
+    pub fn apply_sync_reply(&mut self, response: &mut sync::Response) {
+        self.event_log.merge(response.take_event_log().into_iter());
     }
 }
 impl Manager {

@@ -2,6 +2,7 @@
 //!
 //! This occurs when the hashes don't line up or when fast forwarding on a new connection.
 
+use std::cmp;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -9,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{log, resource, Uuid};
 
+// `TODO`: send Signature of event log.
+// ↑ We won't have to send as much data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Request {
@@ -24,7 +27,9 @@ impl Request {
 }
 impl PartialEq for Request {
     fn eq(&self, other: &Self) -> bool {
-        self.pier == other.pier && self.signature == other.signature
+        self.pier == other.pier
+            && self.signature == other.signature
+            && self.log_settings == other.log_settings
     }
 }
 impl Eq for Request {}
@@ -76,7 +81,6 @@ impl RequestBuilder {
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 // `TODO`: apply the response, returning a iterator of the enum above?
-// `TODO`: Also sync event log
 pub struct Response {
     pier: Uuid,
     log: Vec<log::ReceivedEvent>,
@@ -87,6 +91,10 @@ pub struct Response {
 impl Response {
     pub(crate) fn recipient(&self) -> Uuid {
         self.pier
+    }
+    /// Extract the event log. After this function, it's reset to an empty list.
+    pub(crate) fn take_event_log(&mut self) -> Vec<log::ReceivedEvent> {
+        std::mem::take(&mut self.log)
     }
 }
 #[derive(Debug)]
@@ -140,10 +148,15 @@ impl<'a> ResponseBuilder<'a> {
                 delete.push(resource.clone());
             }
         }
-        let max = log.cutoff_from_time(self.request.log_settings.0);
-        let log = log.get_max(max);
+        let max = cmp::min(
+            log.cutoff_from_time(self.request.log_settings.0)
+                .unwrap_or(log.limit() as usize),
+            self.request.log_settings.1 as usize,
+        );
+        let log = log.get_max(Some(max)).to_vec();
         Response {
             pier: self.pier,
+            log,
             diff: self.diff,
             create: self.create,
             delete,

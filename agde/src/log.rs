@@ -1,5 +1,6 @@
 //! Logs for [`crate::Manager`].
 
+use std::cmp;
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::time::Duration;
@@ -72,6 +73,11 @@ impl Log {
     pub(crate) fn lifetime(&self) -> Duration {
         self.lifetime
     }
+    /// Get the limit of the internal list.
+    #[must_use]
+    pub(crate) fn limit(&self) -> u32 {
+        self.limit
+    }
     /// Requires the `self.list` to be sorted.
     fn trim(&mut self) {
         let since_epoch = dur_now();
@@ -96,6 +102,15 @@ impl Log {
 
         drop(self.list.drain(..to_drop));
     }
+    fn _insert(&mut self, ev: ReceivedEvent) {
+        // .rev to search from latest, as that's probably where the new event is at.
+        if self.list.iter().rev().any(|item| *item == ev) {
+            return;
+        }
+        self.list.push(ev);
+        self.list.sort();
+        self.trim();
+    }
     /// `timestamp` should be the one in [`Event::timestamp`]
     #[inline]
     pub(crate) fn insert(&mut self, event: &Event<impl Section>, message_uuid: Uuid) {
@@ -104,9 +119,16 @@ impl Log {
             event,
             uuid: message_uuid,
         };
-        self.list.push(received);
-        self.list.sort();
-        self.trim();
+        self._insert(received);
+    }
+    #[inline]
+    pub(crate) fn merge(&mut self, other: impl Iterator<Item = ReceivedEvent>) {
+        // `TODO`: Optimize; walk internal list and check if an element should be added?
+        // List merge built in to Rust?
+        // Make sure to "merge" buffered events and the incoming.
+        for ev in other {
+            self._insert(ev);
+        }
     }
     #[inline]
     pub(crate) fn len(&self) -> usize {
@@ -180,6 +202,11 @@ impl Log {
             cutoff_timestamp,
         };
         Ok(check)
+    }
+
+    /// Caps `max` to the length of the inner list.
+    pub(crate) fn get_max(&self, max: Option<usize>) -> &[ReceivedEvent] {
+        &self.list[..max.map_or(self.len(), |max| cmp::min(max, self.len()))]
     }
 
     /// Rewinds to `timestamp` or as far as we can.
