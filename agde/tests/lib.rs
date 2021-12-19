@@ -2,7 +2,7 @@ use agde::*;
 use std::time::{Duration, SystemTime};
 
 fn manager() -> Manager {
-    Manager::new(false, 0, Duration::from_secs(60), 200)
+    Manager::new(false, 0, Duration::from_secs(60), 512)
 }
 
 #[test]
