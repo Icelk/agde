@@ -58,7 +58,7 @@ impl Modify<VecSection> {
     }
 }
 impl<S: Section> Modify<S> {
-    /// Gets a reference to the sections of data this event modifies.
+    /// Get a reference to the sections of data this event modifies.
     #[must_use]
     pub fn sections(&self) -> &[S] {
         &self.sections
@@ -258,7 +258,7 @@ impl<S> Event<S> {
     pub(crate) fn inner_mut(&mut self) -> &mut Kind<S> {
         &mut self.kind
     }
-    /// Gets the timestamp of this event.
+    /// Get the timestamp of this event.
     ///
     /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
     #[inline]

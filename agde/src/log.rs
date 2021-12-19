@@ -163,7 +163,7 @@ impl Log {
         self.cutoff_from_time(target).map(|cutoff| (cutoff, target))
     }
 
-    /// Gets the hashed log with `count` events and `cutoff` as the latest event to be included.
+    /// Get the hashed log with `count` events and `cutoff` as the latest event to be included.
     ///
     /// # Errors
     ///
@@ -309,7 +309,7 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
     pub fn resource(&self) -> Option<&str> {
         self.modern_resource_name
     }
-    /// Gets a reference to the event to be applied.
+    /// Get a reference to the event to be applied.
     #[inline]
     pub fn event(&self) -> &Event<S> {
         self.event
@@ -382,8 +382,8 @@ impl<'a, S: DataSection> EventApplier<'a, S> {
 
         match unwinder.unwind(resource, current_resource_name) {
             Ok(()) => {}
-            Err(event::RewindError::Apply(err)) => return Err(err),
-            Err(event::RewindError::ResourceDestroyed) => {
+            Err(event::UnwindError::Apply(err)) => return Err(err),
+            Err(event::UnwindError::ResourceDestroyed) => {
                 unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
         }
@@ -424,24 +424,24 @@ pub struct UuidCheck {
     cutoff_timestamp: Duration,
 }
 impl UuidCheck {
-    /// Gets the count of events to be included, temporally before the [`Self::cutoff`].
+    /// Get the count of events to be included, temporally before the [`Self::cutoff`].
     #[must_use]
     #[inline]
     pub fn count(&self) -> u32 {
         self.count
     }
-    /// Gets the UUID of the latest event to be included.
+    /// Get the UUID of the latest event to be included.
     #[inline]
     pub fn cutoff(&self) -> Uuid {
         self.cutoff
     }
-    /// Gets the timestamp before or at which all events are included.
+    /// Get the timestamp before or at which all events are included.
     #[must_use]
     #[inline]
     pub fn cutoff_timestamp(&self) -> Duration {
         self.cutoff_timestamp
     }
-    /// Gets a reference to the 16-byte long hash.
+    /// Get a reference to the 16-byte long hash.
     #[must_use]
     #[inline]
     pub fn hash(&self) -> &[u8; 16] {

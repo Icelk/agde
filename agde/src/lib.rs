@@ -156,7 +156,7 @@ impl Uuid {
     pub fn with_rng(mut rng: impl rand::Rng) -> Self {
         Self(rng.gen())
     }
-    /// Gets the inner data.
+    /// Get the inner data.
     #[must_use]
     pub fn inner(&self) -> u64 {
         self.0
@@ -274,17 +274,17 @@ impl Message {
             uuid,
         }
     }
-    /// Gets the sender UUID.
+    /// Get the sender UUID.
     #[inline]
     pub fn sender(&self) -> Uuid {
         self.sender
     }
-    /// Gets the message UUID.
+    /// Get the message UUID.
     #[inline]
     pub fn uuid(&self) -> Uuid {
         self.uuid
     }
-    /// Gets the inner [`MessageKind`].
+    /// Get the inner [`MessageKind`].
     ///
     /// This contains all the data of the message.
     #[inline]
@@ -438,7 +438,7 @@ impl Manager {
             event_uuid_conversation_piers: log::UuidReplies::new(),
         }
     }
-    /// Gets the UUID of this client.
+    /// Get the UUID of this client.
     pub fn uuid(&self) -> Uuid {
         self.capabilities.uuid()
     }
