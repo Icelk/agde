@@ -4,14 +4,21 @@
 //!
 //! Here are some terms I use throughout the codebase and documentation.
 //!
-//! - resource - a piece of data (e.g. a file).
+//! - resource - a piece of data (e.g. a file, online shared document).
 //!     May also be used to denote the location of a resource.
 //! - pier - another client on the network.
 //! - help desire - how much a pier wants to help others in the network.
 //! - conversation - a exchange of some related data (e.g. [`MessageKind::EventUuidLogCheck`]).
 //! - [`Section`] a splice operation to a resource.
-//! - UUID - a unique identifier for a unit (e.g. conversation, [`Message`])
-//! - logs - internal lists to compensate for inconsistencies in message arrival time.
+//! - [UUID](Uuid) - a unique identifier for a unit (e.g. conversation, [`Message`])
+//! - log - internal list to compensate for inconsistencies in message arrival time.
+//! - storage - "versions" of the data stored by the implementor
+//!     - current storage - the current data. The resources stored here are the ones edited by the
+//!       end-user.
+//!     - public storage - what the others think our current storage looks like.
+//!       Separating these enables getting the difference between the storages.
+//!       This returns what we need to send to the other piers, how to mutate the public storage to
+//!       get the current storage.
 
 #![deny(
     clippy::pedantic,
