@@ -296,14 +296,14 @@ impl<S: Section> From<&Event<S>> for Event<section::Empty> {
 pub type Dataful = Event<VecSection>;
 
 #[derive(Debug)]
-pub enum RewindError {
+pub enum UnwindError {
     /// The resource has previously been destroyed.
     ResourceDestroyed,
     /// An error during an application of a section.
     /// See [`log::EventApplier::apply`] for considerations about this.
     Apply(section::ApplyError),
 }
-impl From<section::ApplyError> for RewindError {
+impl From<section::ApplyError> for UnwindError {
     fn from(err: section::ApplyError) -> Self {
         Self::Apply(err)
     }
@@ -325,13 +325,13 @@ impl<'a> Unwinder<'a> {
     }
     /// # Errors
     ///
-    /// Will never return [`RewindError::Apply`]
-    pub(crate) fn check_name(&self, modern_resource_name: &'a str) -> Result<(), RewindError> {
+    /// Will never return [`UnwindError::Apply`].
+    pub(crate) fn check_name(&self, modern_resource_name: &'a str) -> Result<(), UnwindError> {
         for log_event in self.events {
             if log_event.event.resource() == modern_resource_name {
                 match &log_event.event.inner() {
                     EventKind::Delete(_) | EventKind::Create(_) => {
-                        return Err(RewindError::ResourceDestroyed)
+                        return Err(UnwindError::ResourceDestroyed)
                     }
                     // Do nothing; the file is just modified.
                     EventKind::Modify(_) => {}
@@ -348,14 +348,14 @@ impl<'a> Unwinder<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`RewindError::ResourceDestroyed`] if `modern_resource_name` has been re-created or
+    /// Returns [`UnwindError::ResourceDestroyed`] if `modern_resource_name` has been re-created or
     /// destroyed during the timeline of this unwinder.
     /// Returns an error if the new data cannot fit in `resource`.
     pub fn unwind(
         &mut self,
         resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
         modern_resource_name: &'a str,
-    ) -> Result<(), RewindError> {
+    ) -> Result<(), UnwindError> {
         assert_eq!(
             self.rewound_events.len(),
             0,
