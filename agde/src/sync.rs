@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{log, resource, Uuid};
 
+/// Request to sync selected resources.
+///
+/// Obtained from [`RequestBuilder`], which you get from
+/// [`crate::Manager::apply_hash_check_reply`]. This is the last request of the series of assuring
+/// data is the same across all piers.
 // `TODO`: send Signature of event log.
 // ↑ We won't have to send as much data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +38,9 @@ impl PartialEq for Request {
     }
 }
 impl Eq for Request {}
+/// A builder struct for a [`Request`].
+///
+/// See [`crate::Manager::apply_hash_check_reply`] for usage details.
 #[derive(Debug)]
 #[must_use]
 pub struct RequestBuilder {
@@ -55,12 +63,17 @@ impl RequestBuilder {
             log_settings: (log_cutoff, log_limit),
         }
     }
+    /// Insert the `resource`'s `signature` to this response.
+    ///
+    /// The [`den::Signature`] allows the pier to get the diff for us.
     pub fn insert(&mut self, resource: String, signature: den::Signature) -> &mut Self {
         self.signature.insert(resource, signature);
         self
     }
     /// Make a [`Request`] from this builder and a signature of all the resources matched using
     /// [`Self::matches`].
+    ///
+    /// Call [`crate::Manager::process_sync_reply`] to get a [`crate::Message`].
     #[inline]
     pub fn finish(self) -> Request {
         Request {
@@ -78,6 +91,7 @@ impl RequestBuilder {
     }
 }
 
+/// The diffs to make the pier's data the same as ours.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Response {
@@ -114,6 +128,10 @@ impl Response {
         &self.delete
     }
 }
+/// Builder for a [`Response`].
+///
+/// Loop over each resource and call [`Self::matches`].
+/// Execute the action returned by the aforementioned function.
 #[derive(Debug)]
 pub struct ResponseBuilder<'a> {
     request: &'a Request,
@@ -132,6 +150,9 @@ impl<'a> ResponseBuilder<'a> {
             create: Vec::new(),
         }
     }
+    /// Get the action for `resource`.
+    ///
+    /// See the variants of [`ResponseBuilderAction`] for how to proceed.
     pub fn matches(&self, resource: &str) -> ResponseBuilderAction {
         if self.request.resources.matches(resource) {
             match self.request.signature.get(resource) {
@@ -142,10 +163,12 @@ impl<'a> ResponseBuilder<'a> {
             ResponseBuilderAction::Ignore
         }
     }
+    /// Tell the requester their `resource` needs to apply `diff` to get our data.
     pub fn diff(&mut self, resource: String, diff: den::Difference) -> &mut Self {
         self.diff.push((resource, diff));
         self
     }
+    /// Tell the requester they don't have `resource`, with it's `content`.
     pub fn create(&mut self, resource: String, content: Vec<u8>) -> &mut Self {
         self.create.push((resource, content));
         self

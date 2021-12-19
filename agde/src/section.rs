@@ -38,7 +38,7 @@ impl<T: AsMut<[u8]>> SliceBuf<T> {
         me
     }
     /// Creates a new buffer with the fill level being the length of `slice`.
-    /// This assumes the whole buffer is filled with good data.
+    /// This assumes the whole buffer is filled with initialized data.
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub fn with_whole(slice: T) -> Self

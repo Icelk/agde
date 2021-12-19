@@ -51,8 +51,9 @@ impl Request {
     pub fn recipient(&self) -> Uuid {
         self.pier
     }
-    #[must_use]
+    /// Test if `resource` is included in the requested hash check.
     #[inline]
+    #[must_use]
     pub fn matches(&self, resource: &str) -> bool {
         self.resources.matches(resource)
     }
@@ -105,6 +106,12 @@ impl Response {
     pub fn hashes(&self) -> &BTreeMap<String, ResponseHash> {
         &self.hashes
     }
+    /// Tests if the requested cutoff (in time) is the same as the one reponded with.
+    ///
+    /// While the pier is handling the [`Request`] we sent, we can process our own response, to
+    /// be ready once we get this response. This checks if the remote was forced to change the
+    /// cutoff. If the returned value is true, we cannot rely on the hash check response we created
+    /// while the pier processed it.
     #[must_use]
     #[inline]
     pub fn different_cutoff(&self) -> bool {
@@ -117,6 +124,7 @@ impl PartialEq for Response {
     }
 }
 impl Eq for Response {}
+/// Builder struct for [`Response`].
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct ResponseBuilder(Response);
@@ -138,19 +146,29 @@ impl ResponseBuilder {
             .hashes
             .insert(resource, hash.0.finish_ext().to_le_bytes());
     }
+    /// Get the built [`Response`].
     #[inline]
     pub fn finish(self) -> Response {
         self.0
     }
 }
+/// A hash builder for adding the hashed signature of a `resource`.
+/// Should be [created](Self::new), [written to](Self::write) and the
+/// [added](ResponseBuilder::insert) when all the data is written.
 #[allow(missing_debug_implementations)]
 #[must_use]
 pub struct ResponseHasher(twox_hash::Xxh3Hash128);
 impl ResponseHasher {
+    /// Creates a new, empty hasher.
+    ///
+    /// Add data using [`Self::write`].
     #[inline]
     pub fn new() -> Self {
         Self(twox_hash::Xxh3Hash128::default())
     }
+    /// Write data from resource to the internal hasher.
+    ///
+    /// After all the data for one resource is written, call [`ResponseBuilder::insert`].
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub fn write(&mut self, bytes: &[u8]) {

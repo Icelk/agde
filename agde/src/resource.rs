@@ -129,6 +129,9 @@ impl Matcher {
     pub fn get_exclude(&self) -> &Matches {
         &self.exclude
     }
+    /// Test if the resource matches the filter.
+    ///
+    /// Tests if [`Self::include`] matches AND [`Self::exclude`] doesn't.
     #[must_use]
     #[allow(clippy::inline_always)]
     #[inline(always)]

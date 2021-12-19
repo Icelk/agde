@@ -24,7 +24,7 @@
     clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
-    /* missing_docs */
+    missing_docs
 )]
 
 pub mod diff;
@@ -483,7 +483,7 @@ impl Manager {
     /// # Memory leaks
     ///
     /// You must call [`Self::assure_event_uuid_log`] after calling this.
-    pub fn process_event_uuid_log_check(&mut self, count: u32) -> Option<Message> {
+    pub fn process_event_log_check(&mut self, count: u32) -> Option<Message> {
         // after this call, we are guaranteed to have at least 1 event in the log.
         let (pos, cutoff_timestamp) = self.event_log.appropriate_cutoff()?;
         // this should NEVER not fit inside an u32 as the limit is an u32.
@@ -509,6 +509,12 @@ impl Manager {
 
         Some(self.process(MessageKind::EventUuidLogCheck { uuid, check }))
     }
+    /// Constructs a message with `pier` as a destination for a full hash check.
+    ///
+    /// This is between event log check and sync to make sure our data is valid.
+    /// Then, we don't need to sync.
+    ///
+    /// `TODO`: Consider if this is neccesary, or if we should simply check the sync.
     pub fn process_hash_check(&mut self, pier: SelectedPier) -> Message {
         self.process(MessageKind::HashCheck(hash_check::Request::new(
             pier,
@@ -519,6 +525,10 @@ impl Manager {
             ),
         )))
     }
+    /// Make a message from the [`hash_check::Response`], created using
+    /// [`hash_check::ResponseBuilder::finish`].
+    ///
+    /// The `response` is obtained from [`Self::apply_hash_check`].
     pub fn process_hash_check_reply(&mut self, response: hash_check::Response) -> Message {
         self.process(MessageKind::HashCheckReply(response))
     }
@@ -530,6 +540,9 @@ impl Manager {
     pub fn process_sync(&mut self, request: sync::Request) -> Message {
         self.process(MessageKind::Sync(request))
     }
+    /// Turn the [`sync`] response to a message.
+    ///
+    /// This should be sent back to the pier which requested the sync.
     pub fn process_sync_reply(&mut self, response: sync::ResponseBuilder) -> Message {
         self.process(MessageKind::SyncReply(response.finish(&self.event_log)))
     }
@@ -783,6 +796,7 @@ impl Manager {
         };
         (request, delete)
     }
+    /// Creates a [builder](sync::ResponseBuilder) used to construct a sync response.
     #[allow(clippy::unused_self)] // method consistency
     pub fn apply_sync<'a>(
         &mut self,
@@ -791,7 +805,7 @@ impl Manager {
     ) -> sync::ResponseBuilder<'a> {
         sync::ResponseBuilder::new(request, sender)
     }
-    /// Applies the event log.
+    /// Applies the event log of the sync reply.
     ///
     /// You **MUST** also call the methods on [`sync::Response`] to actually make changes to the
     /// resources returned.

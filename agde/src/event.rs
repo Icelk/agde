@@ -295,6 +295,7 @@ impl<S: Section> From<&Event<S>> for Event<section::Empty> {
 /// This is the type that is sent between clients.
 pub type Dataful = Event<VecSection>;
 
+/// Error during [`Unwinder`] operations.
 #[derive(Debug)]
 pub enum UnwindError {
     /// The resource has previously been destroyed.
@@ -309,6 +310,9 @@ impl From<section::ApplyError> for UnwindError {
     }
 }
 
+/// Unwinds the stack of stored events to get the local data to a previous state.
+///
+/// Has nothing to do with unwinding of the program's stack in a [`panic!`].
 #[derive(Debug)]
 pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
