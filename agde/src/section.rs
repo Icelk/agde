@@ -447,9 +447,14 @@ impl VecSection {
     }
     /// Creates a new section representing the entire resource.
     ///
+    /// `base_resource_len` should be the length of the resource in the public storage.
+    /// `data` is the new `data`, only known by us.
+    ///
+    /// `TODO`: Why is the `base_resource_len` the "old" data's length?
+    ///
     /// Useful to use when passing data for [`crate::event::Modify::new`] to diff.
-    pub fn whole_resource(resource_len: usize, data: Vec<u8>) -> Self {
-        Self::new(0, resource_len, data)
+    pub fn whole_resource(base_resource_len: usize, data: Vec<u8>) -> Self {
+        Self::new(0, base_resource_len, data)
     }
 }
 impl DataSection for VecSection {
