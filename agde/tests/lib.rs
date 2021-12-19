@@ -18,7 +18,7 @@ fn send_diff() {
 
         let message = manager.process_event(event);
 
-        (message.bin(), message.base64(), manager.uuid())
+        (message.to_bin(), message.to_base64(), manager.uuid())
     };
 
     // The message are sent to a different client.

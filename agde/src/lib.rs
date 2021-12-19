@@ -312,8 +312,8 @@ impl Message {
     /// You can also use [`bincode`] or any other [`serde`]-based library to serialize the message.
     #[allow(clippy::missing_panics_doc)]
     #[must_use]
-    pub fn bin(&self) -> Vec<u8> {
-        // UNWRAP: this should be good; we only use objects from ::std and our own derived
+    pub fn to_bin(&self) -> Vec<u8> {
+        // UNWRAP: this should be good; we only use objects from ::std and our own, derived
         bincode::encode_to_vec(
             bincode::serde::Compat(self),
             bincode::config::Configuration::standard(),
@@ -329,11 +329,11 @@ impl Message {
     }
     /// Converts the message to a plain text compatible encoding, namely Base64.
     ///
-    /// > This is a optimised version of converting [`Self::bin()`] to Base64.
+    /// > This is a optimised version of converting [`Self::to_bin()`] to Base64.
     /// > Since I'm using readers and writers, less allocations are needed.
     #[allow(clippy::missing_panics_doc)]
     #[must_use]
-    pub fn base64(&self) -> String {
+    pub fn to_base64(&self) -> String {
         struct Writer<W: std::io::Write>(W);
         impl<W: std::io::Write> bincode::enc::write::Writer for Writer<W> {
             fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
@@ -363,7 +363,7 @@ impl Message {
     ///
     /// Returns an appropriate error if the deserialisation failed.
     /// If the Base64 encoding is wrong, the error returned is
-    /// [`bincode::error::DecodeError::OtherString`] which starts with `base64 decoding failed`.
+    /// [`bincode::error::DecodeError::OtherString`] which (always) starts with `base64 decoding failed`.
     pub fn from_base64(string: &str) -> Result<Self, bincode::error::DecodeError> {
         struct Reader<R: std::io::Read>(R);
         impl<R: std::io::Read> bincode::de::read::Reader for Reader<R> {
