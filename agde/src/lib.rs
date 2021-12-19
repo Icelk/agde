@@ -296,16 +296,15 @@ impl Message {
     ///
     /// Can be used to determine to send this message to only one pier or all.
     #[inline]
-    #[must_use]
-    pub fn recipient(&self) -> Option<Uuid> {
-        Some(match self.inner() {
+    pub fn recipient(&self) -> Recipient {
+        Recipient::Selected(SelectedPier::new(match self.inner() {
             MessageKind::Sync(sync) => sync.recipient(),
             MessageKind::SyncReply(sync) => sync.recipient(),
             MessageKind::HashCheck(request) => request.recipient(),
             MessageKind::HashCheckReply(response) => response.recipient(),
             MessageKind::Canceled(uuid) => *uuid,
-            _ => return None,
-        })
+            _ => return Recipient::All,
+        }))
     }
 
     /// Converts the message to bytes.
@@ -387,6 +386,16 @@ impl Message {
             bincode::decode_from_reader(reader, bincode::config::Configuration::standard());
         decoded.map(|compat| compat.0)
     }
+}
+
+/// The recipient of a [`Message`].
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Recipient {
+    /// Send this message to all piers.
+    All,
+    /// Send this message to only the [`SelectedPier`].
+    Selected(SelectedPier),
 }
 
 /// The main manager of a client.
