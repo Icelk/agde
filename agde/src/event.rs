@@ -189,7 +189,6 @@ pub(crate) fn dur_now() -> Duration {
 
 /// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-#[repr(u8)]
 #[must_use]
 pub enum Kind<S> {
     /// Modification.

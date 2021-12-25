@@ -243,7 +243,6 @@ macro_rules! hash_result {
         )+
     ) => {
         #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
-        #[repr(u8)]
         #[must_use]
         enum HashResult {
             $(
