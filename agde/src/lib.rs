@@ -200,14 +200,14 @@ pub enum MessageKind {
     Event(DatafulEvent),
     /// A client tries to get the most recent data.
     /// Contains the list of which documents were edited and size at last session.
-    /// `TODO`: Only sync the remote repo, as that's what we want to sync so we can commit.
+    /// `TODO`: Only sync the public storage, as that's what we want to sync so we can commit.
     ///
     /// # Replies
     ///
     /// You should respond with a [`Self::FastForwardReply`].
     /// That contains which resources you should sync.
     ///
-    /// Then, send a [`Self::Sync`] request and
+    /// Then, send a [`Self::Sync`] request and handle the actual data transmission.
     FastForward,
     /// A reply to a [`Self::FastForward`] request.
     FastForwardReply,
@@ -825,10 +825,11 @@ impl Manager {
         Uuid::with_rng(&mut *rng)
     }
 
-    pub(crate) fn filter_piers<'a>(
+    /// Get an iterator of the piers filtered by `filter`.
+    pub fn filter_piers<'a>(
         &'a self,
-        filter: impl Fn(Uuid, &Capabilities) -> bool + 'a + Clone,
-    ) -> impl Iterator<Item = (Uuid, &'a Capabilities)> + Clone {
+        filter: impl Fn(Uuid, &Capabilities) -> bool + 'a,
+    ) -> impl Iterator<Item = (Uuid, &'a Capabilities)> {
         self.piers.iter().filter_map(move |(uuid, capabilities)| {
             if filter(*uuid, capabilities) {
                 Some((*uuid, capabilities))
