@@ -314,11 +314,7 @@ impl Message {
     #[must_use]
     pub fn to_bin(&self) -> Vec<u8> {
         // UNWRAP: this should be good; we only use objects from ::std and our own, derived
-        bincode::encode_to_vec(
-            bincode::serde::Compat(self),
-            bincode::config::standard(),
-        )
-        .unwrap()
+        bincode::encode_to_vec(bincode::serde::Compat(self), bincode::config::standard()).unwrap()
     }
     /// # Errors
     ///
