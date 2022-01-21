@@ -316,7 +316,7 @@ impl Message {
         // UNWRAP: this should be good; we only use objects from ::std and our own, derived
         bincode::encode_to_vec(
             bincode::serde::Compat(self),
-            bincode::config::Configuration::standard(),
+            bincode::config::standard(),
         )
         .unwrap()
     }
@@ -324,7 +324,7 @@ impl Message {
     ///
     /// Returns an appropriate error if the deserialisation failed.
     pub fn from_bin(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        bincode::serde::decode_from_slice(slice, bincode::config::Configuration::standard())
+        bincode::serde::decode_from_slice(slice, bincode::config::standard())
             .map(|(message, _)| message)
     }
     /// Converts the message to a plain text compatible encoding, namely Base64.
@@ -354,7 +354,7 @@ impl Message {
         bincode::encode_into_writer(
             bincode::serde::Compat(self),
             writer,
-            bincode::config::Configuration::standard(),
+            bincode::config::standard(),
         )
         .unwrap();
         string
@@ -383,7 +383,7 @@ impl Message {
             base64::STANDARD,
         ));
         let decoded: Result<bincode::serde::Compat<Message>, bincode::error::DecodeError> =
-            bincode::decode_from_reader(reader, bincode::config::Configuration::standard());
+            bincode::decode_from_reader(reader, bincode::config::standard());
         decoded.map(|compat| compat.0)
     }
 }
