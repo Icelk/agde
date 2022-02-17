@@ -314,20 +314,18 @@ impl Message {
     #[must_use]
     pub fn to_bin(&self) -> Vec<u8> {
         // UNWRAP: this should be good; we only use objects from ::std and our own, derived
-        bincode::encode_to_vec(bincode::serde::Compat(self), bincode::config::standard()).unwrap()
+        bincode::serde::encode_to_vec(self, bincode::config::standard().write_fixed_array_length())
+            .unwrap()
     }
     /// # Errors
     ///
     /// Returns an appropriate error if the deserialisation failed.
     pub fn from_bin(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        // `TODO`: Fix me, we should use `bincode::serde::decode_from_slice`, but that results in
-        // an error, which this doesn't do.
-        bincode::decode_from_slice::<bincode::serde::Compat<Self>, _>(
+        bincode::serde::decode_from_slice(
             slice,
-            bincode::config::standard(),
+            bincode::config::standard().write_fixed_array_length(),
         )
-        .map(|(message, _)| message)
-        .map(|compat| compat.0)
+        .map(|(me, _)| me)
     }
     /// Converts the message to a plain text compatible encoding, namely Base64.
     ///
