@@ -320,8 +320,14 @@ impl Message {
     ///
     /// Returns an appropriate error if the deserialisation failed.
     pub fn from_bin(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        bincode::serde::decode_from_slice(slice, bincode::config::standard())
-            .map(|(message, _)| message)
+        // `TODO`: Fix me, we should use `bincode::serde::decode_from_slice`, but that results in
+        // an error, which this doesn't do.
+        bincode::decode_from_slice::<bincode::serde::Compat<Self>, _>(
+            slice,
+            bincode::config::standard(),
+        )
+        .map(|(message, _)| message)
+        .map(|compat| compat.0)
     }
     /// Converts the message to a plain text compatible encoding, namely Base64.
     ///
