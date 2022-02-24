@@ -3,4 +3,5 @@
 members = [
     "agde",
     "den",
+    "agde-tokio",
 ]

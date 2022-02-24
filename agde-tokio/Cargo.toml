@@ -1,0 +1,24 @@
+[package]
+name = "agde-tokio"
+version = "0.1.0" # Also update `crate::VERSION`.
+authors = ["Icelk <main@icelk.dev>"]
+edition = "2021"
+rust-version = "1.56"
+description = "Client and server for generic data syncronization - using tokio."
+readme = "README.md"
+homepage = "https://agde.dev/"
+repository = "https://github.com/Icelk/agde/"
+license = "LGPL-3.0-or-later"
+# keywords = ["sync", "rsync", "live-share", "binary sync"]
+# categories = ["algorithms"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+agde = { path = "../agde" }
+
+env_logger = "0.9"
+log = "0.4"
+tokio = { version = "=1.17", features = ["macros", "rt-multi-thread", "parking_lot", "time", "sync"] }
+tokio-tungstenite = { version = "0.17", features = ["rustls-tls-webpki-roots"] }
+futures = "0.3"
