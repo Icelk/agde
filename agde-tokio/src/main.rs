@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::path::Path;
@@ -24,6 +25,7 @@ pub enum ApplicationError {
     UnexpectedServerClose,
     StoragePermissions,
     StreamBroken,
+    PiersRejected,
 }
 impl Error for ApplicationError {}
 impl Display for ApplicationError {
@@ -32,6 +34,10 @@ impl Display for ApplicationError {
             Self::UnexpectedServerClose => write!(f, "unexpected server close"),
             Self::StoragePermissions => write!(f, "insufficient permissions for local storage"),
             Self::StreamBroken => write!(f, "stream to server unexpectedly closed"),
+            Self::PiersRejected => write!(
+                f,
+                "the other clients rejected you because of invalid UUID / version"
+            ),
         }
     }
 }
@@ -46,6 +52,9 @@ pub struct Options {
     pub read: ReadFn,
     pub write: WriteFn,
     pub delete: DeleteFn,
+
+    /// For how long to wait for welcomes.
+    pub startup_timeout: Duration,
 }
 impl Options {
     pub fn fs() -> Self {
@@ -77,7 +86,12 @@ impl Options {
                     Ok(())
                 })
             }),
+            startup_timeout: Duration::from_secs(7),
         }
+    }
+    pub fn with_startup_duration(mut self, startup_timeout: Duration) -> Self {
+        self.startup_timeout = startup_timeout;
+        self
     }
 }
 
@@ -103,26 +117,89 @@ async fn main() {
     }
 }
 
-async fn run(url: &str, manager: Manager, options: Options) -> Result<(), DynError> {
-    let (write, read) = connect_ws(url).await?;
-    let write = Arc::new(Mutex::new(write));
-    let read = Arc::new(Mutex::new(read));
-
-    let manager = Arc::new(Mutex::new(manager));
+async fn run(url: &str, mut manager: Manager, options: Options) -> Result<(), DynError> {
+    let (mut write, mut read) = connect_ws(url).await?;
 
     {
-        let mut write = write.lock().await;
         write.send(tungstenite::Message::text("HI!")).await?;
     }
     {
-        let mut read = read.lock().await;
         let message = read.next().await.unwrap()?;
         println!("Recieved {:?}", message);
     }
+    {
+        let message = { manager.process_hello() };
+        write
+            .send(message.to_bin().into())
+            .await
+            .map_err(|_| ApplicationError::UnexpectedServerClose)?;
+
+        let mut total = 0;
+        let mut rejections = 0;
+
+        loop {
+            let sleep = Box::pin(tokio::time::sleep(options.startup_timeout));
+            match futures::future::select(sleep, read.next()).await {
+                // Sleep timeout
+                futures::future::Either::Left(((), _)) => {
+                    break;
+                }
+                // message
+                futures::future::Either::Right((message, _)) => {
+                    let message = if let Some(Ok(m)) = message {
+                        m
+                    } else {
+                        return Err(Box::new(ApplicationError::UnexpectedServerClose) as DynError);
+                    };
+
+                    match message {
+                        tungstenite::Message::Text(text) => {
+                            warn!("Recieved text from server: {text:?}");
+                        }
+                        tungstenite::Message::Binary(data) => {
+                            if let Ok(message) = agde::Message::from_bin(&data) {
+                                total += 1;
+                                match message.inner() {
+                                    agde::MessageKind::Welcome { info, recipient: _ } => {
+                                        manager.apply_welcome(info.clone());
+                                    }
+                                    agde::MessageKind::InvalidUuid(_sender) => {
+                                        rejections += 1;
+                                    }
+                                    agde::MessageKind::MismatchingVersions(_sender) => {
+                                        warn!("Pier claims you have a mismatching version.");
+                                        rejections += 1;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // if total > 2 and if 2/3 of total is rejections
+        let try_again = total > 2 && rejections * 3 > total * 2;
+
+        if try_again {
+            return Err(Box::new(ApplicationError::PiersRejected));
+        } else {
+            // continue normally.
+        }
+    }
+
+    let write = Arc::new(Mutex::new(write));
+    let read = Arc::new(Mutex::new(read));
+    let manager = Arc::new(Mutex::new(manager));
+
     let mgr = manager.clone();
+    let write_handle = write.clone();
     // event handler
     let result = tokio::spawn(async move {
         let manager = mgr;
+        let write = write_handle;
         let mut read = read.lock().await;
 
         while let Some(message) = read.next().await {
@@ -225,6 +302,7 @@ async fn run(url: &str, manager: Manager, options: Options) -> Result<(), DynErr
         }
         Ok(())
     });
+
     result
         .await
         .expect("receiving task panicked")

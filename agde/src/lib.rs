@@ -683,7 +683,7 @@ impl Manager {
     pub fn assure_event_uuid_log(&mut self, conversation_uuid: Uuid) -> Option<SelectedPier> {
         let conversation = self.event_uuid_conversation_piers.get(conversation_uuid)?;
         let total_reponses = conversation.len();
-        // We are one response.
+        // We are the one response.
         if total_reponses < 2 {
             return None;
         }
