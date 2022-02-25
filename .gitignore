@@ -1,2 +1,4 @@
 **/target
 **/Cargo.lock
+agde-tokio/test-ws-server/node_modules
+agde-tokio/test-ws-server/package-lock.json
