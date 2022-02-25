@@ -42,7 +42,7 @@ use std::ops::DerefMut;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 pub use event::{Dataful as DatafulEvent, Event, Into as IntoEvent, Kind as EventKind};
@@ -82,6 +82,20 @@ impl Capabilities {
     #[must_use]
     pub fn version(&self) -> &semver::Version {
         &self.version
+    }
+    /// Check is the versions are compatible.
+    #[must_use]
+    pub fn version_compatible(&self, other: &Capabilities) -> bool {
+        let me = self.version();
+        let other = other.version();
+        let comparator = semver::Comparator {
+            op: semver::Op::Caret,
+            major: me.major,
+            minor: Some(me.minor),
+            patch: Some(me.patch),
+            pre: me.pre.clone(),
+        };
+        comparator.matches(other)
     }
     /// The UUID of this client.
     pub fn uuid(&self) -> Uuid {
@@ -184,7 +198,17 @@ pub enum MessageKind {
     /// Expects a [`Self::Welcome`], [`Self::InvalidUuid`], or [`Self::MismatchingVersions`].
     Hello(Capabilities),
     /// Response to the [`Self::Hello`] message.
-    Welcome(Capabilities),
+    ///
+    /// These capabilities are our own, giving the remote information about us.
+    ///
+    /// When the inner `recipient` is `None`, this updates the other piers'
+    /// information about the client. Else, it's just a response to a greeting.
+    Welcome {
+        /// The target of this message.
+        recipient: Option<Uuid>,
+        /// Which capabilities we have.
+        info: Capabilities,
+    },
     /// The sender of [`MessageKind::Hello`] of the contained [`Uuid`] uses an occupied UUID.
     ///
     /// If a critical count of piers respond with this,
@@ -252,7 +276,7 @@ pub enum MessageKind {
     /// Should not be sent as a signal of not supporting the feature.
     ///
     /// If a pier requests a check from all and we've reached our limit, don't send this.
-    Canceled(Uuid),
+    Cancelled(Uuid),
 }
 /// A message to be communicated between clients.
 ///
@@ -298,11 +322,15 @@ impl Message {
     #[inline]
     pub fn recipient(&self) -> Recipient {
         Recipient::Selected(SelectedPier::new(match self.inner() {
+            MessageKind::Welcome {
+                recipient: Some(recipient),
+                info: _,
+            } => *recipient,
             MessageKind::Sync(sync) => sync.recipient(),
             MessageKind::SyncReply(sync) => sync.recipient(),
             MessageKind::HashCheck(request) => request.recipient(),
             MessageKind::HashCheckReply(response) => response.recipient(),
-            MessageKind::Canceled(uuid) => *uuid,
+            MessageKind::Cancelled(uuid) => *uuid,
             _ => return Recipient::All,
         }))
     }
@@ -406,7 +434,7 @@ pub enum Recipient {
 #[must_use]
 pub struct Manager {
     capabilities: Capabilities,
-    rng: Mutex<rand::rngs::ThreadRng>,
+    rng: Mutex<rand::rngs::StdRng>,
     piers: HashMap<Uuid, Capabilities>,
 
     event_log: log::Log,
@@ -425,7 +453,7 @@ impl Manager {
         log_lifetime: Duration,
         event_log_limit: u32,
     ) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rngs::StdRng::from_entropy();
         let uuid = Uuid::with_rng(&mut rng);
         let capabilities = Capabilities::new(uuid, persistent, help_desire);
 
@@ -547,6 +575,28 @@ impl Manager {
         self.process(MessageKind::SyncReply(response.finish(&self.event_log)))
     }
 
+    /// Handles an incoming [`MessageKind::Hello`].
+    /// Immediately send the returned message.
+    pub fn apply_hello(&mut self, hello: &Capabilities) -> Message {
+        if !hello.version_compatible(hello) {
+            return self.process(MessageKind::MismatchingVersions(hello.uuid()));
+        }
+        if self.choose_pier(|uuid, _| uuid == hello.uuid()).is_some() {
+            self.process(MessageKind::InvalidUuid(hello.uuid()))
+        } else {
+            self.piers.insert(hello.uuid(), hello.clone());
+            self.process(MessageKind::Welcome {
+                info: self.capabilities.clone(),
+                recipient: Some(hello.uuid()),
+            })
+        }
+    }
+    /// Records the [`Capabilities`] of the client.
+    ///
+    /// This is later used to determine which pier to send certain requests to.
+    pub fn apply_welcome(&mut self, welcome: Capabilities) {
+        self.piers.insert(welcome.uuid(), welcome);
+    }
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
     /// handle the events.
     ///

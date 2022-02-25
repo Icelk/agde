@@ -1,6 +1,6 @@
 # agde
 
-> A general decentralized sync library supporting text and binary.
+> A general decentralized real-time sync library supporting text and binary.
 
 `agde` is a set of _libraries_ to handle _syncing_ clients in a network.
 
