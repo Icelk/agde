@@ -38,6 +38,7 @@ pub mod sync;
 use std::borrow::Cow;
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::{Display, self};
 use std::ops::DerefMut;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -179,6 +180,11 @@ impl Uuid {
 impl Default for Uuid {
     fn default() -> Self {
         Self::new()
+    }
+}
+impl Display for Uuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:x}", self.inner())
     }
 }
 
