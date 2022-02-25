@@ -19,6 +19,6 @@ agde = { path = "../agde" }
 
 env_logger = "0.9"
 log = "0.4"
-tokio = { version = "=1.17", features = ["macros", "rt-multi-thread", "parking_lot", "time", "sync"] }
+tokio = { version = "=1.17", features = ["macros", "rt-multi-thread", "parking_lot", "time", "sync", "fs"] }
 tokio-tungstenite = { version = "0.17", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
