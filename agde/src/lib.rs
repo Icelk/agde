@@ -184,7 +184,7 @@ impl Default for Uuid {
 
 /// The kinds of messages with their data. Part of a [`Message`].
 ///
-/// On direct messages, send a conversation UUID which can be [`Self::Canceled`].
+/// On direct messages, send a conversation UUID which can be [`Self::Cancelled`].
 // `TODO`: implement the rest of these.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
