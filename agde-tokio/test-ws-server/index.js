@@ -10,14 +10,17 @@ const clients = []
 wss.on("connection", (ws) => {
     clients.push(ws)
     ws.on("message", (data, isBinary) => {
-        console.log(`Got message: '${data}'`)
         if (isBinary) {
+            console.log(`Got binary message.`)
+
             clients.forEach((client) => {
                 if (client === ws) {
                     return
                 }
                 client.send(data)
             })
+        } else {
+            console.log(`Got text message: '${data}'`)
         }
     })
     ws.send("Nice to meet you!")
