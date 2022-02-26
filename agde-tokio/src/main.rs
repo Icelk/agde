@@ -1,7 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display};
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -9,7 +8,7 @@ use std::{io, process};
 
 use agde::Manager;
 use futures::{Future, FutureExt, SinkExt, StreamExt, TryFutureExt};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -43,8 +42,8 @@ impl Display for ApplicationError {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Metadata {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Metadata {
     /// Associate resource to metadata
     map: HashMap<String, ResourceMeta>,
 }
@@ -57,18 +56,26 @@ impl Metadata {
                 for entry in walkdir::WalkDir::new(".")
                     .follow_links(false)
                     .into_iter()
+                    .filter_entry(|e| {
+                        !(e.path().starts_with(".agde")
+                            || e.path().starts_with("./.agde")
+                            || e.path().starts_with("./node_modules"))
+                    })
                     .filter_map(|e| e.ok())
                 {
                     if let Some(path) = entry.path().to_str() {
                         let metadata = entry.metadata()?;
+                        if !metadata.is_file() {
+                            continue;
+                        }
                         let modified = metadata.modified()?;
 
                         map.insert(
                             path.to_owned(),
                             ResourceMeta {
                                 size: metadata.len(),
-                                actual_mtime: modified,
-                                public_mtime: modified,
+                                current_mtime: Some(modified),
+                                // public_mtime: modified,
                             },
                         );
                     } else {
@@ -91,33 +98,63 @@ impl Metadata {
     async fn sync(&self) -> Result<(), io::Error> {
         let data = bincode::serde::encode_to_vec(
             self,
-            bincode::config::standard().skip_fixed_array_length(),
+            bincode::config::standard().write_fixed_array_length(),
         )
         .expect("serialization of metadata should be infallible");
         tokio::fs::write(".agde/metadata", data).await?;
         Ok(())
     }
 }
-#[derive(Serialize, Deserialize)]
-struct ResourceMeta {
-    /// the mtime on the disk might be different from what is expected.
-    actual_mtime: SystemTime,
-    public_mtime: SystemTime,
-    size: u64,
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub struct ResourceMeta {
+    /// mtime of the [`Storage::Current`].
+    ///
+    /// Is [`None`] if this resource has not yet been written to the current storage.
+    /// In that case, there's always a change. This can occur when data has been written to the
+    /// public storage, and the current storage hasn't gotten that data yet.
+    pub current_mtime: Option<SystemTime>,
+    // `TODO`: remove this, since we're not using it.
+    // pub public_mtime: SystemTime,
+    pub size: u64,
 }
-enum Change {
-    Create(String),
-    Modify(String),
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Change {
+    /// True if the resource was just created.
+    Modify(String, bool),
     Delete(String),
+}
+impl Change {
+    pub fn resource(&self) -> &str {
+        match self {
+            Self::Modify(r, _) => r,
+            Self::Delete(r) => r,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Storage {
+    /// The copy of data which is maintained to be equal to the others' public storages.
+    Public,
+    /// The copy of data the user writes to.
+    Current,
+}
+pub enum WriteMtime {
+    LookUpCurrent,
+    No,
 }
 
 pub type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
-pub type ReadFuture = BoxFut<Result<Vec<u8>, ()>>;
+pub type ReadFuture = BoxFut<Result<Option<Vec<u8>>, ()>>;
 pub type WriteFuture = BoxFut<Result<(), ()>>;
 pub type DiffFuture = BoxFut<Result<Vec<Change>, ()>>;
-pub type ReadFn = Box<dyn Fn(String) -> ReadFuture + Send + Sync>;
-pub type WriteFn = Box<dyn Fn(String, Vec<u8>) -> WriteFuture + Send + Sync>;
-pub type DeleteFn = Box<dyn Fn(String) -> WriteFuture + Send + Sync>;
+pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
+/// The [`SystemTime`] is the time of modification.
+/// When [`Storage::Current`], this should be the time of last change.
+pub type WriteFn = Box<
+    dyn Fn(String, Storage, Vec<u8>, WriteMtime /*, ResourceMeta*/) -> WriteFuture + Send + Sync,
+>;
+pub type DeleteFn = Box<dyn Fn(String, Storage) -> WriteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
 #[must_use]
 pub struct Options {
@@ -131,68 +168,211 @@ pub struct Options {
     pub startup_timeout: Duration,
     pub sync_interval: Duration,
 }
-// `TODO`: (see next paragraph) How to solve storages? These methods should be writing to the public storage, but how do
-// we sync that to the current? Just check if the current hasn't changed (write to current too),
-// but if it has, wait till next commit from current to public.
-// Have enum to the functions below, which tells them on which to operate?
-//
-// You can also say to it to always wait for the next commit. (**this is what we implement
-// initially**).
+// `TODO`: Add option to write new resource changes to `Current` is that resource hasn't been
+// changed in current.
 impl Options {
     pub async fn fs() -> Result<Self, io::Error> {
         let metadata = initial_metadata().await?;
+        // A metadata cache that is held constant between diff calls.
+        let offline_metadata = metadata.clone();
+
         let metadata = Arc::new(Mutex::new(metadata));
+        let offline_metadata = Arc::new(Mutex::new(offline_metadata));
+        let write_metadata = Arc::clone(&metadata);
+        let write_offline_metadata = Arc::clone(&offline_metadata);
+        let delete_metadata = Arc::clone(&metadata);
+        let delete_offline_metadata = Arc::clone(&offline_metadata);
         Ok(Options {
-            read: Box::new(|resource| {
+            read: Box::new(|resource, storage| {
                 Box::pin(async move {
-                    let mut file = tokio::fs::File::open(&resource).await.map_err(|_| ())?;
+                    let path = match storage {
+                        Storage::Public => format!(".agde/{resource}",),
+                        Storage::Current => format!("./{resource}"),
+                    };
+                    let file = tokio::fs::File::open(&path).await;
+                    let mut file = match file {
+                        Ok(f) => f,
+                        Err(err) => match err.kind() {
+                            io::ErrorKind::NotFound => return Ok(None),
+                            _ => return Err(()),
+                        },
+                    };
                     let mut buf = Vec::with_capacity(4096);
                     file.read_to_end(&mut buf).await.map_err(|_| ())?;
-                    Ok(buf)
+                    Ok(Some(buf))
                 })
             }),
-            // `TODO`: When writing to public storage, also set metadata.
-            write: Box::new(|resource, data| {
+            write: Box::new(move |resource, storage, data, mtime /*, metadata*/| {
+                let metadata = Arc::clone(&write_metadata);
+                let offline_metadata = Arc::clone(&write_offline_metadata);
                 Box::pin(async move {
-                    let mut file = tokio::fs::File::create(&resource).await.map_err(|_| ())?;
+                    let path = match storage {
+                        Storage::Public => format!(".agde/{resource}",),
+                        Storage::Current => format!("./{resource}"),
+                    };
+                    let mut file = tokio::fs::File::create(&path).await.map_err(|_| ())?;
                     file.write_all(&data).await.map_err(|_| ())?;
                     file.flush().await.map_err(|_| ())?;
+                    match storage {
+                        Storage::Public => {
+                            let mut metadata = metadata.lock().await;
+                            // metadata
+                            // .map
+                            // .entry(resource)
+                            // .or_insert_with(|| ResourceMeta {
+                            // current_mtime: None,
+                            // public_mtime: mtime,
+                            // size: data.len() as u64,
+                            // });
+                            // let mtime = metadata
+                            // .map
+                            // .get(&resource)
+                            // .and_then(|meta| meta.current_mtime);
+                            let mtime = match mtime {
+                                WriteMtime::No => None,
+                                WriteMtime::LookUpCurrent => {
+                                    let metadata = tokio::fs::metadata(format!("./{resource}"))
+                                        .await
+                                        .map_err(|_| ())?;
+                                    let mtime = metadata.modified().map_err(|_| ())?;
+                                    Some(mtime)
+                                }
+                            };
+                            let meta = ResourceMeta {
+                                current_mtime: mtime,
+                                // public_mtime: mtime,
+                                size: data.len() as u64,
+                            };
+                            metadata.map.insert(resource, meta);
+                        }
+                        Storage::Current => {
+                            let file_metadata = tokio::fs::metadata(&path).await.map_err(|_| ())?;
+                            let mtime = file_metadata.modified().map_err(|_| ())?;
+                            {
+                                let mut metadata = offline_metadata.lock().await;
+
+                                metadata.map.insert(
+                                    resource.clone(),
+                                    ResourceMeta {
+                                        current_mtime: Some(mtime),
+                                        size: data.len() as u64,
+                                    },
+                                );
+                            }
+                            {
+                                let mut metadata = metadata.lock().await;
+
+                                metadata.map.insert(
+                                    resource,
+                                    ResourceMeta {
+                                        current_mtime: Some(mtime),
+                                        size: data.len() as u64,
+                                    },
+                                );
+                                metadata.sync().await.map_err(|_| ())?;
+                            }
+                        }
+                    }
                     Ok(())
                 })
             }),
-            delete: Box::new(|resource| {
+            delete: Box::new(move |resource, storage| {
+                let metadata = Arc::clone(&delete_metadata);
+                let offline_metadata = Arc::clone(&delete_offline_metadata);
                 Box::pin(async move {
-                    let path = Path::new(&resource);
-                    if tokio::fs::metadata(path).await.map_err(|_| ())?.is_file() {
-                        tokio::fs::remove_file(path).await.map_err(|_| ())?;
-                    } else {
-                        tokio::fs::remove_dir_all(path).await.map_err(|_| ())?;
+                    let path = match storage {
+                        Storage::Public => format!(".agde/{resource}",),
+                        Storage::Current => format!("./{resource}"),
+                    };
+                    if storage == Storage::Current {
+                        let mut metadata = offline_metadata.lock().await;
+                        debug!("Removing {resource} from metdata cache.");
+                        metadata.map.remove(&resource);
                     }
+                    {
+                        let mut metadata = metadata.lock().await;
+                        debug!("Removing {resource} from metdata cache.");
+                        metadata.map.remove(&resource);
+                        metadata.sync().await.map_err(|_| ())?;
+                    }
+                    let file_metadata = match tokio::fs::metadata(&path).await {
+                        Ok(d) => d,
+                        Err(err) => match err.kind() {
+                            io::ErrorKind::NotFound => return Ok(()),
+                            _ => return Err(()),
+                        },
+                    };
+                    if file_metadata.is_file() {
+                        tokio::fs::remove_file(&path).await.map_err(|_| ())?;
+                    } else {
+                        tokio::fs::remove_dir_all(&path).await.map_err(|_| ())?;
+                    }
+
                     Ok(())
                 })
             }),
             rough_resource_diff: Box::new(move || {
                 let metadata = Arc::clone(&metadata);
+                let offline_metadata = Arc::clone(&offline_metadata);
                 Box::pin(async move {
+                    debug!("Getting diff");
+                    info!("metadata: {:?}", &*metadata.lock().await);
                     let mut changed = Vec::new();
-                    let metadata = metadata.lock().await;
+                    let mut offline_metadata = offline_metadata.lock().await;
                     let current_metadata = Metadata::new().await.map_err(|_| ())?;
-                    for (resource, meta) in &metadata.map {
+                    for (resource, meta) in &offline_metadata.map {
                         match current_metadata.map.get(resource) {
-                            Some(data) => {
-                                if data.actual_mtime != meta.actual_mtime || data.size != meta.size
+                            Some(current_data) => {
+                                info!(
+                                    "Comparing mtime {:?} {:?}",
+                                    meta.current_mtime, current_data.current_mtime
+                                );
+                                if meta.current_mtime.map_or(true, |mtime| {
+                                    mtime
+                                        != current_data
+                                            .current_mtime
+                                            .expect("we just created this from local metadata")
+                                }) || current_data.size != meta.size
                                 {
-                                    changed.push(Change::Modify(resource.clone()));
+                                    info!(
+                                        "Claiming {:?} != {:?} || {} != {}",
+                                        meta.current_mtime,
+                                        current_data.current_mtime,
+                                        current_data.size,
+                                        meta.size
+                                    );
+                                    changed.push(Change::Modify(resource.clone(), false));
                                 }
                             }
                             None => changed.push(Change::Delete(resource.clone())),
                         }
                     }
                     for resource in current_metadata.map.keys() {
-                        if !metadata.map.contains_key(resource) {
-                            changed.push(Change::Create(resource.clone()))
+                        if !offline_metadata.map.contains_key(resource) {
+                            changed.push(Change::Modify(resource.clone(), true))
                         }
                     }
+                    let mut metadata = metadata.lock().await;
+                    for change in &changed {
+                        match change {
+                            Change::Modify(res, _) => {
+                                warn!("Insert {res} into metadata");
+                                metadata
+                                    .map
+                                    .insert(res.clone(), *current_metadata.map.get(res).unwrap());
+                            }
+                            Change::Delete(res) => {
+                                metadata.map.remove(res);
+                            }
+                        }
+                    }
+                    {
+                        // let metadata = metadata.lock().await;
+                        // `TODO`: Optimize this
+                        *offline_metadata = metadata.clone();
+                        metadata.sync().await.map_err(|_| ())?;
+                    }
+                    debug!("Changed: {:?}", changed);
                     Ok(changed)
                 })
             }),
@@ -217,10 +397,11 @@ async fn main() {
     let url = "ws://localhost:8081/ws";
 
     loop {
-        let options = Options::fs()
+        let mut options = Options::fs()
             .await
-            .expect("failed to read file system metadata")
-            .arc();
+            .expect("failed to read file system metadata");
+        options.startup_timeout = Duration::from_secs(1);
+        let options = options.arc();
 
         let manager = make_manager();
 
@@ -236,6 +417,9 @@ async fn main() {
 
 async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(), DynError> {
     let (mut write, mut read) = connect_ws(url).await?;
+
+    // changes since last Storage sync
+    let changed = Arc::new(Mutex::new(HashSet::new()));
 
     {
         write.send(tungstenite::Message::text("HI!")).await?;
@@ -333,6 +517,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
         let manager = Arc::clone(&manager);
         let write = Arc::clone(&write);
         let options = Arc::clone(&options);
+        let changed = Arc::clone(&changed);
 
         // event handler
         tokio::spawn(async move {
@@ -381,40 +566,67 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             agde::MessageKind::InvalidUuid(_)
                             | agde::MessageKind::MismatchingVersions(_) => {}
                             agde::MessageKind::Event(event) => {
+                                info!("Got event from pier {}: {event:?}", message.sender());
+                                {
+                                    changed.lock().await.insert(event.resource().to_owned());
+                                }
+
                                 match manager.apply_event(event, message.uuid()) {
                                     Ok(applier) => match event.inner() {
                                         agde::EventKind::Modify(ev) => {
                                             if let Some(resource) = applier.resource() {
-                                                let mut resource_data =
-                                                    (options.read)(resource.to_owned())
-                                                        .await
-                                                        .map_err(|()| {
-                                                            ApplicationError::StoragePermissions
-                                                        })?;
-                                                let len = resource_data.len();
-                                                let mut slice = agde::SliceBuf::with_filled(
-                                                    &mut resource_data,
-                                                    len,
-                                                );
-                                                slice.extend_to_needed(ev.sections(), 0);
-                                                applier.apply(&mut slice).unwrap();
+                                                let resource_data = (options.read)(
+                                                    resource.to_owned(),
+                                                    Storage::Public,
+                                                )
+                                                .await
+                                                .map_err(|()| {
+                                                    ApplicationError::StoragePermissions
+                                                })?;
+                                                if let Some(mut data) = resource_data {
+                                                    let mut slice =
+                                                        agde::SliceBuf::with_whole(&mut data);
+                                                    slice.extend_to_needed(ev.sections(), 0);
+                                                    applier.apply(&mut slice).unwrap();
+                                                    let len = slice.filled().len();
+                                                    data.truncate(len);
+                                                    (options.write)(
+                                                        resource.to_owned(),
+                                                        Storage::Public,
+                                                        data,
+                                                        WriteMtime::No,
+                                                    )
+                                                    .await
+                                                    .map_err(|_| {
+                                                        ApplicationError::StoragePermissions
+                                                    })?;
+                                                } else {
+                                                    // `TODO`: log check
+                                                    warn!("Got Modify event, but resource doesn't exist. Reconnecting might help, but this could be an extorsion.");
+                                                };
                                             } else {
                                                 // do nothing, as the doc says
                                             }
                                         }
                                         agde::EventKind::Create(ev) => {
-                                            (options.write)(ev.resource().to_owned(), Vec::new())
-                                                .await
-                                                .map_err(|()| {
-                                                    ApplicationError::StoragePermissions
-                                                })?;
+                                            (options.write)(
+                                                ev.resource().to_owned(),
+                                                Storage::Public,
+                                                Vec::new(),
+                                                WriteMtime::No,
+                                                // agde::event::dur_to_systime(event.timestamp()),
+                                                // None,
+                                            )
+                                            .await
+                                            .map_err(|()| ApplicationError::StoragePermissions)?;
                                         }
                                         agde::EventKind::Delete(ev) => {
-                                            (options.delete)(ev.resource().to_owned())
-                                                .await
-                                                .map_err(|()| {
-                                                    ApplicationError::StoragePermissions
-                                                })?;
+                                            (options.delete)(
+                                                ev.resource().to_owned(),
+                                                Storage::Public,
+                                            )
+                                            .await
+                                            .map_err(|()| ApplicationError::StoragePermissions)?;
                                         }
                                     },
                                     Err(err) => {
@@ -457,50 +669,215 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
     let local_watcher: tokio::task::JoinHandle<Result<(), ApplicationError>> = {
         let options = Arc::clone(&options);
         tokio::spawn(async move {
+            let mut last_check = SystemTime::now();
             loop {
                 let diff = (options.rough_resource_diff)()
                     .await
                     .map_err(|_| ApplicationError::StoragePermissions)?;
-                let mut events = Vec::with_capacity(diff.len());
+                let mut messages = Vec::with_capacity(diff.len());
                 {
                     let mut manager = manager.lock().await;
 
                     for diff in diff {
-                        let message = match diff {
-                            Change::Create(res) => {
-                                manager.process_event(agde::event::Create::new(res))
-                            }
-                            // `TODO`: Give successor
-                            Change::Delete(res) => {
-                                manager.process_event(agde::event::Delete::new(res, None))
-                            }
-                            Change::Modify(res) => {
-                                let data = (options.read)(res.clone())
-                                    .await
-                                    .map_err(|_| ApplicationError::StoragePermissions)?;
-                                let len = data.len();
-                                // `TODO`: read from public
-                                let base = (options.read)(res.clone())
-                                    .await
-                                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                        let modern = manager.modern_resource_name(diff.resource(), last_check);
+                        // It's just not worth sending updates when the resource has been deleted.
+                        if modern.is_some() {
+                            let event = match diff {
+                                // `TODO`: Give successor
+                                Change::Delete(res) => agde::Event::with_timestamp(
+                                    agde::event::Kind::<agde::VecSection>::Delete(
+                                        agde::event::Delete::new(res, None),
+                                    ),
+                                    manager.uuid(),
+                                    last_check,
+                                ),
+                                Change::Modify(res, created) => {
+                                    if created {
+                                        let event = agde::Event::with_timestamp(
+                                            agde::event::Kind::<agde::VecSection>::Create(
+                                                agde::event::Create::new(res.clone()),
+                                            ),
+                                            manager.uuid(),
+                                            last_check,
+                                        );
+                                        messages.push(manager.process_event(event));
+                                    }
+                                    let data = (options.read)(res.clone(), Storage::Current)
+                                        .await
+                                        .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
+                                    let len = data.len();
+                                    let mut base = (options.read)(res.clone(), Storage::Public)
+                                        .await
+                                        .map_err(|_| ApplicationError::StoragePermissions)?
+                                        .unwrap_or_default();
 
-                                let event = agde::event::Modify::new(
-                                    res,
-                                    vec![agde::VecSection::whole_resource(len, data)],
-                                    Some(&base),
-                                );
-                                manager.process_event(event)
-                            }
-                        };
+                                    let mut unwinder = manager.unwinder_to(last_check);
+                                    let mut base_slice = agde::SliceBuf::with_whole(&mut base);
+                                    base_slice.extend_to_needed(unwinder.sections(&res).expect("error when unwinding public storage. Resource name is valid."), 0);
+                                    unwinder.unwind(&mut base_slice, &res).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
 
-                        events.push(message)
+                                    let event = agde::event::Modify::new(
+                                        res,
+                                        vec![agde::VecSection::whole_resource(len, data)],
+                                        Some(&base),
+                                    );
+
+                                    // let mut base_slice = agde::SliceBuf::with_whole(&mut base);
+                                    // base_slice.extend_to_needed(event.sections(), 0);
+
+                                    // for section in event.sections() {
+                                    // section.apply(&mut base_slice).expect("we've use agde's functions for guaranteeing slice capacity.");
+                                    // }
+
+                                    // // doesn't work, since agde changes the log to fit our changes
+                                    // // (later changes and their positions)
+                                    // unwinder.rewind(resource)
+
+                                    agde::Event::with_timestamp(
+                                        agde::event::Kind::Modify(event),
+                                        manager.uuid(),
+                                        last_check,
+                                    )
+                                }
+                            };
+
+                            messages.push(manager.process_event(event))
+                        } else {
+                            // edited resource has been removed.
+                        }
                     }
                 }
-                // `TODO`: Send events, and apply them to our setup.
-                // IMPORTANT: It's also here we have to take into account the data other have produced in the
-                // meantime. Maybe before creating messages, take our diffs, unwind as if we edited
-                // at the time of the last storage sync, then see where they landed now.
 
+                {
+                    let mut manager = manager.lock().await;
+
+                    for message in &messages {
+                        let event = if let agde::MessageKind::Event(ev) = message.inner() {
+                            ev
+                        } else {
+                            unreachable!("we only added messages through `process_event`, which always gives events.");
+                        };
+
+                        info!("Processing sent message. : {event:?}");
+
+                        let applier = manager
+                            .apply_event(event, message.uuid())
+                            .expect("manager failed to accept our own event");
+
+                        match applier.event().inner() {
+                            agde::EventKind::Modify(ev) => {
+                                if let Some(resource) = applier.resource() {
+                                    let mut resource_data =
+                                        (options.read)(resource.to_owned(), Storage::Public)
+                                            .await
+                                            .map_err(|()| ApplicationError::StoragePermissions)?
+                                            // don't expect, just make a new file.
+                                            .expect("we trust our own data - there must have been a create event before modify");
+                                    let mut slice = agde::SliceBuf::with_whole(&mut resource_data);
+                                    slice.extend_to_needed(ev.sections(), 0);
+                                    applier.apply(&mut slice).unwrap();
+                                    let len = slice.filled().len();
+                                    resource_data.truncate(len);
+                                    (options.write)(
+                                        resource.to_owned(),
+                                        Storage::Public,
+                                        resource_data,
+                                        WriteMtime::LookUpCurrent,
+                                    )
+                                    .await
+                                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                                } else {
+                                    // do nothing, as the doc says
+                                }
+                            }
+                            agde::EventKind::Create(ev) => {
+                                (options.write)(
+                                    ev.resource().to_owned(),
+                                    Storage::Public,
+                                    Vec::new(),
+                                    WriteMtime::LookUpCurrent,
+                                    // agde::event::dur_to_systime(event.timestamp()),
+                                    // Some
+                                    // None,
+                                )
+                                .await
+                                .map_err(|()| ApplicationError::StoragePermissions)?;
+                            }
+                            agde::EventKind::Delete(ev) => {
+                                info!("Processing local delete message.");
+                                (options.delete)(ev.resource().to_owned(), Storage::Public)
+                                    .await
+                                    .map_err(|()| ApplicationError::StoragePermissions)?;
+                            }
+                        }
+                    }
+
+                    info!("Last check {:?}", last_check.elapsed());
+                    // // move changed files to [`Storage::Current`].
+                    // let unwinder = manager.unwinder_to(last_check);
+                    // info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
+                    // // Dedup if a resource has been modified several times during this task's
+                    // // sleep.
+                    // let affected_resources = {
+                    // let mut set = HashSet::new();
+                    // for ev in unwinder.events() {
+                    // if ev.sender() != manager.uuid() {
+                    // set.insert(ev.resource());
+                    // }
+                    // // if let Some(latest_change) = map.get_mut(ev.resource()) {
+                    // // *latest_change = (*latest_change).max(ev.timestamp());
+                    // // } else {
+                    // // map.insert(ev.resource().to_owned(), ev.timestamp());
+                    // // }
+                    // }
+                    // set
+                    // };
+                    debug!("Processed messages. Moving from public to current.");
+                    {
+                        let mut changes = changed.lock().await;
+                        for resource in &*changes {
+                            warn!("Resource {resource} changed, from **remote**");
+                            let actual = (options.read)(resource.to_owned(), Storage::Public)
+                                .await
+                                .map_err(|_| ApplicationError::StoragePermissions)?;
+                            if let Some(actual) = actual {
+                                (options.write)(
+                                    resource.to_owned(),
+                                    Storage::Current,
+                                    actual,
+                                    WriteMtime::LookUpCurrent,
+                                    // agde::event::dur_to_systime(latest_change),
+                                )
+                                .await
+                                .map_err(|_| ApplicationError::StoragePermissions)?;
+                            } else {
+                                (options.delete)(resource.to_owned(), Storage::Current)
+                                    .await
+                                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                            }
+                        }
+                        changes.clear();
+                    }
+                    debug!("Successfully applied diffs.");
+                }
+                {
+                    let mut write = write.lock().await;
+                    for message in &messages {
+                        let message = message.to_bin().into();
+
+                        write
+                            .feed(message)
+                            .await
+                            .map_err(|_| ApplicationError::UnexpectedServerClose)?;
+                    }
+                    write
+                        .flush()
+                        .await
+                        .map_err(|_| ApplicationError::UnexpectedServerClose)?;
+                    debug!("Successfully sent diffs.");
+                }
+
+                last_check = SystemTime::now();
                 tokio::time::sleep(options.sync_interval).await;
             }
         })
@@ -526,12 +903,12 @@ fn make_manager() -> Manager {
 }
 async fn initial_metadata() -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;
-    let metadata = tokio::fs::read(".agde/metadata")
+    let metadata = tokio::fs::read(".agde/metdata")
         .then(|r| async move { r.map_err(|_| ()) })
         .and_then(|data| async move {
             bincode::serde::decode_from_slice(
                 &data,
-                bincode::config::standard().skip_fixed_array_length(),
+                bincode::config::standard().write_fixed_array_length(),
             )
             .map_err(|_| ())
         });
