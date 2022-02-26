@@ -181,8 +181,21 @@ event_kind_impl!(Create, Create);
 event_kind_impl!(Delete, Delete);
 
 /// Returns the time since [`UNIX_EPOCH`].
-pub(crate) fn dur_now() -> Duration {
-    SystemTime::now()
+#[must_use]
+pub fn dur_now() -> Duration {
+    systime_to_dur(SystemTime::now())
+}
+/// Convert `dur` (duration since [`UNIX_EPOCH`]) to [`SystemTime`].
+/// Very cheap conversion.
+#[must_use]
+pub fn dur_to_systime(dur: Duration) -> SystemTime {
+    SystemTime::UNIX_EPOCH + dur
+}
+/// Convert `systime` to [`Duration`] (since [`UNIX_EPOCH`]).
+/// Very cheap conversion.
+#[must_use]
+pub fn systime_to_dur(systime: SystemTime) -> Duration {
+    systime
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
 }
@@ -260,6 +273,7 @@ impl<S> Event<S> {
     /// Get the timestamp of this event.
     ///
     /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
+    /// Consider using [`dur_to_systime`] to convert it to a [`SystemTime`].
     #[inline]
     #[must_use]
     pub fn timestamp(&self) -> Duration {
@@ -330,6 +344,7 @@ impl<'a> Unwinder<'a> {
     ///
     /// Will never return [`UnwindError::Apply`].
     pub(crate) fn check_name(&self, modern_resource_name: &'a str) -> Result<(), UnwindError> {
+        println!("CHeking name, events: {:?}", self.events);
         for log_event in self.events {
             if log_event.event.resource() == modern_resource_name {
                 match &log_event.event.inner() {
@@ -342,6 +357,54 @@ impl<'a> Unwinder<'a> {
             }
         }
         Ok(())
+    }
+    /// Get an iterator over the [`Section`]s that have changed in `modern_resource_name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnwindError::ResourceDestroyed`] if `modern_resource_name` was destroyed/created
+    /// again.
+    pub fn sections<'b>(
+        &'b self,
+        modern_resource_name: &'b str,
+    ) -> Result<impl Iterator<Item = &section::Empty> + 'b, UnwindError> {
+        self.check_name(modern_resource_name)?;
+
+        let iter = self
+            .events
+            .iter()
+            .rev()
+            .filter_map(move |received_ev| {
+                if received_ev.event.resource() != modern_resource_name {
+                    return None;
+                }
+                match received_ev.event.inner() {
+                    EventKind::Modify(ev) => Some(ev.sections().iter().rev()),
+                    EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
+                        "Unexpected delete or create event in unwinding of event log.\
+                    Please report this bug."
+                    ),
+                }
+            })
+            .flatten();
+        Ok(iter)
+    }
+    /// Get an iterator over the events stored in this unwinder.
+    ///
+    /// Useful it you want to get resources affected since a timestamp:
+    ///
+    /// ```
+    /// # use agde::*;
+    /// use std::time::{Duration, SystemTime};
+    /// let manager = Manager::new(false, 0, Duration::from_secs(60), 512);
+    ///
+    /// let unwinder = manager.unwinder_to(SystemTime::now() - Duration::from_secs(2));
+    /// for event in unwinder.events() {
+    ///     println!("Resource {} changed in some way.", event.resource());
+    /// }
+    /// ```
+    pub fn events(&self) -> impl Iterator<Item = &Event<section::Empty>> + '_ {
+        self.events.iter().map(|received_ev| &received_ev.event)
     }
     /// Reverts the `resource` with `modern_resource_name` to the bottom of the internal list.
     ///

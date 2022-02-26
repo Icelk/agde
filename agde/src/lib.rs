@@ -876,9 +876,42 @@ impl Manager {
     }
     /// Generates a UUID using the internal [`rand::Rng`].
     #[inline]
-    pub(crate) fn generate_uuid(&mut self) -> Uuid {
+    pub fn generate_uuid(&mut self) -> Uuid {
         let mut rng = self.rng();
         Uuid::with_rng(&mut *rng)
+    }
+
+    /// Attempts to get the modern name of the resource named `old_name` at `timestamp`.
+    ///
+    /// Consider using [`event::dur_now`].
+    ///
+    /// `timestamp` is duration since `UNIX_EPOCH` when the `old_name` was relevant.
+    pub fn modern_resource_name<'a>(
+        &self,
+        old_name: &'a str,
+        timestamp: SystemTime,
+    ) -> Option<&'a str> {
+        self.event_log.modern_resource_name(
+            old_name,
+            timestamp
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO),
+        )
+    }
+
+    /// Get an [`event::Unwinder`] to unwind a resource to `timestamp`.
+    pub fn unwinder_to(&self, timestamp: SystemTime) -> event::Unwinder {
+        let events_start = self
+            .event_log
+            .cutoff_from_time(
+                timestamp
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO),
+            )
+            .unwrap_or(0);
+        let events = &self.event_log.list[events_start..];
+
+        event::Unwinder::new(events)
     }
 
     /// Get an iterator of the piers filtered by `filter`.

@@ -314,9 +314,11 @@ impl<S: DataSection + ?Sized> Section for S {
 }
 
 // See the safety guarantees. We copy data. This does not contain any buffers.
+/// A section without any data.
+/// Used in the internal log to track what has changed.
 #[allow(clippy::unsafe_derive_deserialize)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct Empty {
+pub struct Empty {
     start: usize,
     end: usize,
     len: usize,

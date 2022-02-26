@@ -56,9 +56,9 @@ pub enum Error {
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct Log {
-    list: Vec<ReceivedEvent>,
-    lifetime: Duration,
-    limit: u32,
+    pub(crate) list: Vec<ReceivedEvent>,
+    pub(crate) lifetime: Duration,
+    pub(crate) limit: u32,
 }
 impl Log {
     pub(crate) fn new(lifetime: Duration, limit: u32) -> Self {
@@ -145,9 +145,14 @@ impl Log {
     }
     #[inline]
     pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
-        for (pos, ev) in self.list.iter().enumerate() {
+        for (pos, ev) in self.list.iter().enumerate().rev() {
+            println!(
+                "Comparing cutoff{cutoff:?} with event {:?}",
+                ev.event.timestamp()
+            );
             if ev.event.timestamp() <= cutoff {
-                return Some(pos);
+                println!("Returnign start at {:?}", pos + 1);
+                return Some(pos + 1);
             }
         }
         None
@@ -206,6 +211,22 @@ impl Log {
     /// Caps `max` to the length of the inner list.
     pub(crate) fn get_max(&self, max: Option<usize>) -> &[ReceivedEvent] {
         &self.list[..max.map_or(self.len(), |max| cmp::min(max, self.len()))]
+    }
+
+    /// `timestamp` is duration since `UNIX_EPOCH` when the `old_name` was relevant.
+    pub(crate) fn modern_resource_name<'a>(
+        &self,
+        old_name: &'a str,
+        timestamp: Duration,
+    ) -> Option<&'a str> {
+        let slice_start = self.cutoff_from_time(timestamp).unwrap_or(0);
+
+        let slice = &self.list[slice_start..];
+
+        event::Unwinder::new(slice)
+            .check_name(old_name)
+            .ok()
+            .map(|()| old_name)
     }
 
     /// Rewinds to `timestamp` or as far as we can.
