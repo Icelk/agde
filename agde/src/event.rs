@@ -195,9 +195,7 @@ pub fn dur_to_systime(dur: Duration) -> SystemTime {
 /// Very cheap conversion.
 #[must_use]
 pub fn systime_to_dur(systime: SystemTime) -> Duration {
-    systime
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
+    systime.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO)
 }
 
 /// The kind of change of data.
