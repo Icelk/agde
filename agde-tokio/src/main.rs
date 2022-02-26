@@ -216,18 +216,7 @@ impl Options {
                     match storage {
                         Storage::Public => {
                             let mut metadata = metadata.lock().await;
-                            // metadata
-                            // .map
-                            // .entry(resource)
-                            // .or_insert_with(|| ResourceMeta {
-                            // current_mtime: None,
-                            // public_mtime: mtime,
-                            // size: data.len() as u64,
-                            // });
-                            // let mtime = metadata
-                            // .map
-                            // .get(&resource)
-                            // .and_then(|meta| meta.current_mtime);
+
                             let mtime = match mtime {
                                 WriteMtime::No => None,
                                 WriteMtime::LookUpCurrent => {
@@ -316,17 +305,12 @@ impl Options {
                 let offline_metadata = Arc::clone(&offline_metadata);
                 Box::pin(async move {
                     debug!("Getting diff");
-                    info!("metadata: {:?}", &*metadata.lock().await);
                     let mut changed = Vec::new();
                     let mut offline_metadata = offline_metadata.lock().await;
                     let current_metadata = Metadata::new().await.map_err(|_| ())?;
                     for (resource, meta) in &offline_metadata.map {
                         match current_metadata.map.get(resource) {
                             Some(current_data) => {
-                                info!(
-                                    "Comparing mtime {:?} {:?}",
-                                    meta.current_mtime, current_data.current_mtime
-                                );
                                 if meta.current_mtime.map_or(true, |mtime| {
                                     mtime
                                         != current_data
@@ -334,13 +318,6 @@ impl Options {
                                             .expect("we just created this from local metadata")
                                 }) || current_data.size != meta.size
                                 {
-                                    info!(
-                                        "Claiming {:?} != {:?} || {} != {}",
-                                        meta.current_mtime,
-                                        current_data.current_mtime,
-                                        current_data.size,
-                                        meta.size
-                                    );
                                     changed.push(Change::Modify(resource.clone(), false));
                                 }
                             }
@@ -356,7 +333,6 @@ impl Options {
                     for change in &changed {
                         match change {
                             Change::Modify(res, _) => {
-                                warn!("Insert {res} into metadata");
                                 metadata
                                     .map
                                     .insert(res.clone(), *current_metadata.map.get(res).unwrap());
@@ -722,17 +698,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         Some(&base),
                                     );
 
-                                    // let mut base_slice = agde::SliceBuf::with_whole(&mut base);
-                                    // base_slice.extend_to_needed(event.sections(), 0);
-
-                                    // for section in event.sections() {
-                                    // section.apply(&mut base_slice).expect("we've use agde's functions for guaranteeing slice capacity.");
-                                    // }
-
-                                    // // doesn't work, since agde changes the log to fit our changes
-                                    // // (later changes and their positions)
-                                    // unwinder.rewind(resource)
-
                                     agde::Event::with_timestamp(
                                         agde::event::Kind::Modify(event),
                                         manager.uuid(),
@@ -758,7 +723,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             unreachable!("we only added messages through `process_event`, which always gives events.");
                         };
 
-                        info!("Processing sent message. : {event:?}");
+                        debug!("Processing sent message: {event:?}");
 
                         let applier = manager
                             .apply_event(event, message.uuid())
@@ -812,26 +777,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         }
                     }
 
-                    info!("Last check {:?}", last_check.elapsed());
-                    // // move changed files to [`Storage::Current`].
-                    // let unwinder = manager.unwinder_to(last_check);
-                    // info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
-                    // // Dedup if a resource has been modified several times during this task's
-                    // // sleep.
-                    // let affected_resources = {
-                    // let mut set = HashSet::new();
-                    // for ev in unwinder.events() {
-                    // if ev.sender() != manager.uuid() {
-                    // set.insert(ev.resource());
-                    // }
-                    // // if let Some(latest_change) = map.get_mut(ev.resource()) {
-                    // // *latest_change = (*latest_change).max(ev.timestamp());
-                    // // } else {
-                    // // map.insert(ev.resource().to_owned(), ev.timestamp());
-                    // // }
-                    // }
-                    // set
-                    // };
                     debug!("Processed messages. Moving from public to current.");
                     {
                         let mut changes = changed.lock().await;
