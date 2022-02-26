@@ -848,7 +848,7 @@ fn make_manager() -> Manager {
 }
 async fn initial_metadata() -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;
-    let metadata = tokio::fs::read(".agde/metdata")
+    let metadata = tokio::fs::read(".agde/metadata")
         .then(|r| async move { r.map_err(|_| ()) })
         .and_then(|data| async move {
             bincode::serde::decode_from_slice(
