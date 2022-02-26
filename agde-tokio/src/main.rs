@@ -590,8 +590,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                 Storage::Public,
                                                 Vec::new(),
                                                 WriteMtime::No,
-                                                // agde::event::dur_to_systime(event.timestamp()),
-                                                // None,
                                             )
                                             .await
                                             .map_err(|()| ApplicationError::StoragePermissions)?;
@@ -761,9 +759,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     Storage::Public,
                                     Vec::new(),
                                     WriteMtime::LookUpCurrent,
-                                    // agde::event::dur_to_systime(event.timestamp()),
-                                    // Some
-                                    // None,
                                 )
                                 .await
                                 .map_err(|()| ApplicationError::StoragePermissions)?;
@@ -791,7 +786,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     Storage::Current,
                                     actual,
                                     WriteMtime::LookUpCurrent,
-                                    // agde::event::dur_to_systime(latest_change),
                                 )
                                 .await
                                 .map_err(|_| ApplicationError::StoragePermissions)?;
