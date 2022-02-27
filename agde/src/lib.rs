@@ -881,7 +881,7 @@ impl Manager {
         Uuid::with_rng(&mut *rng)
     }
     /// Get a reference to this manager's capabilities.
-    pub fn capabilities(&self)  -> &Capabilities{
+    pub fn capabilities(&self) -> &Capabilities {
         &self.capabilities
     }
 
