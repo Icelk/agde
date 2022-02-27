@@ -727,37 +727,44 @@ impl Difference {
     /// tl;dr, you can [`Option::unwrap`] this if it comes straight from [`Signature::diff`] or
     /// this very function. If it's untrusted data, handle the errors.
     ///
-    /// Returns [`MinifyError::NewLarger`] if `block_size` > [`Self::block_size`] and
+    /// Returns [`MinifyError::NewLarger`] if `block_size` >= [`Self::block_size`] and
     /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
     /// [`MinifyError::SuccessiveUnknowns`] is returned if two [`Segment::Unknown`] are after
     /// each other.
     #[allow(clippy::too_many_lines)]
     pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
+        #[cold]
+        #[inline(never)]
+        fn unreachable_reference_segment() {
+            unreachable!("This function should only get BlockRef or Unknown. Report this bug.");
+        }
         fn push_segment(segments: &mut Vec<Segment>, item: Segment, block_size: usize) {
-            #[cold]
-            #[inline(never)]
-            fn unreachable_reference_segment() {
-                unreachable!("This function should only get BlockRef or Unknown. Report this bug.");
-            }
             match item {
                 Segment::BlockRef(item) => {
                     if let Some(last) = segments.last_mut() {
                         match last {
                             Segment::BlockRef(seg) => {
+                                println!("Last {seg:?}, end {}", seg.end(block_size));
                                 if seg.end(block_size) == item.start {
                                     // The previous end is this start.
                                     seg.extend(item.block_count());
                                 } else {
                                     // Check if block segment is only reference.
-                                    // This will never hapen above, as we always add to it.
+                                    // This will never happen above, as we always add to it.
                                     // This assumes [`SegmentBlockRef::block_count`] is >= 1
-                                    let seg = *seg;
-                                    if seg.block_count() == 1 {
-                                        segments
-                                            .push(Segment::Ref(SegmentRef { start: seg.start() }));
-                                    } else {
-                                        segments.push(Segment::BlockRef(seg));
-                                    }
+                                    // if item.block_count() == 1 {
+                                    // segments
+                                    // .push(Segment::Ref(SegmentRef { start: item.start() }));
+                                    // } else {
+                                    segments.push(Segment::BlockRef(item));
+                                    // }
+                                    // let seg = *seg;
+                                    // if seg.block_count() == 1 {
+                                    // segments
+                                    // .push(Segment::Ref(SegmentRef { start: seg.start() }));
+                                    // } else {
+                                    // segments.push(Segment::BlockRef(seg));
+                                    // }
                                 }
                             }
                             Segment::Unknown(_) => segments.push(Segment::BlockRef(item)),
@@ -772,7 +779,7 @@ impl Difference {
             }
         }
 
-        if self.block_size() < block_size {
+        if self.block_size() <= block_size {
             return Err(MinifyError::NewLarger);
         }
         let block_size_shrinkage = self.block_size() / block_size;
@@ -785,7 +792,6 @@ impl Difference {
         // We want to minify the `unknown` segments of `self`.
 
         // Use heuristics to allocate what we have * 1.2, if any more segments are added.
-        // Since we are probably splitting Unknown segments into 3 parts,
         let mut segments = Vec::with_capacity(self.segments().len() * 6 / 5);
         for (last, current, next) in PrePostWindow::new(self.segments()) {
             match current {
@@ -794,11 +800,13 @@ impl Difference {
                     // Multiply all block lengths by `block_size_shrinkage` to make them the length
                     // of new `block_size`.
                     block_seg.multiply(block_size_shrinkage);
+                    println!("Ref segment, from {seg:?} to {block_seg:?}");
                     push_segment(&mut segments, Segment::BlockRef(block_seg), block_size);
                 }
                 Segment::BlockRef(seg) => {
                     let mut seg = *seg;
                     seg.multiply(block_size_shrinkage);
+                    println!("Ref block segment, {seg:?}");
                     push_segment(&mut segments, Segment::BlockRef(seg), block_size);
                 }
                 Segment::Unknown(seg) => {
@@ -865,6 +873,24 @@ impl Difference {
                 }
             }
         }
+
+        let mut cursor = 0;
+        for segment in &mut segments {
+            match segment {
+                Segment::BlockRef(seg) => {
+                    let new = cursor + seg.block_count() * block_size;
+                    if base.len() <= new {
+                        let diff = new - base.len();
+                        // +7 to ceil the value
+                        let remove_blocks = (diff+7) / block_size;
+                        seg.block_count -= remove_blocks;
+                    }
+                }
+                Segment::Unknown(seg) => cursor += seg.data().len(),
+                Segment::Ref(_) => unreachable_reference_segment(),
+            }
+        }
+
         Ok(Difference {
             segments,
             block_size,

@@ -2,7 +2,7 @@
 //!
 //! See [`Section`] for more details.
 
-use std::cmp;
+use std::{cmp, isize};
 
 use serde::{Deserialize, Serialize};
 
@@ -219,18 +219,26 @@ pub trait Section {
     where
         Self: 'a,
     {
-        let mut diff = isize::try_from(len).expect(
+        let mut current_size = isize::try_from(len).expect(
             "usize can't fit in isize. Use resource lengths less than 1/2 the memory size.",
         );
-        let mut end = 0;
+        let mut max = current_size;
+        // let mut end = 0;
         for me in me {
-            diff += me.len_difference();
-            end = cmp::max(end, me.end() + 1);
-            end = cmp::max(end, me.start() + me.new_len() + 1);
+            current_size += me.len_difference();
+            max = max
+                .max(current_size)
+                .max(isize::try_from(me.end() + me.new_len()).unwrap_or(isize::MAX));
+            // end = cmp::max(end, me.end() + 1);
+            // end = cmp::max(end, me.start() + me.new_len() + 1);
         }
-        let needed = cmp::max(add_iusize(0, diff).unwrap_or(0), end);
-        let additional = cmp::max(needed, buffer.len());
-        buffer.resize(additional, fill);
+        // let needed = cmp::max(add_iusize(0, current_size).unwrap_or(0), end);
+        // let additional = cmp::max(needed, buffer.len());
+        println!("  NEEDED LENGTH {max}");
+        // since max will always be > `len`, this is OK.
+        #[allow(clippy::cast_sign_loss)]
+        let max = max as usize;
+        buffer.resize(max + 1, fill);
     }
     /// Extends the `buffer` with `fill` to fit this section.
     /// `len` is the length of the [`SliceBuf::filled`] part.
@@ -424,7 +432,7 @@ pub struct VecSection {
     /// The start of the previous data in the resource.
     start: usize,
     /// The end of the previous data in the resource.
-    end: usize,
+    pub(crate) end: usize,
     /// A reference to the data.
     data: Vec<u8>,
 }

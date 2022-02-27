@@ -13,10 +13,18 @@ fn test_sync(base: &[u8], target: &[u8]) {
         .minify(8, base)
         .expect("Failed to minify.");
 
+    println!("Diff {diff:#?}");
+
     let mut out = Vec::new();
     diff.apply(base, &mut out)
         .expect("Failed to apply good diff.");
-    assert_eq!(&out, target);
+    assert_eq!(
+        &out,
+        target,
+        "base didn't become target. Transformed:\n{}\n\nTarget:\n{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(target)
+    );
 }
 
 #[test]
@@ -97,6 +105,109 @@ fn sync_2() {
         b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!",
         b"Some test data. This test works, as the whole diff algorithm is written by me!",
     );
+}
+#[test]
+fn sync_3() {
+    let (old, new) = {
+        (
+            b"\
+hi
+
+well ok
+no
+
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+
+wowsies!",
+            b"\
+hi
+
+well ok
+no
+
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+
+wowsies!
+ok",
+        )
+    };
+    test_sync(old, new);
 }
 #[test]
 fn minify() {

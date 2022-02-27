@@ -191,6 +191,151 @@ fn basic_diff() {
     );
 }
 
+#[test]
+fn apply_diff() {
+    let (old, new) = {
+        (
+            b"\
+hi
+
+well ok
+no
+
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+
+wowsies!",
+            b"\
+hi
+
+well ok
+no
+
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got text message: 'HI!'
+Got binary message.
+Got binary message.
+Got binary message.
+Got binary message.
+
+wowsies!
+ok",
+        )
+    };
+
+    let mut old = old.to_vec();
+    let new_vec = new.to_vec();
+
+    let mut mgr = manager();
+
+    let event = event::Modify::diff("diff.bin".into(), new_vec, &old);
+
+    let message = mgr.process_event(event);
+
+    let mut receiver = manager();
+
+    let mut res = SliceBuf::with_whole(&mut old);
+
+    match message.inner() {
+        MessageKind::Event(event) => {
+            let event_applier = receiver
+                .apply_event(event, message.uuid())
+                .expect("Got event from future.");
+            match event_applier.event().inner() {
+                EventKind::Modify(ev) => {
+                    res.extend_to_needed(ev.sections(), 0);
+
+                    event_applier.apply(&mut res).expect("Buffer too small!");
+                }
+                _ => panic!("Wrong EventKind"),
+            }
+        }
+        kind => {
+            panic!("Got {:?}, but expected a Event!", kind);
+        }
+    }
+    let filled = res.filled().len();
+    println!("Filled {filled}");
+    old.truncate(filled);
+    assert_eq!(
+        std::str::from_utf8(&old).unwrap(),
+        std::str::from_utf8(new).unwrap(),
+        "differing. Old (adjusted):\n{}\n\nNew (target):\n{}",
+        std::str::from_utf8(&old).unwrap(),
+        std::str::from_utf8(new).unwrap(),
+    );
+}
+
 // Test when the underlying data has changed without events; then this library is called again.
 // A special call to the library, which will request all the files, mtime & size to see which
 // have changed.

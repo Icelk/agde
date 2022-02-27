@@ -14,6 +14,7 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
     sig.write(base);
     let sig = sig.finish();
     let rough_diff = sig.diff(target);
+    println!("rough {rough_diff:?}");
     #[allow(clippy::let_and_return)]
     let granular_diff = rough_diff
         .minify(8, base)
@@ -24,41 +25,107 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
 /// Converts the `diff` to a list of [`VecSection`] using `base` to fill in gaps where the
 /// representations don't work together.
 #[must_use]
+#[allow(clippy::missing_panics_doc)]
 pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
-    fn apply_reference(
-        segment_start: usize,
-        segment_end: usize,
-        last_unknown: &mut Option<SegmentUnknown>,
-        last_ref_end: &mut Option<usize>,
-        offset: &mut isize,
-        sections: &mut Vec<VecSection>,
-        base: &[u8],
-    ) {
-        if let Some(mut last) = last_unknown.take() {
-            if segment_start < last_ref_end.unwrap_or(0) {
-                // We are moving back in the file. Not allowed using `Section`s.
-                let base = &base[segment_start..segment_end];
-                last.data_mut().extend(base);
-                *last_unknown = Some(last);
-            } else {
-                let start = last_ref_end.unwrap_or(0);
-                let end = segment_start;
-                let section = VecSection::new(
-                    add_iusize(start, *offset).expect(
-                        "Internal error with offset in conversion to sections. Report bug, please.",
-                    ),
-                    add_iusize(end, *offset).expect(
-                        "Internal error with offset in conversion to sections. Report bug, please.",
-                    ),
-                    last.into_data(),
-                );
-                *offset += section.len_difference();
-                sections.push(section);
-            }
-        }
-        *last_ref_end = Some(segment_end);
-    }
+    // fn apply_reference(
+    // segment_start: usize,
+    // segment_end: usize,
+    // last_unknown: &mut Option<Vec<u8>>,
+    // last_ref_end: &mut Option<usize>,
+    // offset: &mut isize,
+    // sections: &mut Vec<VecSection>,
+    // base: &[u8],
+    // ) {
+    // println!(
+    // "Start {segment_start}, end {}, last {:?}",
+    // last_ref_end.unwrap_or(0),
+    // last_unknown.as_ref().map(|l| String::from_utf8_lossy(l))
+    // );
+    // if segment_start < last_ref_end.unwrap_or(0) {
+    // // We are moving back in the file. Not allowed using `Section`s.
+    // let base = &base[segment_start..segment_end];
+    // let mut last = last_unknown.take().unwrap_or_default();
+    // last.extend(base);
+    // *last_unknown = Some(last);
+    // } else if let Some(last) = last_unknown.take() {
+    // let start = last_ref_end.unwrap_or(0);
+    // let end = segment_start;
+    // let section = VecSection::new(
+    // add_iusize(start, *offset).expect(
+    // "Internal error with offset in conversion to sections. Report bug, please.",
+    // ),
+    // add_iusize(end, *offset).expect(
+    // "Internal error with offset in conversion to sections. Report bug, please.",
+    // ),
+    // last,
+    // );
+    // *offset += section.len_difference();
+    // sections.push(section);
+    // }
+    // *last_ref_end = Some(segment_end);
+    // }
 
+    // let block_size = diff.block_size();
+    // let mut sections = Vec::with_capacity(diff.segments().iter().fold(0, |acc, segment| {
+    // if let Segment::Unknown(_) = segment {
+    // acc + 1
+    // } else {
+    // acc
+    // }
+    // }));
+
+    // let mut last_unknown = None;
+    // let mut last_ref_end = None;
+    // let mut offset = 0;
+    // for segment in diff.into_segments() {
+    // match segment {
+    // Segment::Unknown(seg) => {
+    // if let Some(last) = last_unknown.take() {
+    // let start =
+    // let end = last_ref_end.unwrap_or(0);
+    // let section = VecSection::new(
+    // add_iusize(start, offset).expect(
+    // "Internal error with offset in conversion to sections. Report bug, please.",
+    // ),
+    // add_iusize(end, offset).expect(
+    // "Internal error with offset in conversion to sections. Report bug, please.",
+    // ),
+    // last,
+    // );
+    // offset += section.len_difference();
+    // sections.push(section);
+    // }
+    // last_unknown = Some(seg.into_data())
+    // }
+    // Segment::Ref(seg) => apply_reference(
+    // seg.start(),
+    // seg.end(block_size),
+    // &mut last_unknown,
+    // &mut last_ref_end,
+    // &mut offset,
+    // &mut sections,
+    // base,
+    // ),
+    // Segment::BlockRef(seg) => apply_reference(
+    // seg.start(),
+    // seg.end(block_size),
+    // &mut last_unknown,
+    // &mut last_ref_end,
+    // &mut offset,
+    // &mut sections,
+    // base,
+    // ),
+    // }
+    // }
+    // if let Some(last) = last_unknown {
+    // let start = last_ref_end.unwrap_or(0);
+    // let end = base.len();
+    // let section = VecSection::new(start, end, last);
+    // sections.push(section);
+    // }
+    // println!("Sections: {sections:?}");
+    // sections
+    println!("Diff   {:#?}", diff);
     let block_size = diff.block_size();
     let mut sections = Vec::with_capacity(diff.segments().iter().fold(0, |acc, segment| {
         if let Segment::Unknown(_) = segment {
@@ -68,37 +135,51 @@ pub fn convert_to_sections(diff: Difference, base: &[u8]) -> Vec<VecSection> {
         }
     }));
 
-    let mut last_unknown = None;
-    let mut last_ref_end = None;
-    let mut offset = 0;
+    // where we're at in the vec we apply the changes (the vec is of course imaginary)
+    let mut cursor = 0;
+    let mut removed = 0;
     for segment in diff.into_segments() {
+        let segment = match segment {
+            Segment::Ref(seg) => Segment::BlockRef(den::SegmentBlockRef::from(seg)),
+            seg => seg,
+        };
         match segment {
-            Segment::Unknown(seg) => last_unknown = Some(seg),
-            Segment::Ref(seg) => apply_reference(
-                seg.start(),
-                seg.end(block_size),
-                &mut last_unknown,
-                &mut last_ref_end,
-                &mut offset,
-                &mut sections,
-                base,
-            ),
-            Segment::BlockRef(seg) => apply_reference(
-                seg.start(),
-                seg.end(block_size),
-                &mut last_unknown,
-                &mut last_ref_end,
-                &mut offset,
-                &mut sections,
-                base,
-            ),
+            Segment::Unknown(seg) => {
+                let len = seg.data().len();
+                let end = (cursor + len).min(base.len());
+                println!("Base {}", base.len());
+                let section = VecSection::new(cursor, end, seg.into_data());
+                sections.push(section);
+
+                cursor += len;
+            }
+            Segment::BlockRef(seg) => {
+                let adjusted = seg.start().saturating_sub(removed);
+                if adjusted == cursor {
+                    if let Some(last) = sections.last_mut() {
+                        last.end = adjusted;
+                    }
+                    // simplified below: removed += adjusted - cursor;, where `adjusted = seg.start() - removed`
+                    // so it becomes removed = removed + seg.start() - removed - cursor.
+                    removed = seg.start() - cursor;
+                    cursor += seg.block_count() * block_size;
+                } else if sections.last_mut().is_some() && adjusted > cursor {
+                    sections.last_mut().unwrap().end = adjusted;
+
+                    removed = seg.start() - cursor;
+                    cursor += seg.block_count() * block_size;
+                } else {
+                    let base = &base[seg.start()..seg.end(block_size).min(base.len())];
+                    let section = VecSection::new(cursor, cursor, base.to_vec());
+                    sections.push(section);
+
+                    cursor += base.len();
+                }
+            }
+            Segment::Ref(_) => unreachable!("we've converted all these above"),
         }
     }
-    if let Some(last) = last_unknown {
-        let start = last_ref_end.unwrap_or(0);
-        let end = base.len();
-        let section = VecSection::new(start, end, last.into_data());
-        sections.push(section);
-    }
+
+    println!("Sections: {sections:?}");
     sections
 }

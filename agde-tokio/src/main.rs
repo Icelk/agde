@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -48,12 +49,17 @@ pub struct Metadata {
     map: HashMap<String, ResourceMeta>,
 }
 impl Metadata {
-    async fn new() -> Result<Self, io::Error> {
+    async fn new(storage: Storage) -> Result<Self, io::Error> {
         let map: Result<HashMap<String, ResourceMeta>, io::Error> =
-            tokio::task::spawn_blocking(|| {
+            tokio::task::spawn_blocking(move || {
                 let mut map = HashMap::new();
 
-                for entry in walkdir::WalkDir::new(".")
+                let path = match storage {
+                    Storage::Public => ".agde/",
+                    Storage::Current => "./",
+                };
+
+                for entry in walkdir::WalkDir::new(path)
                     .follow_links(false)
                     .into_iter()
                     .filter_entry(|e| {
@@ -95,13 +101,13 @@ impl Metadata {
 
         Ok(Self { map })
     }
-    async fn sync(&self) -> Result<(), io::Error> {
+    async fn sync(&self, name: &str) -> Result<(), io::Error> {
         let data = bincode::serde::encode_to_vec(
             self,
             bincode::config::standard().write_fixed_array_length(),
         )
         .expect("serialization of metadata should be infallible");
-        tokio::fs::write(".agde/metadata", data).await?;
+        tokio::fs::write(format!(".agde/{name}"), data).await?;
         Ok(())
     }
 }
@@ -167,14 +173,25 @@ pub struct Options {
     /// For how long to wait for welcomes.
     pub startup_timeout: Duration,
     pub sync_interval: Duration,
+
+    pub force_pull: bool,
 }
 // `TODO`: Add option to write new resource changes to `Current` is that resource hasn't been
 // changed in current.
 impl Options {
-    pub async fn fs() -> Result<Self, io::Error> {
-        let metadata = initial_metadata().await?;
+    pub async fn fs(force_pull: bool) -> Result<Self, io::Error> {
+        let metadata =
+            initial_metadata("metadata", || Metadata::new(Storage::Public), force_pull).await?;
         // A metadata cache that is held constant between diff calls.
-        let offline_metadata = metadata.clone();
+        let offline_metadata = initial_metadata(
+            "metadata-offline",
+            || {
+                let r = Ok(metadata.clone());
+                futures::future::ready(r)
+            },
+            force_pull,
+        )
+        .await?;
 
         let metadata = Arc::new(Mutex::new(metadata));
         let offline_metadata = Arc::new(Mutex::new(offline_metadata));
@@ -186,7 +203,7 @@ impl Options {
             read: Box::new(|resource, storage| {
                 Box::pin(async move {
                     let path = match storage {
-                        Storage::Public => format!(".agde/{resource}",),
+                        Storage::Public => format!(".agde/files/{resource}",),
                         Storage::Current => format!("./{resource}"),
                     };
                     let file = tokio::fs::File::open(&path).await;
@@ -207,9 +224,15 @@ impl Options {
                 let offline_metadata = Arc::clone(&write_offline_metadata);
                 Box::pin(async move {
                     let path = match storage {
-                        Storage::Public => format!(".agde/{resource}",),
+                        Storage::Public => format!(".agde/files/{resource}",),
                         Storage::Current => format!("./{resource}"),
                     };
+
+                    if let Some(path) = Path::new(&path).parent() {
+                        tokio::fs::create_dir_all(path).await.map_err(|_| ())?;
+                    }
+                    info!("Writing to {path}, {:?}", String::from_utf8_lossy(&data));
+
                     let mut file = tokio::fs::File::create(&path).await.map_err(|_| ())?;
                     file.write_all(&data).await.map_err(|_| ())?;
                     file.flush().await.map_err(|_| ())?;
@@ -258,7 +281,7 @@ impl Options {
                                         size: data.len() as u64,
                                     },
                                 );
-                                metadata.sync().await.map_err(|_| ())?;
+                                metadata.sync("metadata").await.map_err(|_| ())?;
                             }
                         }
                     }
@@ -270,7 +293,7 @@ impl Options {
                 let offline_metadata = Arc::clone(&delete_offline_metadata);
                 Box::pin(async move {
                     let path = match storage {
-                        Storage::Public => format!(".agde/{resource}",),
+                        Storage::Public => format!(".agde/files/{resource}",),
                         Storage::Current => format!("./{resource}"),
                     };
                     if storage == Storage::Current {
@@ -282,7 +305,7 @@ impl Options {
                         let mut metadata = metadata.lock().await;
                         debug!("Removing {resource} from metdata cache.");
                         metadata.map.remove(&resource);
-                        metadata.sync().await.map_err(|_| ())?;
+                        metadata.sync("metadata").await.map_err(|_| ())?;
                     }
                     let file_metadata = match tokio::fs::metadata(&path).await {
                         Ok(d) => d,
@@ -307,7 +330,7 @@ impl Options {
                     debug!("Getting diff");
                     let mut changed = Vec::new();
                     let mut offline_metadata = offline_metadata.lock().await;
-                    let current_metadata = Metadata::new().await.map_err(|_| ())?;
+                    let current_metadata = Metadata::new(Storage::Current).await.map_err(|_| ())?;
                     for (resource, meta) in &offline_metadata.map {
                         match current_metadata.map.get(resource) {
                             Some(current_data) => {
@@ -346,7 +369,12 @@ impl Options {
                         // let metadata = metadata.lock().await;
                         // `TODO`: Optimize this
                         *offline_metadata = metadata.clone();
-                        metadata.sync().await.map_err(|_| ())?;
+                        futures::future::try_select(
+                            Box::pin(metadata.sync("metadata")),
+                            Box::pin(offline_metadata.sync("metadata-offline")),
+                        )
+                        .await
+                        .map_err(|_| ())?;
                     }
                     debug!("Changed: {:?}", changed);
                     Ok(changed)
@@ -354,6 +382,7 @@ impl Options {
             }),
             startup_timeout: Duration::from_secs(7),
             sync_interval: Duration::from_secs(5),
+            force_pull,
         })
     }
     pub fn arc(self) -> Arc<Self> {
@@ -373,7 +402,7 @@ async fn main() {
     let url = "ws://localhost:8081/ws";
 
     loop {
-        let mut options = Options::fs()
+        let mut options = Options::fs(false)
             .await
             .expect("failed to read file system metadata");
         options.startup_timeout = Duration::from_secs(1);
@@ -491,6 +520,13 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
         }
     }
 
+    // `TODO`: catch up
+    {
+        if options.force_pull {
+            // copy all files from public to current (check diff)
+        }
+    }
+
     let write = Arc::new(Mutex::new(write));
     let read = Arc::new(Mutex::new(read));
     let manager = Arc::new(Mutex::new(manager));
@@ -570,6 +606,11 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                     })?;
 
                                                     if let Some(mut data) = resource_data {
+                                                        info!(
+                                                            "Read {:?} from public",
+                                                            String::from_utf8_lossy(&data)
+                                                        );
+
                                                         let mut slice =
                                                             agde::SliceBuf::with_whole(&mut data);
                                                         slice.extend_to_needed(ev.sections(), 0);
@@ -588,14 +629,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                         })?;
                                                     } else {
                                                         // `TODO`: log check
-                                                        warn!("Got Modify event, but resource doesn't exist. Reconnecting might help, but this could be an extorsion.");
+                                                        warn!("Got Modify event, but resource doesn't exist. Reconnecting might help, but this could be an extortion to attempt to make you disconnect.");
                                                     };
                                                 }
                                                 agde::EventKind::Create(_) => {
                                                     (options.write)(
                                                         resource.to_owned(),
                                                         Storage::Public,
-                                                        data,
+                                                        Vec::new(),
                                                         WriteMtime::No,
                                                     )
                                                     .await
@@ -663,7 +704,11 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 let diff = (options.rough_resource_diff)()
                     .await
                     .map_err(|_| ApplicationError::StoragePermissions)?;
+
+                info!("Got diffs {diff:?}");
+
                 let mut messages = Vec::with_capacity(diff.len());
+
                 {
                     let mut manager = manager.lock().await;
 
@@ -687,7 +732,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                 agde::event::Create::new(res.clone()),
                                             ),
                                             manager.uuid(),
-                                            last_check,
+                                            // schedule create event a bit before modify.
+                                            last_check - Duration::from_micros(10),
                                         );
                                         messages.push(manager.process_event(event));
                                     }
@@ -695,25 +741,36 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     let data = (options.read)(res.clone(), Storage::Current)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
-                                    let len = data.len();
 
                                     let mut base = (options.read)(res.clone(), Storage::Public)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?
                                         .unwrap_or_default();
 
+                                    info!("Read {:?} from public", String::from_utf8_lossy(&base));
+
                                     let mut unwinder = manager.unwinder_to(last_check);
 
                                     let mut base_slice = agde::SliceBuf::with_whole(&mut base);
                                     base_slice.extend_to_needed(unwinder.sections(&res).expect("error when unwinding public storage. Resource name is valid."), 0);
 
+                                    info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
+
                                     unwinder.unwind(&mut base_slice, &res).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
 
-                                    let event = agde::event::Modify::new(
-                                        res,
-                                        vec![agde::VecSection::whole_resource(len, data)],
-                                        Some(&base),
+                                    warn!(
+                                        "Unwould public data, now resource at: '''\n{:?}\n'''",
+                                        base_slice
                                     );
+
+                                    let len = base_slice.filled().len();
+                                    base.truncate(len);
+                                    let event = agde::event::Modify::diff(res, data, &base);
+                                    // let event = agde::event::Modify::new(
+                                        // res,
+                                        // vec![agde::VecSection::whole_resource(len, data)],
+                                        // Some(&base),
+                                    // );
 
                                     agde::Event::with_timestamp(
                                         agde::event::Kind::Modify(event),
@@ -858,27 +915,81 @@ async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {
     let conenction = result?;
     Ok(conenction.0.split())
 }
-async fn initial_metadata() -> Result<Metadata, io::Error> {
+async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
+    name: &str,
+    new: impl Fn() -> F,
+    force_pull: bool,
+) -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;
-    let metadata = tokio::fs::read(".agde/metadata")
+    let metadata = tokio::fs::read(format!(".agde/{name}"))
         .then(|r| async move { r.map_err(|_| ()) })
         .and_then(|data| async move {
-            bincode::serde::decode_from_slice(
+            bincode::serde::decode_from_slice::<Metadata, _>(
                 &data,
                 bincode::config::standard().write_fixed_array_length(),
             )
             .map_err(|_| ())
         });
     match metadata.await {
-        Ok((metadata, _)) => Ok(metadata),
+        Ok((metadata, _)) => {
+            let mut metadata: Metadata = metadata;
+            let mut differing = Vec::new();
+            for (resource, metadata) in &metadata.map {
+                let meta = tokio::fs::metadata(format!(".agde/files/{resource}")).await;
+                match meta {
+                    Ok(meta) => {
+                        if meta.len() != metadata.size {
+                            differing.push(resource.clone());
+                            error!("File {resource} has different length in cached metadata and on disk.");
+                        }
+                    }
+                    Err(err) => match err.kind() {
+                        io::ErrorKind::NotFound => {
+                            differing.push(resource.clone());
+                            error!("File {resource} is not found on disk.");
+                        }
+                        _ => return Err(err),
+                    },
+                };
+            }
+
+            for resource in differing {
+                metadata.map.remove(&resource);
+            }
+
+            Ok(metadata)
+        }
         Err(_) => {
             error!("Metadata corrupt. Recreating.");
 
-            let metadata = Metadata::new().await?;
-            if let Err(err) = metadata.sync().await {
-                error!("Failed to write newly created metadata: {err:?}");
+            let populated = tokio::task::spawn_blocking(move || {
+                walkdir::WalkDir::new("./")
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_entry(|e| {
+                        !(e.path().starts_with(".agde") || e.path().starts_with("./.agde"))
+                    })
+                    .any(|e| {
+                        e.as_ref()
+                            .map_or(true, |e| e.metadata().map_or(true, |meta| meta.is_file()))
+                    })
+            })
+            .await
+            .unwrap();
+
+            if !populated || force_pull {
+                let metadata = new().await?;
+                if let Err(err) = metadata.sync(name).await {
+                    error!("Failed to write newly created metadata: {err:?}");
+                }
+                Ok(metadata)
+            } else {
+                error!("Metadata not found. Directory is not empty. Refusing to override files.");
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "refusing to override files",
+                ))
             }
-            Ok(metadata)
         }
     }
 }

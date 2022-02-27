@@ -2,6 +2,7 @@
 
 use std::cmp;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::hash::Hasher;
 use std::time::Duration;
 
@@ -253,7 +254,7 @@ impl Log {
                     // Match!
                     // Also takes the current event in the slice.
                     // ↑ is however not true for the backup return below.
-                    return pos;
+                    return pos+1;
                 }
             }
             // Event is not in list.
@@ -321,7 +322,7 @@ pub struct EventApplier<'a, S: DataSection> {
     /// Needed because the event might be sorted out of the list; slow push.
     event: &'a Event<S>,
 }
-impl<'a, S: DataSection> EventApplier<'a, S> {
+impl<'a, S: DataSection + Debug> EventApplier<'a, S> {
     /// The name of the modified resource on the local store.
     /// If this is [`None`], the resource this event applies to has been deleted since.
     /// Don't call [`Self::apply`] if that's the case.
