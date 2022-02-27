@@ -379,7 +379,13 @@ async fn main() {
         options.startup_timeout = Duration::from_secs(1);
         let options = options.arc();
 
-        let manager = make_manager();
+        let log_lifetime = Duration::from_secs(60);
+
+        if log_lifetime <= options.sync_interval * 2 {
+            error!("Increase frequency of sync or increase log lifetime.");
+        }
+
+        let manager = Manager::new(false, 0, log_lifetime, 512);
 
         match run(url, manager, options).await {
             Ok(()) => process::exit(0),
@@ -548,24 +554,44 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 }
 
                                 match manager.apply_event(event, message.uuid()) {
-                                    Ok(applier) => match event.inner() {
-                                        agde::EventKind::Modify(ev) => {
-                                            if let Some(resource) = applier.resource() {
-                                                let resource_data = (options.read)(
-                                                    resource.to_owned(),
-                                                    Storage::Public,
-                                                )
-                                                .await
-                                                .map_err(|()| {
-                                                    ApplicationError::StoragePermissions
-                                                })?;
-                                                if let Some(mut data) = resource_data {
-                                                    let mut slice =
-                                                        agde::SliceBuf::with_whole(&mut data);
-                                                    slice.extend_to_needed(ev.sections(), 0);
-                                                    applier.apply(&mut slice).unwrap();
-                                                    let len = slice.filled().len();
-                                                    data.truncate(len);
+                                    Ok(applier) => {
+                                        let resource = applier.resource();
+
+                                        if let Some(resource) = resource {
+                                            match applier.event().inner() {
+                                                agde::EventKind::Modify(ev) => {
+                                                    let resource_data = (options.read)(
+                                                        resource.to_owned(),
+                                                        Storage::Public,
+                                                    )
+                                                    .await
+                                                    .map_err(|()| {
+                                                        ApplicationError::StoragePermissions
+                                                    })?;
+
+                                                    if let Some(mut data) = resource_data {
+                                                        let mut slice =
+                                                            agde::SliceBuf::with_whole(&mut data);
+                                                        slice.extend_to_needed(ev.sections(), 0);
+                                                        applier.apply(&mut slice).unwrap();
+                                                        let len = slice.filled().len();
+                                                        data.truncate(len);
+                                                        (options.write)(
+                                                            resource.to_owned(),
+                                                            Storage::Public,
+                                                            data,
+                                                            WriteMtime::No,
+                                                        )
+                                                        .await
+                                                        .map_err(|_| {
+                                                            ApplicationError::StoragePermissions
+                                                        })?;
+                                                    } else {
+                                                        // `TODO`: log check
+                                                        warn!("Got Modify event, but resource doesn't exist. Reconnecting might help, but this could be an extorsion.");
+                                                    };
+                                                }
+                                                agde::EventKind::Create(_) => {
                                                     (options.write)(
                                                         resource.to_owned(),
                                                         Storage::Public,
@@ -573,36 +599,25 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                         WriteMtime::No,
                                                     )
                                                     .await
-                                                    .map_err(|_| {
+                                                    .map_err(|()| {
                                                         ApplicationError::StoragePermissions
                                                     })?;
-                                                } else {
-                                                    // `TODO`: log check
-                                                    warn!("Got Modify event, but resource doesn't exist. Reconnecting might help, but this could be an extorsion.");
-                                                };
-                                            } else {
-                                                // do nothing, as the doc says
+                                                }
+                                                agde::EventKind::Delete(_) => {
+                                                    (options.delete)(
+                                                        resource.to_owned(),
+                                                        Storage::Public,
+                                                    )
+                                                    .await
+                                                    .map_err(|()| {
+                                                        ApplicationError::StoragePermissions
+                                                    })?;
+                                                }
                                             }
+                                        } else {
+                                            // do nothing, as the doc says
                                         }
-                                        agde::EventKind::Create(ev) => {
-                                            (options.write)(
-                                                ev.resource().to_owned(),
-                                                Storage::Public,
-                                                Vec::new(),
-                                                WriteMtime::No,
-                                            )
-                                            .await
-                                            .map_err(|()| ApplicationError::StoragePermissions)?;
-                                        }
-                                        agde::EventKind::Delete(ev) => {
-                                            (options.delete)(
-                                                ev.resource().to_owned(),
-                                                Storage::Public,
-                                            )
-                                            .await
-                                            .map_err(|()| ApplicationError::StoragePermissions)?;
-                                        }
-                                    },
+                                    }
                                     Err(err) => {
                                         warn!("Slow pier. Got error from internal log: {err:?}. Running a log check.");
                                         // `TODO`: Log check!
@@ -676,18 +691,22 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         );
                                         messages.push(manager.process_event(event));
                                     }
+
                                     let data = (options.read)(res.clone(), Storage::Current)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
                                     let len = data.len();
+
                                     let mut base = (options.read)(res.clone(), Storage::Public)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?
                                         .unwrap_or_default();
 
                                     let mut unwinder = manager.unwinder_to(last_check);
+
                                     let mut base_slice = agde::SliceBuf::with_whole(&mut base);
                                     base_slice.extend_to_needed(unwinder.sections(&res).expect("error when unwinding public storage. Resource name is valid."), 0);
+
                                     unwinder.unwind(&mut base_slice, &res).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
 
                                     let event = agde::event::Modify::new(
@@ -727,35 +746,37 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             .apply_event(event, message.uuid())
                             .expect("manager failed to accept our own event");
 
+                        let resource = applier.resource().expect("our own messages are too old");
+
                         match applier.event().inner() {
                             agde::EventKind::Modify(ev) => {
-                                if let Some(resource) = applier.resource() {
-                                    let mut resource_data =
+                                let mut resource_data =
                                         (options.read)(resource.to_owned(), Storage::Public)
                                             .await
                                             .map_err(|()| ApplicationError::StoragePermissions)?
                                             // don't expect, just make a new file.
                                             .expect("we trust our own data - there must have been a create event before modify");
-                                    let mut slice = agde::SliceBuf::with_whole(&mut resource_data);
-                                    slice.extend_to_needed(ev.sections(), 0);
-                                    applier.apply(&mut slice).unwrap();
-                                    let len = slice.filled().len();
-                                    resource_data.truncate(len);
-                                    (options.write)(
-                                        resource.to_owned(),
-                                        Storage::Public,
-                                        resource_data,
-                                        WriteMtime::LookUpCurrent,
-                                    )
-                                    .await
-                                    .map_err(|_| ApplicationError::StoragePermissions)?;
-                                } else {
-                                    // do nothing, as the doc says
-                                }
-                            }
-                            agde::EventKind::Create(ev) => {
+
+                                let mut slice = agde::SliceBuf::with_whole(&mut resource_data);
+                                slice.extend_to_needed(ev.sections(), 0);
+
+                                applier.apply(&mut slice).unwrap();
+
+                                let len = slice.filled().len();
+                                resource_data.truncate(len);
+
                                 (options.write)(
-                                    ev.resource().to_owned(),
+                                    resource.to_owned(),
+                                    Storage::Public,
+                                    resource_data,
+                                    WriteMtime::LookUpCurrent,
+                                )
+                                .await
+                                .map_err(|_| ApplicationError::StoragePermissions)?;
+                            }
+                            agde::EventKind::Create(_) => {
+                                (options.write)(
+                                    resource.to_owned(),
                                     Storage::Public,
                                     Vec::new(),
                                     WriteMtime::LookUpCurrent,
@@ -763,9 +784,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 .await
                                 .map_err(|()| ApplicationError::StoragePermissions)?;
                             }
-                            agde::EventKind::Delete(ev) => {
+                            agde::EventKind::Delete(_) => {
                                 info!("Processing local delete message.");
-                                (options.delete)(ev.resource().to_owned(), Storage::Public)
+                                (options.delete)(resource.to_owned(), Storage::Public)
                                     .await
                                     .map_err(|()| ApplicationError::StoragePermissions)?;
                             }
@@ -836,9 +857,6 @@ async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {
     let result = tokio_tungstenite::connect_async(url).await;
     let conenction = result?;
     Ok(conenction.0.split())
-}
-fn make_manager() -> Manager {
-    Manager::new(false, 0, Duration::from_secs(60), 512)
 }
 async fn initial_metadata() -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;

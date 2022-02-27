@@ -140,7 +140,7 @@ impl Capabilities {
             effective > -8.0 && effective < 8.0,
             "Effective must be in range [-8..8]. Please report this internal bug."
         );
-        if effective.is_sign_positive() || effective == 0.0 {
+        if effective >= 0.0 {
             // Map (0..8]
             // to
             // (1..9]
@@ -879,6 +879,10 @@ impl Manager {
     pub fn generate_uuid(&mut self) -> Uuid {
         let mut rng = self.rng();
         Uuid::with_rng(&mut *rng)
+    }
+    /// Get a reference to this manager's capabilities.
+    pub fn capabilities(&self)  -> &Capabilities{
+        &self.capabilities
     }
 
     /// Attempts to get the modern name of the resource named `old_name` at `timestamp`.
