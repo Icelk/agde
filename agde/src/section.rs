@@ -191,7 +191,7 @@ pub trait Section {
     /// Panics if the end is before the start.
     /// This guarantee should be upheld by the implementer of [`Section`].
     ///
-    /// Will also panic if any of the lengths don't fit in a [`isize`].
+    /// Will also panic if any of the lengths don't fit in a [`prim@isize`].
     #[allow(clippy::inline_always)]
     #[inline(always)]
     fn len_difference(&self) -> isize {

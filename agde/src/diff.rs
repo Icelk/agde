@@ -3,8 +3,8 @@
 //! These functions are wrappers for integrating `agde` with it's diff library.
 //! It handles converting data structures so the two can efficiently work together.
 
-use crate::{section::add_iusize, Section, VecSection};
-use den::{Difference, Segment, SegmentUnknown, Signature};
+use crate::VecSection;
+use den::{Difference, Segment, Signature};
 
 /// Creates a granular [`Difference`] between `base` and `target`.
 ///
