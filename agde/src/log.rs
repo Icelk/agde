@@ -254,7 +254,7 @@ impl Log {
                     // Match!
                     // Also takes the current event in the slice.
                     // ↑ is however not true for the backup return below.
-                    return pos+1;
+                    return pos + 1;
                 }
             }
             // Event is not in list.

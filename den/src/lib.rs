@@ -882,7 +882,7 @@ impl Difference {
                     if base.len() <= new {
                         let diff = new - base.len();
                         // +7 to ceil the value
-                        let remove_blocks = (diff+7) / block_size;
+                        let remove_blocks = (diff + 7) / block_size;
                         seg.block_count -= remove_blocks;
                     }
                 }

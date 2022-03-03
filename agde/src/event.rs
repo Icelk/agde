@@ -58,7 +58,11 @@ impl Modify<VecSection> {
     }
     /// Get the difference needed to get from `base` to `target`, as a modify event.
     pub fn diff(resource: String, target: Vec<u8>, base: &[u8]) -> Self {
-        Self::new(resource, vec![VecSection::whole_resource(base.len(), target)], Some(base))
+        Self::new(
+            resource,
+            vec![VecSection::whole_resource(base.len(), target)],
+            Some(base),
+        )
     }
 }
 impl<S: Section> Modify<S> {

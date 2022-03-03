@@ -767,9 +767,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     base.truncate(len);
                                     let event = agde::event::Modify::diff(res, data, &base);
                                     // let event = agde::event::Modify::new(
-                                        // res,
-                                        // vec![agde::VecSection::whole_resource(len, data)],
-                                        // Some(&base),
+                                    // res,
+                                    // vec![agde::VecSection::whole_resource(len, data)],
+                                    // Some(&base),
                                     // );
 
                                     agde::Event::with_timestamp(
