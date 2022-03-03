@@ -64,6 +64,7 @@
 //!     - [ ] Fetch API for apply to get data on demand.
 //!         - This could slow things down dramatically.
 //!     - [ ] Implement Write for `HashBuilder`.
+//! - [ ] Use SHA(1|256?) to verify integrity of data. Bundled with the [`Signature`].
 
 #![deny(
     clippy::pedantic,
@@ -439,7 +440,7 @@ impl Signature {
     pub fn diff(&self, data: &[u8]) -> Difference {
         #[allow(clippy::inline_always)]
         #[inline(always)]
-        fn check_unknown_data(
+        fn push_unknown_data(
             data: &[u8],
             last_ref: usize,
             blocks_pos: usize,
@@ -476,7 +477,7 @@ impl Signature {
         let mut blocks = Blocks::new(data, self.block_size());
 
         let mut segments = Vec::new();
-        let mut last_ref = 0;
+        let mut last_ref_block = 0;
 
         // Iterate over data, in windows. Find hash.
         while let Some(block) = blocks.next() {
@@ -496,9 +497,13 @@ impl Signature {
             hasher.write(block);
             let hash = hasher.finish().to_bytes();
 
+            // here, loop over the coming 8 (heuristics?) blocks (clone `blocks`) and if they are
+            // not the same reference, continue with the outer loop. If the data has been moved
+            // around a lot, we loose fragmented references, but how useful are they?
+
             // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
             if let Some(block_data) = map.get(&hash) {
-                check_unknown_data(data, last_ref, blocks.pos(), &mut segments);
+                push_unknown_data(data, last_ref_block, blocks.pos(), &mut segments);
 
                 if let Some(last) = segments.last_mut() {
                     match last {
@@ -527,13 +532,13 @@ impl Signature {
                 }
 
                 blocks.advance(block.len() - 1);
-                last_ref = blocks.pos();
+                last_ref_block = blocks.pos();
             }
         }
 
         // If we want them to get our diff, we send our diff, with the `Unknown`s filled with data.
         // Then, we only send references to their data and our new data.
-        check_unknown_data(data, last_ref, blocks.pos() + 1, &mut segments);
+        push_unknown_data(data, last_ref_block, blocks.pos() + 1, &mut segments);
 
         Difference {
             segments,
@@ -973,6 +978,7 @@ pub enum ApplyError {
     RefOutOfBounds,
 }
 
+#[derive(Debug, Clone)]
 struct Blocks<'a, T> {
     slice: &'a [T],
     block_size: usize,
