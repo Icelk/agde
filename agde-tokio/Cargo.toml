@@ -24,4 +24,4 @@ tokio-tungstenite = { version = "0.17", features = ["rustls-tls-webpki-roots"] }
 futures = { version = "0.3", default-features = false }
 walkdir = "2"
 serde = { version = "^1", features = ["derive"] }
-bincode = { version = "=2.0.0-beta.3", features = ["serde"] }
+bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
