@@ -75,102 +75,255 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
 use std::hash::Hasher;
 use twox_hash::xxh3::HasherExt;
 
-macro_rules! hashers {
-    ($macro: tt!) => {
-        $macro!(
-            (None4, [u8; 4], StackSlice<4>, finish),
-            (None8, [u8; 8], StackSlice<8>, finish),
-            (None16, [u8; 16], StackSlice<16>, finish),
-            (Fnv, [u8; 8], fnv::FnvHasher, finish),
-            (XXH3_64, [u8; 8], twox_hash::Xxh3Hash64, finish),
-            (XXH3_128, [u8; 16], twox_hash::Xxh3Hash128, finish_ext),
-        );
-    };
+/// The algorithms which can be used for hashing the data.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize, Serialize)]
+#[must_use]
+#[allow(missing_docs)]
+pub enum HashAlgorithm {
+    None4,
+    None8,
+    None16,
+    Fnv,
+    XXH3_64,
+    XXH3_128,
+    PolyCyclic32,
+    PolyCyclic64,
+}
+impl HashAlgorithm {
+    #[inline]
+    fn builder(self, block_size: usize) -> HashBuilder {
+        match self {
+            Self::None4 => HashBuilder::None4(StackSlice::default()),
+            Self::None8 => HashBuilder::None8(StackSlice::default()),
+            Self::None16 => HashBuilder::None16(StackSlice::default()),
+            Self::Fnv => HashBuilder::Fnv(fnv::FnvHasher::default()),
+            Self::XXH3_64 => HashBuilder::XXH3_64(twox_hash::Xxh3Hash64::default()),
+            Self::XXH3_128 => HashBuilder::XXH3_128(twox_hash::Xxh3Hash128::default()),
+            Self::PolyCyclic32 => HashBuilder::PolyCyclic32(PolyCyclic32::new(block_size)),
+            Self::PolyCyclic64 => HashBuilder::PolyCyclic64(PolyCyclic64::new(block_size)),
+        }
+    }
 }
 
-macro_rules! hash_algorithm {
-    (
-        $(
-            (
-                $name: ident,
-                $result: ty,
-                $builder: ty,
-                $finish: ident
-            ),
-        )+
-    ) => {
-        /// The algorithms which can be used for hashing the data.
-        #[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize, Serialize)]
-        #[must_use]
-        #[allow(missing_docs)]
-        pub enum HashAlgorithm {
-            $(
-                $name,
-            )+
+struct PolyCyclic32 {
+    inner: Box<cyclic_poly_23::CyclicPoly32>,
+    data: VecDeque<u8>,
+    block_size: usize,
+    last_position: usize,
+    write_data: bool,
+}
+impl PolyCyclic32 {
+    fn new(block_size: usize) -> Self {
+        Self {
+            inner: Box::new(cyclic_poly_23::CyclicPoly32::new(block_size)),
+            data: VecDeque::with_capacity(block_size),
+            block_size,
+            last_position: 0,
+            write_data: false,
         }
-        impl HashAlgorithm {
-            #[inline]
-            fn builder(&self) -> HashBuilder {
-                match self {
-                    $(
-                        Self::$name => HashBuilder::$name(Default::default()),
-                    )+
+    }
+    fn write_data(&mut self) {
+        if self.write_data {
+            let data = self.data.make_contiguous();
+            self.inner.calculate(data);
+            self.write_data = false;
+        }
+    }
+    fn write(&mut self, data: &[u8], position: Option<usize>) {
+        if self.data.len() == self.block_size {
+            if let Some(pos) = position {
+                // assuming data is from the same source
+                if pos == self.last_position + 1 {
+                    // flush
+                    self.write_data();
+
+                    let first = self.data.pop_front().unwrap();
+                    let new = *data.last().unwrap();
+                    self.data.push_back(new);
+                    self.inner.rotate(first, new);
+                    self.last_position = pos;
+
+                    return;
                 }
             }
         }
-    };
-}
 
-hashers!(hash_algorithm!);
-
-macro_rules! hash_builder {
-    (
-        $(
-            (
-                $name: ident,
-                $result: ty,
-                $builder: ty,
-                $finish: ident
-            ),
-        )+
-    ) => {
-        enum HashBuilder {
-            $(
-                $name($builder),
-            )+
+        // normal execution
+        self.data.extend(data);
+        self.last_position = position.unwrap_or(0);
+        self.write_data = true;
+    }
+    fn finish_reset(&mut self) -> u32 {
+        let wrote_data = self.write_data;
+        self.write_data();
+        if wrote_data {
+            self.data.clear();
         }
+        self.inner.value()
+    }
+}
+struct PolyCyclic64 {
+    inner: Box<cyclic_poly_23::CyclicPoly64>,
+    data: VecDeque<u8>,
+    block_size: usize,
+    last_position: usize,
+    write_data: bool,
+}
+impl PolyCyclic64 {
+    fn new(block_size: usize) -> Self {
+        Self {
+            inner: Box::new(cyclic_poly_23::CyclicPoly64::new(block_size)),
+            data: VecDeque::with_capacity(block_size),
+            block_size,
+            last_position: 0,
+            write_data: false,
+        }
+    }
+    fn write_data(&mut self) {
+        if self.write_data {
+            let data = self.data.make_contiguous();
+            self.inner.calculate(data);
+            self.write_data = false;
+        }
+    }
+    fn write(&mut self, data: &[u8], position: Option<usize>) {
+        if self.data.len() == self.block_size {
+            if let Some(pos) = position {
+                // assuming data is from the same source
+                if pos == self.last_position + 1 {
+                    // flush
+                    self.write_data();
 
-        impl HashBuilder {
-            #[inline]
-            fn finish(self) -> HashResult {
-                match self {
-                    $(
-                        Self::$name(hasher) => HashResult::$name(hasher.$finish().to_le_bytes()),
-                    )+
+                    let first = self.data.pop_front().unwrap();
+                    let new = *data.last().unwrap();
+                    self.data.push_back(new);
+                    self.inner.rotate(first, new);
+                    self.last_position = pos;
+
+                    return;
                 }
             }
-            #[inline]
-            fn write(&mut self, data: &[u8]) {
-                match self {
-                    $(
-                        Self::$name(hasher) => hasher.write(data),
-                    )+
-                }
-            }
         }
-    };
-}
 
-hashers!(hash_builder!);
+        // normal execution
+        self.data.extend(data);
+        self.last_position = position.unwrap_or(0);
+        self.write_data = true;
+    }
+    fn finish_reset(&mut self) -> u64 {
+        let wrote_data = self.write_data;
+        self.write_data();
+        if wrote_data {
+            self.data.clear();
+        }
+        self.inner.value()
+    }
+}
+enum HashBuilder {
+    None4(StackSlice<4>),
+    None8(StackSlice<8>),
+    None16(StackSlice<16>),
+    Fnv(fnv::FnvHasher),
+    XXH3_64(twox_hash::Xxh3Hash64),
+    XXH3_128(twox_hash::Xxh3Hash128),
+    PolyCyclic32(PolyCyclic32),
+    PolyCyclic64(PolyCyclic64),
+}
+impl HashBuilder {
+    #[inline]
+    fn finish_reset(&mut self) -> HashResult {
+        match self {
+            Self::None4(h) => {
+                let r = HashResult::None4(h.finish().to_le_bytes());
+                *h = StackSlice::default();
+                r
+            }
+            Self::None8(h) => {
+                let r = HashResult::None8(h.finish().to_le_bytes());
+                *h = StackSlice::default();
+                r
+            }
+            Self::None16(h) => {
+                let r = HashResult::None16(h.finish().to_le_bytes());
+                *h = StackSlice::default();
+                r
+            }
+            Self::Fnv(h) => {
+                let r = HashResult::Fnv(h.finish().to_le_bytes());
+                *h = fnv::FnvHasher::default();
+                r
+            }
+            Self::XXH3_64(h) => {
+                let r = HashResult::XXH3_64(h.finish().to_le_bytes());
+                *h = twox_hash::Xxh3Hash64::default();
+                r
+            }
+            Self::XXH3_128(h) => {
+                let r = HashResult::XXH3_128(h.finish_ext().to_le_bytes());
+                *h = twox_hash::Xxh3Hash128::default();
+                r
+            }
+            Self::PolyCyclic32(h) => HashResult::PolyCyclic32(h.finish_reset().to_le_bytes()),
+            Self::PolyCyclic64(h) => HashResult::PolyCyclic64(h.finish_reset().to_le_bytes()),
+        }
+    }
+    #[inline]
+    fn write(&mut self, data: &[u8], position: Option<usize>) {
+        match self {
+            Self::None4(h) => h.write(data),
+            Self::None8(h) => h.write(data),
+            Self::None16(h) => h.write(data),
+            Self::Fnv(h) => h.write(data),
+            Self::XXH3_64(h) => h.write(data),
+            Self::XXH3_128(h) => h.write(data),
+            Self::PolyCyclic32(h) => h.write(data, position),
+            Self::PolyCyclic64(h) => h.write(data, position),
+        }
+    }
+}
 
 impl Debug for HashBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HashBuilder (internal hasher data)")
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
+#[must_use]
+enum HashResult {
+    None4([u8; 4]),
+    None8([u8; 8]),
+    None16([u8; 16]),
+    Fnv([u8; 8]),
+    XXH3_64([u8; 8]),
+    XXH3_128([u8; 16]),
+    PolyCyclic32([u8; 4]),
+    PolyCyclic64([u8; 8]),
+}
+impl HashResult {
+    fn to_bytes(self) -> [u8; 16] {
+        match self {
+            Self::None4(bytes) | Self::PolyCyclic32(bytes) => to_16_bytes(&bytes),
+            Self::None8(bytes)
+            | Self::Fnv(bytes)
+            | Self::XXH3_64(bytes)
+            | Self::PolyCyclic64(bytes) => to_16_bytes(&bytes),
+            Self::None16(bytes) | Self::XXH3_128(bytes) => to_16_bytes(&bytes),
+        }
+    }
+}
+impl Debug for HashResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "HashResult({:0<16X})",
+            u128::from_le_bytes(self.to_bytes())
+        )
     }
 }
 
@@ -217,63 +370,22 @@ impl<const SIZE: usize> StackSlice<SIZE> {
     }
 }
 impl StackSlice<4> {
-    fn finish(self) -> u32 {
+    fn finish(&self) -> u32 {
         u32::from_ne_bytes(self.data)
     }
 }
 impl StackSlice<8> {
-    fn finish(self) -> u64 {
+    fn finish(&self) -> u64 {
         u64::from_ne_bytes(self.data)
     }
 }
 impl StackSlice<16> {
-    fn finish(self) -> u128 {
+    fn finish(&self) -> u128 {
         u128::from_ne_bytes(self.data)
     }
 }
 
-macro_rules! hash_result {
-    (
-        $(
-            (
-                $name: ident,
-                $result: ty,
-                $builder: ty,
-                $finish: ident
-            ),
-        )+
-    ) => {
-        #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
-        #[must_use]
-        enum HashResult {
-            $(
-                $name($result),
-            )+
-        }
-        impl HashResult {
-            fn to_bytes(self) -> [u8; 16] {
-                match self {
-                    $(
-                        Self::$name(bytes) => to_16_bytes(&bytes),
-                    )+
-                }
-            }
-        }
-        impl Debug for HashResult {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    $(
-                        Self::$name(_) => write!(f, concat!(stringify!($name), " ({:0<16X})"), u128::from_le_bytes(self.to_bytes()))?,
-                    )+
-                }
-                Ok(())
-            }
-        }
-    };
-}
-
-hashers!(hash_result!);
-
+#[must_use]
 fn to_16_bytes<const SIZE: usize>(bytes: &[u8; SIZE]) -> [u8; 16] {
     let mut bytes_fixed = zeroed();
 
@@ -304,12 +416,13 @@ pub struct SignatureBuilder {
 impl SignatureBuilder {
     /// The `hasher` is used as the template hasher from which all other hashers are cloned.
     fn new(algo: HashAlgorithm) -> Self {
+        let block_size = 1024;
         Self {
             algo,
             blocks: Vec::new(),
-            block_size: 1024,
+            block_size,
 
-            current: algo.builder(),
+            current: algo.builder(block_size),
             len: 0,
         }
     }
@@ -324,8 +437,8 @@ impl SignatureBuilder {
         self.block_size - self.len
     }
     fn finish_hash(&mut self) {
-        let builder = std::mem::replace(&mut self.current, self.algo.builder());
-        let result = builder.finish();
+        // let mut builder = std::mem::replace(&mut self.current, self.algo.builder());
+        let result = self.current.finish_reset();
         self.blocks.push(result);
         self.len = 0;
     }
@@ -334,16 +447,20 @@ impl SignatureBuilder {
     /// This can be called multiple times to write the resource bit-by-bit.
     pub fn write(&mut self, data: &[u8]) {
         let mut data = data;
+        let mut position = 0;
 
         while data.len() >= self.block_available() {
             let bytes = &data[..self.block_available()];
-            self.current.write(bytes);
+            self.current.write(bytes, Some(position));
 
             data = &data[self.block_available()..];
+            position += bytes.len();
+            self.len += bytes.len();
             self.finish_hash();
         }
+        self.len += data.len();
         // the data is now less than `self.block_available()`.
-        self.current.write(data);
+        self.current.write(data, Some(position));
     }
     /// Flushes the data from [`Self::write`] and prepares a [`Signature`].
     pub fn finish(mut self) -> Signature {
@@ -437,6 +554,7 @@ impl Signature {
     ///
     /// This will return a struct which when serialized (using e.g. `bincode`) is much smaller than
     /// `data`.
+    #[allow(clippy::too_many_lines)] // well, this is the main implementation
     pub fn diff(&self, data: &[u8]) -> Difference {
         #[allow(clippy::inline_always)]
         #[inline(always)]
@@ -455,7 +573,7 @@ impl Signature {
 
         let block_size = self.block_size();
 
-        // Special case 2: Signature contains no hashes.
+        // Special case: Signature contains no hashes.
         // Just send the whole input.
         if self.blocks().is_empty() {
             let data = Segment::unknown(data);
