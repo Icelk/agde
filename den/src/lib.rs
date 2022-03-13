@@ -592,42 +592,117 @@ impl Signature {
             map.insert(bytes, block_data);
         }
 
-        let mut blocks = Blocks::new(data, self.block_size());
+        let mut blocks = Blocks::new(data, block_size);
 
         let mut segments = Vec::new();
         let mut last_ref_block = 0;
 
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_precision_loss,
+            clippy::cast_sign_loss
+        )]
+        let lookahead_limit = block_size.min((((block_size / 8) as f64).sqrt() as usize).max(8));
+        // look into if it's better to not use this.
+        // That'd enable trying to find the best any distans in front, but might produce very long
+        // unknown segments.
+        let mut lookahead_ignore = 0;
+
         // Iterate over data, in windows. Find hash.
         while let Some(block) = blocks.next() {
-            // Special case 1: block size is larger than input.
-            // Just send the whole input.
-            //
-            // **NOTE:** This was disabled due to increasing diff length.
-            //
-            // if block_size > block.len() {
-            // segments.push(Segment::unknown(&data[last_ref..]));
-            // blocks.advance(block_size);
-            // last_ref = data.len();
-            // continue;
-            // }
+            let mut hasher = self.algorithm().builder(block_size);
+            hasher.write(block, Some(blocks.pos() - 1));
+            let hash = hasher.finish_reset().to_bytes();
 
-            let mut hasher = self.algorithm().builder();
-            hasher.write(block);
-            let hash = hasher.finish().to_bytes();
-
-            // here, loop over the coming 8 (heuristics?) blocks (clone `blocks`) and if they are
-            // not the same reference, continue with the outer loop. If the data has been moved
-            // around a lot, we loose fragmented references, but how useful are they?
-
-            // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size`.
+            // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size` (actually `block_size-1` as the `next` call implicitly increments).
             if let Some(block_data) = map.get(&hash) {
+                // If we're looking for a ref (after a unknown, which hasn't been "committed" yet),
+                // check with a offset of 0..<some small integer> for better matches, which give us
+                // longer BlockRefs. This reduces jitter in output.
+                if lookahead_ignore == 0 {
+                    let mut best: Option<(usize, usize)> = None;
+                    for offset in 0..lookahead_limit {
+                        let mut blocks = blocks.clone();
+                        blocks.advance(offset);
+                        let mut last_end = None;
+
+                        let mut successive_block_count = 0;
+                        for i in 0..lookahead_limit {
+                            if let Some(block) = blocks.next() {
+                                // check hash(clone rolling hash), if matches with end of prior,
+                                // add 1 to current score & max = max.max(current)
+                                let mut hasher = self.algorithm().builder(block_size);
+                                hasher.write(block, Some(blocks.pos() - 1));
+                                let hash = hasher.finish_reset().to_bytes();
+
+                                if let Some(block_data) = map.get(&hash) {
+                                    match &mut last_end {
+                                        Some(end) => {
+                                            if block_data.start == *end {
+                                                // successive block
+
+                                                debug_assert_eq!(i, successive_block_count);
+                                                successive_block_count += 1;
+                                                *end = block_data.start + block_size;
+
+                                                blocks.advance(block.len() - 1);
+                                            } else {
+                                                // block is not directly after the other
+                                                break;
+                                            }
+                                        }
+                                        None => {
+                                            successive_block_count += 1;
+                                            last_end = Some(block_data.start + block_size);
+                                        }
+                                    }
+                                } else {
+                                    // no match, break
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+
+                        match &mut best {
+                            Some(best) => {
+                                let (_iter, successive) = *best;
+                                if successive < successive_block_count {
+                                    *best = (offset, successive_block_count);
+                                } else {
+                                    // we're worse than the prior loops
+                                }
+                            }
+                            None => {
+                                best = Some((offset, successive_block_count));
+                            }
+                        }
+                    }
+                    match best {
+                        // the current one is the best, stick with this.
+                        Some((0, ignore)) => lookahead_ignore = ignore,
+                        // didn't find any better
+                        None => {}
+                        Some((n, ignore)) => {
+                            // -1 as the next should not advance the position, it's naturally the
+                            // next.
+                            blocks.advance(n - 1);
+                            lookahead_ignore = ignore;
+                            continue;
+                        }
+                    }
+                }
+                // decrement the ignored
+                lookahead_ignore = lookahead_ignore.saturating_sub(1);
+
                 push_unknown_data(data, last_ref_block, blocks.pos(), &mut segments);
 
                 if let Some(last) = segments.last_mut() {
                     match last {
                         Segment::Ref(ref_segment) => {
                             if block_data.start == ref_segment.start + block_size {
-                                let mut segment: SegmentBlockRef = (*ref_segment).into();
+                                let mut segment = SegmentBlockRef::from(*ref_segment);
                                 segment.extend(1);
                                 *last = Segment::BlockRef(segment);
                             } else {
