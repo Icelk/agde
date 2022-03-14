@@ -75,10 +75,80 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
-use std::hash::Hasher;
+use std::hash::{BuildHasher, Hasher};
 use twox_hash::xxh3::HasherExt;
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum LargeHash<K, V> {
+    Single(V),
+    Multiple(BTreeMap<K, V>),
+}
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct LargeHashKey([u8; 8]);
+struct HashMap128Hasher([u8; 8]);
+impl Hasher for HashMap128Hasher {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.copy_from_slice(bytes);
+    }
+    fn finish(&self) -> u64 {
+        u64::from_le_bytes(self.0)
+    }
+}
+struct HashMap128HashBuilder;
+impl BuildHasher for HashMap128HashBuilder {
+    type Hasher = HashMap128Hasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        HashMap128Hasher([0; 8])
+    }
+}
+struct HashMap128 {
+    map: HashMap<[u8; 8], LargeHash<[u8; 16], BlockData>, HashMap128HashBuilder>,
+}
+impl HashMap128 {
+    fn new() -> Self {
+        Self {
+            map: HashMap::with_hasher(HashMap128HashBuilder),
+        }
+    }
+    fn get(&self, key: [u8; 16]) -> Option<BlockData> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&key[..8]);
+        if let Some(option) = self.map.get(&bytes) {
+            match option {
+                LargeHash::Single(block) => Some(*block),
+                LargeHash::Multiple(tree) => tree.get(&key).copied(),
+            }
+        } else {
+            None
+        }
+    }
+    fn insert(&mut self, key: [u8; 16], value: BlockData) {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&key[..8]);
+        if let Some(option) = self.map.get_mut(&bytes) {
+            match option {
+                LargeHash::Single(block) => {
+                    let mut tree = BTreeMap::new();
+                    tree.insert(key, *block);
+                    *option = LargeHash::Multiple(tree);
+                }
+                LargeHash::Multiple(_) => {}
+            }
+            let tree = match option {
+                LargeHash::Single(_) => {
+                    unreachable!()
+                }
+                LargeHash::Multiple(tree) => tree,
+            };
+
+            tree.insert(key, value);
+        } else {
+            self.map.insert(bytes, LargeHash::Single(value));
+        }
+    }
+}
 
 /// The algorithms which can be used for hashing the data.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize, Serialize)]
@@ -569,7 +639,7 @@ impl Signature {
                 segments.push(Segment::unknown(unknown_data));
             }
         }
-        let mut map = BTreeMap::new();
+        let mut map = HashMap128::new();
 
         let block_size = self.block_size();
 
@@ -616,7 +686,7 @@ impl Signature {
             let hash = hasher.finish_reset().to_bytes();
 
             // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size` (actually `block_size-1` as the `next` call implicitly increments).
-            if let Some(block_data) = map.get(&hash) {
+            if let Some(block_data) = map.get(hash) {
                 // If we're looking for a ref (after a unknown, which hasn't been "committed" yet),
                 // check with a offset of 0..<some small integer> for better matches, which give us
                 // longer BlockRefs. This reduces jitter in output.
@@ -637,7 +707,7 @@ impl Signature {
                                 hasher.write(block, Some(blocks.pos() - 1));
                                 let hash = hasher.finish_reset().to_bytes();
 
-                                if let Some(block_data) = map.get(&hash) {
+                                if let Some(block_data) = map.get(hash) {
                                     match &mut last_end {
                                         Some(end) => {
                                             if block_data.start == *end {
@@ -756,7 +826,7 @@ impl Debug for Signature {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct BlockData {
     start: usize,
 }
@@ -876,7 +946,7 @@ pub enum Segment {
 }
 impl Segment {
     #[inline]
-    fn reference(data: &BlockData) -> Self {
+    fn reference(data: BlockData) -> Self {
         Self::Ref(SegmentRef { start: data.start })
     }
     /// Creates a [`Segment::Unknown`] with `data` as the unknown part.
