@@ -252,7 +252,6 @@ struct PolyCyclic64 {
     block_size: usize,
     last_position: usize,
     write_data: bool,
-    reset_data: bool,
 }
 impl PolyCyclic64 {
     fn new(block_size: usize) -> Self {
@@ -262,15 +261,14 @@ impl PolyCyclic64 {
             block_size,
             last_position: 0,
             write_data: false,
-            reset_data: false,
         }
     }
     fn write_data(&mut self) {
         if self.write_data {
             let data = self.data.make_contiguous();
             // `TODO`: remove this
-            *self.inner = cyclic_poly_23::CyclicPoly64::new(self.block_size);
-            self.inner.calculate(data);
+            self.inner = adler32::RollingAdler32::new();
+            self.inner.update_buffer(data);
             self.write_data = false;
         }
     }
@@ -293,9 +291,6 @@ impl PolyCyclic64 {
             }
         }
 
-        if self.reset_data {
-            self.data.clear();
-        }
         // normal execution
         self.data.extend(data);
         self.last_position = position.unwrap_or(0);
@@ -305,7 +300,7 @@ impl PolyCyclic64 {
         let wrote_data = self.write_data;
         self.write_data();
         if wrote_data {
-            self.reset_data = true;
+            self.data.clear();
         }
         self.inner.value()
     }
