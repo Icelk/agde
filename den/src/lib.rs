@@ -116,6 +116,7 @@ struct PolyCyclic32 {
     block_size: usize,
     last_position: usize,
     write_data: bool,
+    reset_data: bool,
 }
 impl PolyCyclic32 {
     fn new(block_size: usize) -> Self {
@@ -125,11 +126,14 @@ impl PolyCyclic32 {
             block_size,
             last_position: 0,
             write_data: false,
+            reset_data: false,
         }
     }
     fn write_data(&mut self) {
         if self.write_data {
             let data = self.data.make_contiguous();
+            // `TODO`: remove this
+            *self.inner = cyclic_poly_23::CyclicPoly32::new(self.block_size);
             self.inner.calculate(data);
             self.write_data = false;
         }
@@ -153,6 +157,9 @@ impl PolyCyclic32 {
             }
         }
 
+        if self.reset_data {
+            self.data.clear();
+        }
         // normal execution
         self.data.extend(data);
         self.last_position = position.unwrap_or(0);
@@ -162,7 +169,7 @@ impl PolyCyclic32 {
         let wrote_data = self.write_data;
         self.write_data();
         if wrote_data {
-            self.data.clear();
+            self.reset_data = true;
         }
         self.inner.value()
     }
@@ -415,8 +422,9 @@ pub struct SignatureBuilder {
 }
 impl SignatureBuilder {
     /// The `hasher` is used as the template hasher from which all other hashers are cloned.
-    fn new(algo: HashAlgorithm) -> Self {
-        let block_size = 1024;
+    ///
+    /// A good block size is `1024`.
+    fn new(algo: HashAlgorithm, block_size: usize) -> Self {
         Self {
             algo,
             blocks: Vec::new(),
@@ -426,18 +434,10 @@ impl SignatureBuilder {
             len: 0,
         }
     }
-    /// Sets the block size of the hashes to be `block_size` bytes.
-    ///
-    /// The default is `1024`.
-    const fn with_block_size(mut self, block_size: usize) -> Self {
-        self.block_size = block_size;
-        self
-    }
     const fn block_available(&self) -> usize {
         self.block_size - self.len
     }
     fn finish_hash(&mut self) {
-        // let mut builder = std::mem::replace(&mut self.current, self.algo.builder());
         let result = self.current.finish_reset();
         self.blocks.push(result);
         self.len = 0;
@@ -533,7 +533,7 @@ impl Signature {
             HashAlgorithm::None16 => assert!(block_size <= 16),
             _ => {}
         }
-        SignatureBuilder::new(algorithm).with_block_size(block_size)
+        SignatureBuilder::new(algorithm, block_size)
     }
 
     /// Get the algorithm used by this signature.
@@ -608,9 +608,10 @@ impl Signature {
         // unknown segments.
         let mut lookahead_ignore = 0;
 
+        let mut hasher = self.algorithm().builder(block_size);
+
         // Iterate over data, in windows. Find hash.
         while let Some(block) = blocks.next() {
-            let mut hasher = self.algorithm().builder(block_size);
             hasher.write(block, Some(blocks.pos() - 1));
             let hash = hasher.finish_reset().to_bytes();
 
@@ -623,6 +624,7 @@ impl Signature {
                     let mut best: Option<(usize, usize)> = None;
                     for offset in 0..lookahead_limit {
                         let mut blocks = blocks.clone();
+                        blocks.go_back(1);
                         blocks.advance(offset);
                         let mut last_end = None;
 
@@ -631,7 +633,7 @@ impl Signature {
                             if let Some(block) = blocks.next() {
                                 // check hash(clone rolling hash), if matches with end of prior,
                                 // add 1 to current score & max = max.max(current)
-                                let mut hasher = self.algorithm().builder(block_size);
+                                // let mut hasher = self.algorithm().builder(block_size);
                                 hasher.write(block, Some(blocks.pos() - 1));
                                 let hash = hasher.finish_reset().to_bytes();
 
@@ -1188,6 +1190,12 @@ impl<'a, T> Blocks<'a, T> {
     #[inline]
     fn advance(&mut self, n: usize) {
         self.pos += n;
+    }
+    /// Decrease the inner position. If `n == 1`, you revert the `.next()` call, resulting in
+    /// repeated slices being returned.
+    #[inline]
+    fn go_back(&mut self, n: usize) {
+        self.pos -= n;
     }
     /// Clamped to `slice.len()`.
     #[inline]
