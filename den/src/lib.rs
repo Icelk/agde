@@ -161,8 +161,8 @@ pub enum HashAlgorithm {
     Fnv,
     XXH3_64,
     XXH3_128,
-    PolyCyclic32,
-    PolyCyclic64,
+    CyclicPoly32,
+    CyclicPoly64,
     Adler32,
 }
 impl HashAlgorithm {
@@ -175,25 +175,109 @@ impl HashAlgorithm {
             Self::Fnv => HashBuilder::Fnv(fnv::FnvHasher::default()),
             Self::XXH3_64 => HashBuilder::XXH3_64(twox_hash::Xxh3Hash64::default()),
             Self::XXH3_128 => HashBuilder::XXH3_128(twox_hash::Xxh3Hash128::default()),
-            Self::PolyCyclic32 => HashBuilder::PolyCyclic32(PolyCyclic32::new(block_size)),
-            Self::PolyCyclic64 => HashBuilder::PolyCyclic64(PolyCyclic64::new(block_size)),
+            Self::CyclicPoly32 => HashBuilder::CyclicPoly32(CyclicPoly32::new(block_size)),
+            Self::CyclicPoly64 => HashBuilder::CyclicPoly64(CyclicPoly64::new(block_size)),
             Self::Adler32 => HashBuilder::Adler32(Adler32::new(block_size)),
         }
     }
 }
 
-struct PolyCyclic32 {
-    inner: Box<cyclic_poly_23::CyclicPoly32>,
+/// Used to make [`RollingHash`] generic.
+///
+/// This is implemented by the [Adler32](https://docs.rs/adler32/latest/adler32/)
+/// algorithm and both variants of the
+/// [cyclic poly 32](https://docs.rs/cyclic-poly-23/latest/cyclic_poly_23/) algorithm. The
+/// implementation of cyclic poly 23 is in a [`Box`] due to the large size of the struct
+/// (1KiB and 2KiB for the 32- and 64-bit implementations respectively).
+pub trait RollingHasher {
+    /// The hash returned from this hasher.
+    type Hash;
+
+    /// Create a new hasher.
+    fn new(block_size: usize) -> Self;
+    /// Reset the inner state. If the struct provides no such functionality, consider overriding
+    /// the current value with a `new` instance.
+    fn reset(&mut self, block_size: usize);
+    /// Write the `block` to the hasher.
+    fn update(&mut self, block: &[u8], block_size: usize);
+    /// Remove `old` and add `new`.
+    fn rotate(&mut self, old: u8, new: u8, block_size: usize);
+    /// Get the current internal hash.
+    fn value(&self) -> Self::Hash;
+}
+impl RollingHasher for adler32::RollingAdler32 {
+    type Hash = u32;
+
+    fn new(_: usize) -> Self {
+        Self::new()
+    }
+    fn reset(&mut self, _: usize) {
+        *self = Self::new();
+    }
+    fn update(&mut self, block: &[u8], _: usize) {
+        self.update_buffer(block);
+    }
+    fn rotate(&mut self, old: u8, new: u8, block_size: usize) {
+        self.remove(block_size, old);
+        self.update(new);
+    }
+    fn value(&self) -> Self::Hash {
+        self.hash()
+    }
+}
+impl RollingHasher for Box<cyclic_poly_23::CyclicPoly32> {
+    type Hash = u32;
+
+    fn new(block_size: usize) -> Self {
+        Box::new(cyclic_poly_23::CyclicPoly32::new(block_size))
+    }
+    fn reset(&mut self, _: usize) {
+        self.reset_hash();
+    }
+    fn update(&mut self, block: &[u8], _: usize) {
+        (**self).update(block);
+    }
+    fn rotate(&mut self, old: u8, new: u8, _: usize) {
+        (**self).rotate(old, new);
+    }
+    fn value(&self) -> Self::Hash {
+        (**self).value()
+    }
+}
+impl RollingHasher for Box<cyclic_poly_23::CyclicPoly64> {
+    type Hash = u64;
+
+    fn new(block_size: usize) -> Self {
+        Box::new(cyclic_poly_23::CyclicPoly64::new(block_size))
+    }
+    fn reset(&mut self, _: usize) {
+        self.reset_hash();
+    }
+    fn update(&mut self, block: &[u8], _: usize) {
+        (**self).update(block);
+    }
+    fn rotate(&mut self, old: u8, new: u8, _: usize) {
+        (**self).rotate(old, new);
+    }
+    fn value(&self) -> Self::Hash {
+        (**self).value()
+    }
+}
+
+/// A generic rolling hash implementation.
+#[derive(Debug)]
+pub struct RollingHash<T: RollingHasher> {
+    inner: T,
     data: VecDeque<u8>,
     block_size: usize,
     last_position: usize,
     write_data: bool,
     reset_data: bool,
 }
-impl PolyCyclic32 {
+impl<T: RollingHasher> RollingHash<T> {
     fn new(block_size: usize) -> Self {
         Self {
-            inner: Box::new(cyclic_poly_23::CyclicPoly32::new(block_size)),
+            inner: T::new(block_size),
             data: VecDeque::with_capacity(block_size),
             block_size,
             last_position: 0,
@@ -204,14 +288,13 @@ impl PolyCyclic32 {
     fn write_data(&mut self) {
         if self.write_data {
             let data = self.data.make_contiguous();
-            // `TODO`: remove this
-            *self.inner = cyclic_poly_23::CyclicPoly32::new(self.block_size);
-            self.inner.calculate(data);
+            self.inner.reset(self.block_size);
+            self.inner.update(data, self.block_size);
             self.write_data = false;
         }
     }
     fn write(&mut self, data: &[u8], position: Option<usize>) {
-        if self.data.len() == self.block_size {
+        if self.data.len() == self.block_size && data.len() == self.data.len() {
             if let Some(pos) = position {
                 // assuming data is from the same source
                 if pos == self.last_position + 1 {
@@ -221,7 +304,7 @@ impl PolyCyclic32 {
                     let first = self.data.pop_front().unwrap();
                     let new = *data.last().unwrap();
                     self.data.push_back(new);
-                    self.inner.rotate(first, new);
+                    self.inner.rotate(first, new, self.block_size);
                     self.last_position = pos;
 
                     return;
@@ -237,7 +320,7 @@ impl PolyCyclic32 {
         self.last_position = position.unwrap_or(0);
         self.write_data = true;
     }
-    fn finish_reset(&mut self) -> u32 {
+    fn finish_reset(&mut self) -> T::Hash {
         let wrote_data = self.write_data;
         self.write_data();
         if wrote_data {
@@ -246,135 +329,14 @@ impl PolyCyclic32 {
         self.inner.value()
     }
 }
-struct PolyCyclic64 {
-    inner: Box<cyclic_poly_23::CyclicPoly64>,
-    data: VecDeque<u8>,
-    block_size: usize,
-    last_position: usize,
-    write_data: bool,
-    reset_data: bool,
-}
-impl PolyCyclic64 {
-    fn new(block_size: usize) -> Self {
-        Self {
-            inner: Box::new(cyclic_poly_23::CyclicPoly64::new(block_size)),
-            data: VecDeque::with_capacity(block_size),
-            block_size,
-            last_position: 0,
-            write_data: false,
-            reset_data: false,
-        }
-    }
-    fn write_data(&mut self) {
-        if self.write_data {
-            let data = self.data.make_contiguous();
-            // `TODO`: remove this
-            *self.inner = cyclic_poly_23::CyclicPoly64::new(self.block_size);
-            self.inner.calculate(data);
-            self.write_data = false;
-        }
-    }
-    fn write(&mut self, data: &[u8], position: Option<usize>) {
-        if self.data.len() == self.block_size {
-            if let Some(pos) = position {
-                // assuming data is from the same source
-                if pos == self.last_position + 1 {
-                    // flush
-                    self.write_data();
 
-                    let first = self.data.pop_front().unwrap();
-                    let new = *data.last().unwrap();
-                    self.data.push_back(new);
-                    self.inner.rotate(first, new);
-                    self.last_position = pos;
+/// [`RollingHash`] using the 32-bit cyclic poly 23 algorithm.
+pub type CyclicPoly32 = RollingHash<Box<cyclic_poly_23::CyclicPoly32>>;
+/// [`RollingHash`] using the 32-bit cyclic poly 23 algorithm.
+pub type CyclicPoly64 = RollingHash<Box<cyclic_poly_23::CyclicPoly64>>;
+/// [`RollingHash`] using the Adler32 algorithm.
+pub type Adler32 = RollingHash<adler32::RollingAdler32>;
 
-                    return;
-                }
-            }
-        }
-
-        if self.reset_data {
-            self.data.clear();
-        }
-        // normal execution
-        self.data.extend(data);
-        self.last_position = position.unwrap_or(0);
-        self.write_data = true;
-    }
-    fn finish_reset(&mut self) -> u64 {
-        let wrote_data = self.write_data;
-        self.write_data();
-        if wrote_data {
-            self.reset_data = true;
-        }
-        self.inner.value()
-    }
-}
-struct Adler32 {
-    inner: adler32::RollingAdler32,
-    data: VecDeque<u8>,
-    block_size: usize,
-    last_position: usize,
-    write_data: bool,
-    reset_data: bool,
-}
-impl Adler32 {
-    fn new(block_size: usize) -> Self {
-        Self {
-            inner: adler32::RollingAdler32::new(),
-            data: VecDeque::with_capacity(block_size),
-            block_size,
-            last_position: 0,
-            write_data: false,
-            reset_data: false,
-        }
-    }
-    fn write_data(&mut self) {
-        if self.write_data {
-            let data = self.data.make_contiguous();
-            // `TODO`: remove this
-            self.inner = adler32::RollingAdler32::new();
-            self.inner.update_buffer(data);
-            self.write_data = false;
-        }
-    }
-    fn write(&mut self, data: &[u8], position: Option<usize>) {
-        if self.data.len() == self.block_size {
-            if let Some(pos) = position {
-                // assuming data is from the same source
-                if pos == self.last_position + 1 {
-                    // flush
-                    self.write_data();
-
-                    let first = self.data.pop_front().unwrap();
-                    let new = *data.last().unwrap();
-                    self.data.push_back(new);
-                    self.inner.remove(self.block_size, first);
-                    self.inner.update(new);
-                    self.last_position = pos;
-
-                    return;
-                }
-            }
-        }
-
-        if self.reset_data {
-            self.data.clear();
-        }
-        // normal execution
-        self.data.extend(data);
-        self.last_position = position.unwrap_or(0);
-        self.write_data = true;
-    }
-    fn finish_reset(&mut self) -> u32 {
-        let wrote_data = self.write_data;
-        self.write_data();
-        if wrote_data {
-            self.reset_data = true;
-        }
-        self.inner.hash()
-    }
-}
 enum HashBuilder {
     None4(StackSlice<4>),
     None8(StackSlice<8>),
@@ -382,8 +344,8 @@ enum HashBuilder {
     Fnv(fnv::FnvHasher),
     XXH3_64(twox_hash::Xxh3Hash64),
     XXH3_128(twox_hash::Xxh3Hash128),
-    PolyCyclic32(PolyCyclic32),
-    PolyCyclic64(PolyCyclic64),
+    CyclicPoly32(CyclicPoly32),
+    CyclicPoly64(CyclicPoly64),
     Adler32(Adler32),
 }
 impl HashBuilder {
@@ -420,8 +382,8 @@ impl HashBuilder {
                 *h = twox_hash::Xxh3Hash128::default();
                 r
             }
-            Self::PolyCyclic32(h) => HashResult::PolyCyclic32(h.finish_reset().to_le_bytes()),
-            Self::PolyCyclic64(h) => HashResult::PolyCyclic64(h.finish_reset().to_le_bytes()),
+            Self::CyclicPoly32(h) => HashResult::CyclicPoly32(h.finish_reset().to_le_bytes()),
+            Self::CyclicPoly64(h) => HashResult::CyclicPoly64(h.finish_reset().to_le_bytes()),
             Self::Adler32(h) => HashResult::Adler32(h.finish_reset().to_le_bytes()),
         }
     }
@@ -434,8 +396,8 @@ impl HashBuilder {
             Self::Fnv(h) => h.write(data),
             Self::XXH3_64(h) => h.write(data),
             Self::XXH3_128(h) => h.write(data),
-            Self::PolyCyclic32(h) => h.write(data, position),
-            Self::PolyCyclic64(h) => h.write(data, position),
+            Self::CyclicPoly32(h) => h.write(data, position),
+            Self::CyclicPoly64(h) => h.write(data, position),
             Self::Adler32(h) => h.write(data, position),
         }
     }
@@ -456,20 +418,20 @@ enum HashResult {
     Fnv([u8; 8]),
     XXH3_64([u8; 8]),
     XXH3_128([u8; 16]),
-    PolyCyclic32([u8; 4]),
-    PolyCyclic64([u8; 8]),
+    CyclicPoly32([u8; 4]),
+    CyclicPoly64([u8; 8]),
     Adler32([u8; 4]),
 }
 impl HashResult {
     fn to_bytes(self) -> [u8; 16] {
         match self {
-            Self::None4(bytes) | Self::PolyCyclic32(bytes) | Self::Adler32(bytes) => {
+            Self::None4(bytes) | Self::CyclicPoly32(bytes) | Self::Adler32(bytes) => {
                 to_16_bytes(&bytes)
             }
             Self::None8(bytes)
             | Self::Fnv(bytes)
             | Self::XXH3_64(bytes)
-            | Self::PolyCyclic64(bytes) => to_16_bytes(&bytes),
+            | Self::CyclicPoly64(bytes) => to_16_bytes(&bytes),
             Self::None16(bytes) | Self::XXH3_128(bytes) => to_16_bytes(&bytes),
         }
     }
@@ -1094,7 +1056,6 @@ impl Difference {
                     if let Some(last) = segments.last_mut() {
                         match last {
                             Segment::BlockRef(seg) => {
-                                println!("Last {seg:?}, end {}", seg.end(block_size));
                                 if seg.end(block_size) == item.start {
                                     // The previous end is this start.
                                     seg.extend(item.block_count());
@@ -1150,13 +1111,11 @@ impl Difference {
                     // Multiply all block lengths by `block_size_shrinkage` to make them the length
                     // of new `block_size`.
                     block_seg.multiply(block_size_shrinkage);
-                    println!("Ref segment, from {seg:?} to {block_seg:?}");
                     push_segment(&mut segments, Segment::BlockRef(block_seg), block_size);
                 }
                 Segment::BlockRef(seg) => {
                     let mut seg = *seg;
                     seg.multiply(block_size_shrinkage);
-                    println!("Ref block segment, {seg:?}");
                     push_segment(&mut segments, Segment::BlockRef(seg), block_size);
                 }
                 Segment::Unknown(seg) => {

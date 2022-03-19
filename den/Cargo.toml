@@ -16,5 +16,5 @@ categories = ["algorithms"]
 fnv = "^1"
 serde = { version = "^1", features = ["derive"] }
 twox-hash = "^1"
-cyclic-poly-23 = "0.2"
+cyclic-poly-23 = "0.3"
 adler32 = "1.2"
