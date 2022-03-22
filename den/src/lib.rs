@@ -1045,6 +1045,65 @@ impl Difference {
         self.block_size
     }
 
+    /// Returns whether or not applying this diff is impossible to do on a single [`Vec`].
+    ///
+    /// If the returned value is `true`, the apply function will try to read data from parts of the
+    /// `Vec` already overridden.
+    /// You should be able to use a single `Vec` if the returned value is `false`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use den::*;
+    /// let base_data = b"This is a document everyone has. It's about some new difference library.";
+    /// let target_data = b"This is a document only I have. It's about some new difference library.";
+    /// let base_data = base_data.to_vec();
+    ///
+    /// let mut signature = Signature::new(128);
+    /// signature.write(&base_data);
+    /// let signature = signature.finish();
+    ///
+    /// let diff = signature.diff(target_data);
+    ///
+    /// // This is the small diff you could serialize with Serde and send.
+    /// let minified = diff.minify(8, &base_data)
+    ///     .expect("This won't panic, as the data hasn't changed from calling the other functions.");
+    ///
+    /// let data = if minified.apply_overlaps() {
+    ///     let mut data = Vec::new();
+    ///     minified.apply(&base_data, &mut data);
+    ///     data
+    /// } else {
+    ///     minified.apply_in_place(&mut base_data);
+    ///     base_data
+    /// };
+    /// ```
+
+    #[must_use]
+    pub fn apply_overlaps(&self) -> bool {
+        let mut position = 0;
+        for segment in self.segments() {
+            match segment {
+                Segment::Ref(seg) => {
+                    if seg.start() < position {
+                        return true;
+                    }
+                    position += self.block_size();
+                }
+                Segment::BlockRef(seg) => {
+                    if seg.start() < position {
+                        return true;
+                    }
+                    position += seg.block_count() * self.block_size();
+                }
+                Segment::Unknown(seg) => {
+                    position += seg.data().len();
+                }
+            }
+        }
+        false
+    }
+
     /// Changes the block size to `block_size`, shrinking the [`Segment::Unknown`]s in the process.
     /// This results in a smaller diff.
     ///
@@ -1241,6 +1300,7 @@ impl Difference {
             unsafe { vec.set_len(vec.len() + slice.len()) };
         }
         use ApplyError::RefOutOfBounds as Roob;
+
         let block_size = self.block_size();
         for segment in self.segments() {
             match segment {
