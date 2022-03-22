@@ -2,18 +2,21 @@
 //!
 //! # Performance
 //!
-//! This library (for now) does not use a rolling hash algorithm, but use the theory.
-//! This is performant enough for like files and files under 10MiB.
+//! `den` is performant enough for large files and files, exceeding 10MB (when using rolling hashes).
 //! Please compile with the **release** preset for **10X** the performance.
 //!
 //! Allocating data and keeping it in memory is very fast compared to hashing.
-//! The reason to move to more readers is for memory space.
-//! Even then, the implementation could abstract the file system to give this library only 64KiB chunks.
+//! In the future, Den will support reading data bit by bit, greatly reducing the memory usage.
 //!
 //! # How-to & examples
 //!
 //! Keep in mind this isn't guaranteed to give the exact same data.
-//! Please check the data with for example SHA-3 to ensure consistency.
+//! Please check the data with a secure hashing algorithm (e.g. SHA-3) to ensure consistency.
+//!
+//! Sending the data is possible due to [`serde`] providing serialization and deserialization.
+//! You serialize all the structs in this library to any format.
+//!
+//! > These examples should cover what rsync does.
 //!
 //! ## Get a remote's data
 //!
@@ -23,10 +26,8 @@
 //!
 //! ## Push my data to remote
 //!
-//! > This is what `rsync` does.
-//!
-//! Send to the remote the request of their [`Signature`].
-//! They calculate it and send it back.
+//! Request the remote's [`Signature`].
+//! They calculate it and respond.
 //! We calculate a [`Signature::diff`] and send it to them.
 //! They [`Difference::apply`] it. Their data should now be equal to mine.
 //!
@@ -56,17 +57,21 @@
 //!
 //! # Future improvements
 //!
-//! - [ ] Rolling hash
-//! - [ ] Multi-threaded [`Signature::diff`]
+//! - [x] Rolling hash
+//! - [x] ~~Multi-threaded [`Signature::diff`].~~
+//!       There is no feasible way to implement this, as we look ahead and change which window
+//!       we're looking at after each iteration. Now with rolling hash, the performance is great.
 //! - [ ] Support read/write
 //!     - [ ] Support to diff a reader
 //!     - [ ] Support to apply to a writer
 //!     - [ ] Fetch API for apply to get data on demand.
 //!         - This could slow things down dramatically.
 //!     - [ ] Implement Write for `HashBuilder`.
-//! - [ ] Use SHA(1|256?) to verify integrity of data. Bundled with the [`Signature`].
+//! - [x] ~~Use SHA(1|256?) to verify integrity of data. Bundled with the [`Signature`].~~ The
+//!       implementer should provide this.
 
 #![deny(
+    clippy::all,
     clippy::pedantic,
     unreachable_pub,
     missing_debug_implementations,
@@ -331,10 +336,16 @@ impl<T: RollingHasher> RollingHash<T> {
 }
 
 /// [`RollingHash`] using the 32-bit cyclic poly 23 algorithm.
+///
+/// Implements the trait [`RollingHasher`].
 pub type CyclicPoly32 = RollingHash<Box<cyclic_poly_23::CyclicPoly32>>;
 /// [`RollingHash`] using the 32-bit cyclic poly 23 algorithm.
+///
+/// Implements the trait [`RollingHasher`].
 pub type CyclicPoly64 = RollingHash<Box<cyclic_poly_23::CyclicPoly64>>;
 /// [`RollingHash`] using the Adler32 algorithm.
+///
+/// Implements the trait [`RollingHasher`].
 pub type Adler32 = RollingHash<adler32::RollingAdler32>;
 
 enum HashBuilder {
@@ -980,6 +991,9 @@ impl Debug for SegmentUnknown {
 #[must_use]
 pub enum Segment {
     /// A reference to a block of data.
+    ///
+    /// This is separate from [`Self::BlockRef`] to save 8 bytes when only 1 ref block is found.
+    /// It's feasible we add more of these, but with block counts higher than 1 in the future.
     Ref(SegmentRef),
     /// Reference to successive blocks of data.
     BlockRef(SegmentBlockRef),
