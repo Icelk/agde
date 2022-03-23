@@ -83,6 +83,7 @@ use std::cmp;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
 use std::hash::{BuildHasher, Hasher};
+use std::ops::Range;
 use twox_hash::xxh3::HasherExt;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -1057,7 +1058,7 @@ impl Difference {
     /// # use den::*;
     /// let base_data = b"This is a document everyone has. It's about some new difference library.";
     /// let target_data = b"This is a document only I have. It's about some new difference library.";
-    /// let base_data = base_data.to_vec();
+    /// let mut base_data = base_data.to_vec();
     ///
     /// let mut signature = Signature::new(128);
     /// signature.write(&base_data);
@@ -1077,6 +1078,8 @@ impl Difference {
     ///     minified.apply_in_place(&mut base_data);
     ///     base_data
     /// };
+    ///
+    /// assert_eq!(data, target_data);
     /// ```
 
     #[must_use]
@@ -1330,6 +1333,85 @@ impl Difference {
                 }
             }
         }
+
+        Ok(())
+    }
+    /// Apply `diff` to the `base` data base, mutating the `base` data.
+    /// You **MUST** check that this is possible using [`Self::apply_overlaps`].
+    /// Neglecting that step will result in data loss and erroneous data.
+    /// This WILL NOT give an error in case of breaking that contract.
+    ///
+    /// # Security
+    ///
+    /// The `diff` should be sanitized if input is suspected to be malicious.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
+    ///
+    /// # Examples
+    ///
+    /// See [`Self::apply_overlaps`].
+    pub fn apply_in_place(&self, base: &mut Vec<u8>) -> Result<(), ApplyError> {
+        #[allow(clippy::uninit_vec)] // we know what we're doing
+        fn copy_within_vec<T: Copy>(vec: &mut Vec<T>, range: Range<usize>, position: usize) {
+            let range_len = range.len();
+            let new_len = (position + range_len).max(vec.len());
+            // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
+            vec.reserve(new_len - vec.len());
+            // SAFETY: We set the length to what we write below.
+            unsafe { vec.set_len(new_len) };
+            vec.copy_within(range, position);
+        }
+        #[allow(clippy::uninit_vec)] // we know what we're doing
+        fn extend_vec_slice<T: Copy>(vec: &mut Vec<T>, slice: &[T], position: usize) {
+            let new_len = (position + slice.len()).max(vec.len());
+            // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
+            vec.reserve(new_len - vec.len());
+            // SAFETY: We set the length to what we write below.
+            unsafe { vec.set_len(new_len) };
+            let destination = &mut vec[position..(position + slice.len())];
+            destination.copy_from_slice(slice);
+        }
+        use ApplyError::RefOutOfBounds as Roob;
+
+        let block_size = self.block_size();
+        let mut position = 0;
+        for segment in self.segments() {
+            match segment {
+                Segment::Ref(ref_segment) => {
+                    let start = ref_segment.start;
+                    let end = cmp::min(ref_segment.end(block_size), base.len());
+
+                    let range = start..end;
+                    base.get(range.clone()).ok_or(Roob)?;
+                    copy_within_vec(base, range, position);
+                    position += end - start;
+                }
+                Segment::BlockRef(block_ref_segment) => {
+                    let start = block_ref_segment.start;
+                    let end = cmp::min(block_ref_segment.end(block_size), base.len());
+                    // Check that only the last ref goes past the end.
+                    debug_assert!(if end == base.len() {
+                        block_ref_segment.end(block_size) - block_size < base.len()
+                    } else {
+                        true
+                    });
+
+                    let range = start..end;
+                    base.get(range.clone()).ok_or(Roob)?;
+                    copy_within_vec(base, range, position);
+                    position += end - start;
+                }
+                Segment::Unknown(unknown_segment) => {
+                    let data = &unknown_segment.source;
+                    extend_vec_slice(base, data, position);
+                    position += data.len();
+                }
+            }
+        }
+        // shorten the vec if the new length is less than old
+        base.truncate(position);
 
         Ok(())
     }
