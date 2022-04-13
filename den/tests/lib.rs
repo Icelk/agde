@@ -242,3 +242,45 @@ fn minify() {
     }
     assert_eq!(total, 18);
 }
+fn revert(old: &[u8], new: &[u8]) {
+    let mut sig = den::Signature::new(8);
+    sig.write(old);
+    let sig = sig.finish();
+    let diff = sig.diff(new);
+
+    let mut buf = vec![];
+
+    diff.apply(old, &mut buf).unwrap();
+
+    assert_eq!(buf, new);
+
+    println!("Diff: {diff:?}");
+
+    let mut reverted = Vec::new();
+
+    diff.revert(&buf, &mut reverted, b' ').unwrap();
+
+    println!("reverted: {:?}", std::str::from_utf8(&reverted));
+
+    let mut target = Vec::new();
+    diff.apply(&reverted, &mut target).unwrap();
+
+    println!(
+        "Expected: {:?}, got: {:?}",
+        std::str::from_utf8(new),
+        std::str::from_utf8(&target)
+    );
+    assert_eq!(target, new);
+}
+#[test]
+fn revert_1() {
+    let old = "this is the original text";
+    let new = "this was the original text";
+    revert(old.as_bytes(), new.as_bytes());
+}
+#[test]
+fn revert_2() {
+    let old = "this is the original text";
+    let new = "this is some very messed up data changed the original text, which is now gone";
+    revert(old.as_bytes(), new.as_bytes());
+}
