@@ -1402,7 +1402,9 @@ impl Difference {
                     let start = block_ref_segment.start;
                     let end = block_ref_segment.end(block_size).min(base.len());
                     // Check that only the last ref goes past the end.
-                    if end == base.len() && block_ref_segment.end(block_size)-block_size >= base.len() {
+                    if end == base.len()
+                        && block_ref_segment.end(block_size) - block_size >= base.len()
+                    {
                         return Err(Roob);
                     }
 

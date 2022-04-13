@@ -155,9 +155,7 @@ pub type DiffFuture = BoxFut<Result<Vec<Change>, ()>>;
 pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
 /// The [`SystemTime`] is the time of modification.
 /// When [`Storage::Current`], this should be the time of last change.
-pub type WriteFn = Box<
-    dyn Fn(String, Storage, Vec<u8>, WriteMtime) -> WriteFuture + Send + Sync,
->;
+pub type WriteFn = Box<dyn Fn(String, Storage, Vec<u8>, WriteMtime) -> WriteFuture + Send + Sync>;
 pub type DeleteFn = Box<dyn Fn(String, Storage) -> DeleteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
 #[must_use]
@@ -608,7 +606,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                         );
 
                                                         /* let mut slice = */
-                                                            /* agde::SliceBuf::with_whole(&mut data); */
+                                                        /* agde::SliceBuf::with_whole(&mut data); */
                                                         /* slice.extend_to_needed(ev.data(), 0); */
                                                         data = applier.apply(&data).unwrap();
                                                         /* let len = slice.filled().len(); */
@@ -715,18 +713,16 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             let event = match diff {
                                 // `TODO`: Give successor
                                 Change::Delete(res) => agde::Event::with_timestamp(
-                                    agde::event::Kind::Delete(
-                                        agde::event::Delete::new(res, None),
-                                    ),
+                                    agde::event::Kind::Delete(agde::event::Delete::new(res, None)),
                                     manager.uuid(),
                                     last_check,
                                 ),
                                 Change::Modify(res, created) => {
                                     if created {
                                         let event = agde::Event::with_timestamp(
-                                            agde::event::Kind::Create(
-                                                agde::event::Create::new(res.clone()),
-                                            ),
+                                            agde::event::Kind::Create(agde::event::Create::new(
+                                                res.clone(),
+                                            )),
                                             manager.uuid(),
                                             // schedule create event a bit before modify.
                                             last_check - Duration::from_micros(10),
@@ -802,7 +798,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                             .map_err(|()| ApplicationError::StoragePermissions)?
                                             // don't expect, just make a new file.
                                             .expect("we trust our own data - there must have been a create event before modify");
-
 
                                 resource_data = applier.apply(&resource_data).unwrap();
 

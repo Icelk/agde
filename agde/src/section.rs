@@ -118,16 +118,16 @@ impl<T: AsMut<[u8]>> SliceBuf<T> {
     }
 }
 // impl SliceBuf<&mut Vec<u8>> {
-    // /// Extends this [`SliceBuf`] to fit `sections`.
-    // ///
-    // /// This only works if the internal type is a mutable reference to a [`Vec`].
-    // pub fn extend_to_needed<'b, T: Iterator<Item = &'b S>, S: Section + 'b>(
-        // &mut self,
-        // sections: impl IntoIterator<Item = &'b S, IntoIter = T>,
-        // fill: u8,
-    // ) {
-        // Section::apply_len(sections.into_iter(), self.slice, self.filled().len(), fill);
-    // }
+// /// Extends this [`SliceBuf`] to fit `sections`.
+// ///
+// /// This only works if the internal type is a mutable reference to a [`Vec`].
+// pub fn extend_to_needed<'b, T: Iterator<Item = &'b S>, S: Section + 'b>(
+// &mut self,
+// sections: impl IntoIterator<Item = &'b S, IntoIter = T>,
+// fill: u8,
+// ) {
+// Section::apply_len(sections.into_iter(), self.slice, self.filled().len(), fill);
+// }
 // }
 
 /// An error during [`DataSection::apply`] and [`crate::log::EventApplier::apply`].
@@ -154,148 +154,148 @@ impl From<den::ApplyError> for ApplyError {
 // #[allow(clippy::inline_always)]
 // #[inline(always)]
 // pub(crate) fn add_iusize(a: usize, b: isize) -> Result<usize, ()> {
-    // // We've checked that with the if else.
-    // #[allow(clippy::cast_sign_loss)]
-    // let result = if b < 0 {
-        // let b = (-b) as usize;
-        // if b > a {
-            // return Err(());
-        // }
-        // a - b
-    // } else {
-        // a + (b as usize)
-    // };
-    // Ok(result)
+// // We've checked that with the if else.
+// #[allow(clippy::cast_sign_loss)]
+// let result = if b < 0 {
+// let b = (-b) as usize;
+// if b > a {
+// return Err(());
+// }
+// a - b
+// } else {
+// a + (b as usize)
+// };
+// Ok(result)
 // }
 
 // /// [`Section::end`] must always be after [`Section::start`].
 // pub trait Section {
-    // /// The start of the section to replace in the resource.
-    // fn start(&self) -> usize;
-    // /// The end of the section to replace in the resource.
-    // fn end(&self) -> usize;
-    // /// Length of new data to fill between [`Section::start`] and [`Section::end`].
-    // fn new_len(&self) -> usize;
-    // /// Length of the data between [`Section::start`] and [`Section::end`].
-    // ///
-    // /// # Panics
-    // ///
-    // /// Panics if the end is before the start.
-    // /// This guarantee should be upheld by the implementer of [`Section`].
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn old_len(&self) -> usize {
-        // self.end() - self.start()
-    // }
-    // /// Difference between old and new length of resource.
-    // ///
-    // /// # Panics
-    // ///
-    // /// Panics if the end is before the start.
-    // /// This guarantee should be upheld by the implementer of [`Section`].
-    // ///
-    // /// Will also panic if any of the lengths don't fit in a [`prim@isize`].
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn len_difference(&self) -> isize {
-        // isize::try_from(self.new_len()).expect("length too large for isize.")
-            // - isize::try_from(self.old_len()).expect("length too large for isize.")
-    // }
-    // /// The needed length of the [`SliceBuf`].
-    // /// Should be set to this before calling [`crate::log::EventApplier::apply`].
-    // ///
-    // /// May return a value lower than `resource_len`. This should not be applied until after the
-    // /// application.
-    // fn needed_len(&self, resource_len: usize) -> usize {
-        // let diff = add_iusize(resource_len, self.len_difference()).unwrap_or(0) + 1;
-        // let end = cmp::max(self.end() + 1, self.start() + self.new_len() + 1);
-        // cmp::max(diff, end)
-    // }
-    // /// Extends the `buffer` with `fill` to fit the sections.
-    // /// `len` is the length of the [`SliceBuf::filled`] part.
-    // ///
-    // /// # Panics
-    // ///
-    // /// Will panic if `len` is greater than half the memory size.
-    // /// This is 2GiB on 32-bit systems and stupidly large on 64-bit systems.
-    // fn apply_len<'a>(me: impl Iterator<Item = &'a Self>, buffer: &mut Vec<u8>, len: usize, fill: u8)
-    // where
-        // Self: 'a,
-    // {
-        // let mut current_size = isize::try_from(len).expect(
-            // "usize can't fit in isize. Use resource lengths less than 1/2 the memory size.",
-        // );
-        // let mut max = current_size;
-        // // let mut end = 0;
-        // for me in me {
-            // current_size += me.len_difference();
-            // max = max
-                // .max(current_size)
-                // .max(isize::try_from(me.end() + me.new_len()).unwrap_or(isize::MAX));
-            // // end = cmp::max(end, me.end() + 1);
-            // // end = cmp::max(end, me.start() + me.new_len() + 1);
-        // }
-        // // let needed = cmp::max(add_iusize(0, current_size).unwrap_or(0), end);
-        // // let additional = cmp::max(needed, buffer.len());
-        // println!("  NEEDED LENGTH {max}");
-        // // since max will always be > `len`, this is OK.
-        // #[allow(clippy::cast_sign_loss)]
-        // let max = max as usize;
-        // buffer.resize(max + 1, fill);
-    // }
-    // /// Extends the `buffer` with `fill` to fit this section.
-    // /// `len` is the length of the [`SliceBuf::filled`] part.
-    // fn apply_len_single(&self, buffer: &mut Vec<u8>, len: usize, fill: u8) {
-        // let needed = cmp::max(self.needed_len(len), len);
-        // buffer.resize(needed, fill);
-    // }
+// /// The start of the section to replace in the resource.
+// fn start(&self) -> usize;
+// /// The end of the section to replace in the resource.
+// fn end(&self) -> usize;
+// /// Length of new data to fill between [`Section::start`] and [`Section::end`].
+// fn new_len(&self) -> usize;
+// /// Length of the data between [`Section::start`] and [`Section::end`].
+// ///
+// /// # Panics
+// ///
+// /// Panics if the end is before the start.
+// /// This guarantee should be upheld by the implementer of [`Section`].
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn old_len(&self) -> usize {
+// self.end() - self.start()
+// }
+// /// Difference between old and new length of resource.
+// ///
+// /// # Panics
+// ///
+// /// Panics if the end is before the start.
+// /// This guarantee should be upheld by the implementer of [`Section`].
+// ///
+// /// Will also panic if any of the lengths don't fit in a [`prim@isize`].
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn len_difference(&self) -> isize {
+// isize::try_from(self.new_len()).expect("length too large for isize.")
+// - isize::try_from(self.old_len()).expect("length too large for isize.")
+// }
+// /// The needed length of the [`SliceBuf`].
+// /// Should be set to this before calling [`crate::log::EventApplier::apply`].
+// ///
+// /// May return a value lower than `resource_len`. This should not be applied until after the
+// /// application.
+// fn needed_len(&self, resource_len: usize) -> usize {
+// let diff = add_iusize(resource_len, self.len_difference()).unwrap_or(0) + 1;
+// let end = cmp::max(self.end() + 1, self.start() + self.new_len() + 1);
+// cmp::max(diff, end)
+// }
+// /// Extends the `buffer` with `fill` to fit the sections.
+// /// `len` is the length of the [`SliceBuf::filled`] part.
+// ///
+// /// # Panics
+// ///
+// /// Will panic if `len` is greater than half the memory size.
+// /// This is 2GiB on 32-bit systems and stupidly large on 64-bit systems.
+// fn apply_len<'a>(me: impl Iterator<Item = &'a Self>, buffer: &mut Vec<u8>, len: usize, fill: u8)
+// where
+// Self: 'a,
+// {
+// let mut current_size = isize::try_from(len).expect(
+// "usize can't fit in isize. Use resource lengths less than 1/2 the memory size.",
+// );
+// let mut max = current_size;
+// // let mut end = 0;
+// for me in me {
+// current_size += me.len_difference();
+// max = max
+// .max(current_size)
+// .max(isize::try_from(me.end() + me.new_len()).unwrap_or(isize::MAX));
+// // end = cmp::max(end, me.end() + 1);
+// // end = cmp::max(end, me.start() + me.new_len() + 1);
+// }
+// // let needed = cmp::max(add_iusize(0, current_size).unwrap_or(0), end);
+// // let additional = cmp::max(needed, buffer.len());
+// println!("  NEEDED LENGTH {max}");
+// // since max will always be > `len`, this is OK.
+// #[allow(clippy::cast_sign_loss)]
+// let max = max as usize;
+// buffer.resize(max + 1, fill);
+// }
+// /// Extends the `buffer` with `fill` to fit this section.
+// /// `len` is the length of the [`SliceBuf::filled`] part.
+// fn apply_len_single(&self, buffer: &mut Vec<u8>, len: usize, fill: u8) {
+// let needed = cmp::max(self.needed_len(len), len);
+// buffer.resize(needed, fill);
+// }
 // }
 // /// [`DataSection::end`] must always be after [`DataSection::start`].
 // #[allow(clippy::module_name_repetitions)]
 // pub trait DataSection {
-    // // /// The start of the section to replace in the resource.
-    // // fn start(&self) -> usize;
-    // // /// The end of the section to replace in the resource.
-    // // fn end(&self) -> usize;
-    // // /// Returns a reference to the entirety of the data.
-    // // fn data(&self) -> &[u8];
-    // /// Applies `self` to `resource`.
-    // ///
-    // /// Returns [`SliceBuf::filled`] if successful.
-    // ///
-    // /// # Errors
-    // ///
-    // /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(
-        // &self,
-        // resource: &mut SliceBuf<T>,
-    // ) -> Result<(), ApplyError>;
+// // /// The start of the section to replace in the resource.
+// // fn start(&self) -> usize;
+// // /// The end of the section to replace in the resource.
+// // fn end(&self) -> usize;
+// // /// Returns a reference to the entirety of the data.
+// // fn data(&self) -> &[u8];
+// /// Applies `self` to `resource`.
+// ///
+// /// Returns [`SliceBuf::filled`] if successful.
+// ///
+// /// # Errors
+// ///
+// /// Returns [`ApplyError::BufTooSmall`] if [`DataSection::data`] cannot fit in `resource`.
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(
+// &self,
+// resource: &mut SliceBuf<T>,
+// ) -> Result<(), ApplyError>;
 // }
 // impl<S: DataSection + ?Sized> Section for S {
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn start(&self) -> usize {
-        // self.start()
-    // }
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn end(&self) -> usize {
-        // self.end()
-    // }
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn new_len(&self) -> usize {
-        // self.diff().len()
-    // }
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn start(&self) -> usize {
+// self.start()
+// }
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn end(&self) -> usize {
+// self.end()
+// }
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn new_len(&self) -> usize {
+// self.diff().len()
+// }
 // }
 // impl DataSection for Difference {
-    // fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(&self, resource: &mut SliceBuf<T>) {
-        // if self.apply_overlaps() {
-            // // let mut vec = Vec::with_capacity(self.)
-        // }
-    // }
+// fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(&self, resource: &mut SliceBuf<T>) {
+// if self.apply_overlaps() {
+// // let mut vec = Vec::with_capacity(self.)
+// }
+// }
 // }
 
 // // See the safety guarantees. We copy data. This does not contain any buffers.
@@ -304,98 +304,98 @@ impl From<den::ApplyError> for ApplyError {
 // #[allow(clippy::unsafe_derive_deserialize)]
 // #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // pub struct Empty {
-    // start: usize,
-    // end: usize,
-    // len: usize,
+// start: usize,
+// end: usize,
+// len: usize,
 // }
 // impl Empty {
-    // pub(crate) fn new<S: Section>(section: &S) -> Self {
-        // Self {
-            // start: section.start(),
-            // end: section.end(),
-            // len: section.new_len(),
-        // }
-    // }
-    // /// The reverse of [`DataSection::apply`].
-    // /// Puts the data gathered from undoing the `apply` in a [`VecSection`].
-    // ///
-    // /// # Errors
-    // ///
-    // /// Returns an error if the new data cannot fit in `resource`.
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // pub(crate) fn revert<T: AsMut<[u8]> + AsRef<[u8]>>(
-        // &self,
-        // resource: &mut SliceBuf<T>,
-    // ) -> Result<VecSection, ApplyError> {
-        // let new_size = add_iusize(resource.filled().len(), -self.len_difference())
-            // .map_err(|()| ApplyError::BufTooSmall)?;
-        // if new_size > resource.capacity()
-            // || self.start() + self.new_len() > resource.capacity()
-            // || self.end() > resource.capacity()
-        // {
-            // return Err(ApplyError::BufTooSmall);
-        // }
+// pub(crate) fn new<S: Section>(section: &S) -> Self {
+// Self {
+// start: section.start(),
+// end: section.end(),
+// len: section.new_len(),
+// }
+// }
+// /// The reverse of [`DataSection::apply`].
+// /// Puts the data gathered from undoing the `apply` in a [`VecSection`].
+// ///
+// /// # Errors
+// ///
+// /// Returns an error if the new data cannot fit in `resource`.
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// pub(crate) fn revert<T: AsMut<[u8]> + AsRef<[u8]>>(
+// &self,
+// resource: &mut SliceBuf<T>,
+// ) -> Result<VecSection, ApplyError> {
+// let new_size = add_iusize(resource.filled().len(), -self.len_difference())
+// .map_err(|()| ApplyError::BufTooSmall)?;
+// if new_size > resource.capacity()
+// || self.start() + self.new_len() > resource.capacity()
+// || self.end() > resource.capacity()
+// {
+// return Err(ApplyError::BufTooSmall);
+// }
 
-        // let mut section = VecSection::new(self.start(), self.end(), vec![0; self.new_len()]);
+// let mut section = VecSection::new(self.start(), self.end(), vec![0; self.new_len()]);
 
-        // // Copy data from `resource` to `section`.
-        // // SAFETY: we check that resource[self.start() + self.new_len()] is valid.
-        // // Section is created to house the data.
-        // // We have copied data to section, which fills it.
-        // unsafe {
-            // std::ptr::copy_nonoverlapping(
-                // &resource.slice()[self.start()],
-                // &mut section.data[0],
-                // self.new_len(),
-            // );
-            // section.data.set_len(section.data().len());
-        // }
-        // // Copy the "old" data back in place of the new.
-        // // SAFETY: Here, we simply copy the rest of the resource to later in the resource.
-        // // If it's out of bounds, it'll copy 0 bytes, which is sound.
-        // unsafe {
-            // std::ptr::copy(
-                // &resource.slice()[self.start() + self.new_len()],
-                // &mut resource.slice_mut()[self.end()],
-                // resource.filled().len().saturating_sub(self.end()),
-            // );
-        // }
+// // Copy data from `resource` to `section`.
+// // SAFETY: we check that resource[self.start() + self.new_len()] is valid.
+// // Section is created to house the data.
+// // We have copied data to section, which fills it.
+// unsafe {
+// std::ptr::copy_nonoverlapping(
+// &resource.slice()[self.start()],
+// &mut section.data[0],
+// self.new_len(),
+// );
+// section.data.set_len(section.data().len());
+// }
+// // Copy the "old" data back in place of the new.
+// // SAFETY: Here, we simply copy the rest of the resource to later in the resource.
+// // If it's out of bounds, it'll copy 0 bytes, which is sound.
+// unsafe {
+// std::ptr::copy(
+// &resource.slice()[self.start() + self.new_len()],
+// &mut resource.slice_mut()[self.end()],
+// resource.filled().len().saturating_sub(self.end()),
+// );
+// }
 
-        // // If we added bytes here, fill with zeroes, to simplify debugging and avoid random data.
-        // if self.len_difference() < 0 {
-            // // We've checked that with the if statement above.
-            // #[allow(clippy::cast_sign_loss)]
-            // let to_fill = (0 - self.len_difference()) as usize;
-            // unsafe {
-                // std::ptr::write_bytes(
-                    // &mut resource.slice_mut()[self.start() + self.new_len()],
-                    // 0,
-                    // to_fill,
-                // );
-            // }
-        // }
+// // If we added bytes here, fill with zeroes, to simplify debugging and avoid random data.
+// if self.len_difference() < 0 {
+// // We've checked that with the if statement above.
+// #[allow(clippy::cast_sign_loss)]
+// let to_fill = (0 - self.len_difference()) as usize;
+// unsafe {
+// std::ptr::write_bytes(
+// &mut resource.slice_mut()[self.start() + self.new_len()],
+// 0,
+// to_fill,
+// );
+// }
+// }
 
-        // resource.set_filled(new_size);
-        // Ok(section)
-    // }
+// resource.set_filled(new_size);
+// Ok(section)
+// }
 // }
 // impl Section for Empty {
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn start(&self) -> usize {
-        // self.start
-    // }
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn end(&self) -> usize {
-        // self.end
-    // }
-    // #[allow(clippy::inline_always)]
-    // #[inline(always)]
-    // fn new_len(&self) -> usize {
-        // self.len
-    // }
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn start(&self) -> usize {
+// self.start
+// }
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn end(&self) -> usize {
+// self.end
+// }
+// #[allow(clippy::inline_always)]
+// #[inline(always)]
+// fn new_len(&self) -> usize {
+// self.len
+// }
 // }
 
 // /// A selection of data in a resource.
