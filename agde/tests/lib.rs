@@ -77,8 +77,6 @@ fn rework_history() {
                     EventKind::Modify(ev) => {
                         assert_eq!(ev.resource(), "private/secret.txt");
 
-                        // resource.extend_to_needed(ev.data(), b' ');
-
                         event_applier.apply(resource).expect("Buffer too small!")
                     }
                     _ => panic!("Wrong EventKind"),
@@ -117,16 +115,11 @@ fn rework_history() {
     let mut receiver = manager();
 
     let mut resource = Vec::new();
-    // let mut res = SliceBuf::with_whole(&mut resource);
 
     // Process second message first.
     resource = process_message(&mut receiver, &second_message, &resource);
 
-    // assert_eq!(resource, b" ", "got {:?}", std::str::from_utf8(&resource));
-    // let filled = resource.len();
-    // unsafe { resource.set_len(12) };
-    // assert_eq!(resource, b"      friend");
-    // unsafe { resource.set_len(filled) };
+    assert_eq!(resource, b"Hello friend!");
 
     // Now, process first message.
     resource = process_message(&mut receiver, &first_message, &resource);
@@ -139,7 +132,6 @@ fn basic_diff() {
     let mut resource =
         b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"
             .to_vec();
-    // let mut res = SliceBuf::with_whole(&mut resource);
 
     let mut mgr = manager();
 
@@ -174,8 +166,6 @@ fn basic_diff() {
             panic!("Got {:?}, but expected a Event!", kind);
         }
     }
-    // let filled = res.filled().len();
-    // resource.truncate(filled);
     assert_eq!(
         String::from_utf8(resource).unwrap(),
         "Some test data. This test works, as the whole diff algorithm is written by me!"
@@ -295,8 +285,6 @@ ok",
 
     let mut receiver = manager();
 
-    // let mut res = SliceBuf::with_whole(&mut old);
-
     match message.inner() {
         MessageKind::Event(event) => {
             let event_applier = receiver
@@ -315,9 +303,6 @@ ok",
             panic!("Got {:?}, but expected a Event!", kind);
         }
     }
-    // let filled = res.filled().len();
-    // println!("Filled {filled}");
-    // old.truncate(filled);
     assert_eq!(
         std::str::from_utf8(&old).unwrap(),
         std::str::from_utf8(new).unwrap(),

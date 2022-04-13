@@ -9,7 +9,7 @@
 //! - pier - another client on the network.
 //! - help desire - how much a pier wants to help others in the network.
 //! - conversation - a exchange of some related data (e.g. [`MessageKind::EventUuidLogCheck`]).
-//! - [`Section`] a splice operation to a resource.
+//! - [`den::Difference`] a modification to a resource.
 //! - [UUID](Uuid) - a unique identifier for a unit (e.g. conversation, [`Message`])
 //! - log - internal list to compensate for inconsistencies in message arrival time.
 //! - storage - "versions" of the data stored by the implementor
@@ -27,12 +27,10 @@
     missing_docs
 )]
 
-pub mod diff;
 pub mod event;
 pub mod hash_check;
 pub mod log;
 pub mod resource;
-pub mod section;
 pub mod sync;
 
 use std::cmp;

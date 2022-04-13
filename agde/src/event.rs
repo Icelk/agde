@@ -1,11 +1,27 @@
 //! Events are a type of message which manipulate a resource.
 
-use den::Difference;
+use den::{Difference, Signature};
 
 use crate::{
-    diff, log, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
+    log, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
     UNIX_EPOCH,
 };
+
+/// Creates a granular [`Difference`] between `base` and `target`.
+///
+/// If you [`Difference::apply`] this on `base`, you **should** get `target`.
+pub fn diff(base: &[u8], target: &[u8]) -> Difference {
+    let mut sig = Signature::new(256);
+    sig.write(base);
+    let sig = sig.finish();
+    let rough_diff = sig.diff(target);
+    println!("rough {rough_diff:?}");
+    #[allow(clippy::let_and_return)]
+    let granular_diff = rough_diff
+        .minify(8, base)
+        .expect("The way we are using the function, this should never err.");
+    granular_diff
+}
 
 /// A modification to a resource.
 ///
@@ -17,51 +33,9 @@ pub struct Modify {
     diff: Difference,
 }
 impl Modify {
-    // /// Calculates the diff if `source` is [`Some`].
-    // ///
-    // /// The sections **MUST NOT** overlap. That results in undefined logic and potentially
-    // /// loss of data.
-    // pub fn new(resource: String, sections: Vec<VecSection>, base: Option<&[u8]>) -> Self {
-    // let mut sections = sections;
-    // if let Some(base) = base {
-    // let target = {
-    // if sections.len() == 1 {
-    // sections.first().and_then(|section| {
-    // if section.old_len() >= base.len() {
-    // Some(section.data())
-    // } else {
-    // None
-    // }
-    // })
-    // } else {
-    // None
-    // }
-    // };
-    // let target = if let Some(base) = target {
-    // Cow::Borrowed(base)
-    // } else {
-    // let mut target = base.to_vec();
-    // let mut filled = target.len();
-    // for section in sections {
-    // section.apply_len_single(&mut target, filled, 0);
-    // let mut buf = SliceBuf::new(&mut target);
-    // section
-    // .apply(&mut buf)
-    // .expect("Buffer is guaranteed to not be too small.");
-    // filled = buf.filled().len();
-    // }
-    // target.truncate(filled);
-    // Cow::Owned(target)
-    // };
-    // let diff = diff::diff(base, &target);
-    // // sections = diff::convert_to_sections(diff, base);
-    // diff
-    // }
-    // Self { resource, sections: diff }
-    // }
     /// Get the difference needed to get from `base` to `target`, as a modify event.
     pub fn new(resource: String, target: &[u8], base: &[u8]) -> Self {
-        let diff = diff::diff(base, target);
+        let diff = diff(base, target);
 
         Self { resource, diff }
     }
@@ -289,24 +263,6 @@ impl Event {
         self.sender
     }
 }
-// /// Clones the `resource` [`String`].
-// impl<S: Section> From<&Event<S>> for Event<section::Empty> {
-// fn from(ev: &Event<S>) -> Self {
-// let kind = match ev.inner() {
-// Kind::Modify(ev) => Kind::Modify(Modify {
-// resource: ev.resource().into(),
-// data: ev.data().iter().map(section::Empty::new).collect(),
-// }),
-// Kind::Create(ev) => Kind::Create(ev.clone()),
-// Kind::Delete(ev) => Kind::Delete(ev.clone()),
-// };
-// Event {
-// kind,
-// timestamp: ev.timestamp(),
-// sender: ev.sender(),
-// }
-// }
-// }
 /// A [`Event`] with internal data.
 ///
 /// This is the type that is sent between clients.
@@ -366,7 +322,7 @@ impl<'a> Unwinder<'a> {
         }
         Ok(())
     }
-    /// Get an iterator over the [`Section`]s that have changed in `modern_resource_name`.
+    /// Get an iterator over the [`Difference`]s to `modern_resource_name`.
     ///
     /// # Errors
     ///
@@ -488,7 +444,7 @@ impl<'a> Unwinder<'a> {
     ///
     /// # Errors
     ///
-    /// Passes errors from [`DataSection::apply`].
+    /// Passes errors from [`Difference::apply`].
     pub fn rewind(
         &mut self,
         // resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
 use crate::event;
-use crate::{event::dur_now, section, Event, EventKind, Uuid};
+use crate::{event::dur_now, Event, EventKind, Uuid};
 
 /// A received event.
 ///
@@ -51,8 +51,23 @@ impl Ord for ReceivedEvent {
 pub enum Error {
     /// The given [`Event`] has occurred in the future!
     EventInFuture,
-    /// The guarantees of [`Section`] don't hold up.
-    SectionInvalid,
+}
+
+/// An error during [`den::Difference::apply`] and [`crate::log::EventApplier::apply`].
+#[derive(Debug)]
+pub enum ApplyError {
+    /// A reference in the difference is out of bounds.
+    /// See [`den::ApplyError::RefOutOfBounds`].
+    RefOutOfBounds,
+    /// The function called must not be called on the current event.
+    InvalidEvent,
+}
+impl From<den::ApplyError> for ApplyError {
+    fn from(err: den::ApplyError) -> Self {
+        match err {
+            den::ApplyError::RefOutOfBounds => Self::RefOutOfBounds,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -344,25 +359,22 @@ impl<'a> EventApplier<'a> {
     ///
     /// # Errors
     ///
-    /// tl;dr, this can be unwrapped if you have called [`SliceBuf::extend_to_needed`] or
-    /// [`Section::apply_len`] and made sure [`Self::event`] is a [`EventKind::Modify`].
+    /// tl;dr, this can be unwrapped if you have made sure [`Self::event`] is a [`EventKind::Modify`].
     ///
-    /// Returns [`section::ApplyError::InvalidEvent`] if this [`EventApplier`] wasn't instantiated
+    /// Returns [`ApplyError::InvalidEvent`] if this [`EventApplier`] wasn't instantiated
     /// with a [`EventKind::Modify`].
     ///
-    /// Returns a [`section::ApplyError::BufTooSmall`] if the following predicate is not met.
-    /// `resource` must be at least `max(resource.filled() + event.section().len_difference() + 1,
-    /// event.section().end() + 1)`
-    /// [`Section::apply_len`] guarantees this.
+    /// Returns a [`ApplyError::RefOutOfBounds`] if the difference of this event is out of
+    /// bounds.
     pub fn apply(
         &self,
         // resource: &mut SliceBuf<T>,
         resource: &[u8],
-    ) -> Result<Vec<u8>, section::ApplyError> {
+    ) -> Result<Vec<u8>, ApplyError> {
         let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
-            return Err(section::ApplyError::InvalidEvent);
+            return Err(ApplyError::InvalidEvent);
         };
         // Match only for the current resource.
         let current_resource_name = if let Some(name) = self.modern_resource_name {
@@ -371,38 +383,6 @@ impl<'a> EventApplier<'a> {
             // `TODO`: remove the `.to_vec`
             return Ok(resource.to_vec());
         };
-
-        // let events =
-        // // Very pretty code.
-        // {
-        // let last = self.events.first();
-
-        // if let Some(last) = last {
-        // if last.event.timestamp() == self.event.timestamp() {
-        // if let EventKind::Modify(modify) = last.event.inner() {
-        // if ev.data().len() == modify.data().len()
-        // && modify.data().iter().zip(ev.data().iter()).all(
-        // |(a, b)| {
-        // a.start() == b.start()
-        // && a.end() == b.end()
-        // && a.new_len() == b.new_len()
-        // },
-        // )
-        // {
-        // &self.events[1..]
-        // } else {
-        // self.events
-        // }
-        // } else {
-        // self.events
-        // }
-        // } else {
-        // self.events
-        // }
-        // } else {
-        // self.events
-        // }
-        // };
         let mut unwinder = event::Unwinder::new(self.events);
 
         let mut resource = match unwinder.unwind(resource, current_resource_name) {
