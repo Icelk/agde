@@ -1,8 +1,10 @@
 //! Events are a type of message which manipulate a resource.
 
+use den::Difference;
+
 use crate::{
-    diff, log, section, Cow, DataSection, Deserialize, Duration, EventKind, IntoEvent, Manager,
-    Section, Serialize, SliceBuf, SystemTime, Uuid, VecSection, UNIX_EPOCH,
+    diff, log, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
+    UNIX_EPOCH,
 };
 
 /// A modification to a resource.
@@ -10,69 +12,65 @@ use crate::{
 /// The resource must be initialised using [`Create`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct Modify<S> {
+pub struct Modify {
     resource: String,
-    sections: Vec<S>,
+    diff: Difference,
 }
-impl Modify<VecSection> {
-    /// Calculates the diff if `source` is [`Some`].
-    ///
-    /// The sections **MUST NOT** overlap. That results in undefined logic and potentially
-    /// loss of data.
-    pub fn new(resource: String, sections: Vec<VecSection>, base: Option<&[u8]>) -> Self {
-        let mut sections = sections;
-        if let Some(base) = base {
-            let target = {
-                if sections.len() == 1 {
-                    sections.first().and_then(|section| {
-                        if section.old_len() >= base.len() {
-                            Some(section.data())
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                }
-            };
-            let target = if let Some(base) = target {
-                Cow::Borrowed(base)
-            } else {
-                let mut target = base.to_vec();
-                let mut filled = target.len();
-                for section in sections {
-                    section.apply_len_single(&mut target, filled, 0);
-                    let mut buf = SliceBuf::new(&mut target);
-                    section
-                        .apply(&mut buf)
-                        .expect("Buffer is guaranteed to not be too small.");
-                    filled = buf.filled().len();
-                }
-                target.truncate(filled);
-                Cow::Owned(target)
-            };
-            let diff = diff::diff(base, &target);
-            sections = diff::convert_to_sections(diff, base);
-        }
-        Self { resource, sections }
-    }
+impl Modify {
+    // /// Calculates the diff if `source` is [`Some`].
+    // ///
+    // /// The sections **MUST NOT** overlap. That results in undefined logic and potentially
+    // /// loss of data.
+    // pub fn new(resource: String, sections: Vec<VecSection>, base: Option<&[u8]>) -> Self {
+    // let mut sections = sections;
+    // if let Some(base) = base {
+    // let target = {
+    // if sections.len() == 1 {
+    // sections.first().and_then(|section| {
+    // if section.old_len() >= base.len() {
+    // Some(section.data())
+    // } else {
+    // None
+    // }
+    // })
+    // } else {
+    // None
+    // }
+    // };
+    // let target = if let Some(base) = target {
+    // Cow::Borrowed(base)
+    // } else {
+    // let mut target = base.to_vec();
+    // let mut filled = target.len();
+    // for section in sections {
+    // section.apply_len_single(&mut target, filled, 0);
+    // let mut buf = SliceBuf::new(&mut target);
+    // section
+    // .apply(&mut buf)
+    // .expect("Buffer is guaranteed to not be too small.");
+    // filled = buf.filled().len();
+    // }
+    // target.truncate(filled);
+    // Cow::Owned(target)
+    // };
+    // let diff = diff::diff(base, &target);
+    // // sections = diff::convert_to_sections(diff, base);
+    // diff
+    // }
+    // Self { resource, sections: diff }
+    // }
     /// Get the difference needed to get from `base` to `target`, as a modify event.
-    pub fn diff(resource: String, target: Vec<u8>, base: &[u8]) -> Self {
-        Self::new(
-            resource,
-            vec![VecSection::whole_resource(base.len(), target)],
-            Some(base),
-        )
+    pub fn new(resource: String, target: &[u8], base: &[u8]) -> Self {
+        let diff = diff::diff(base, target);
+
+        Self { resource, diff }
     }
 }
-impl<S: Section> Modify<S> {
+impl Modify {
     /// Get a reference to the sections of data this event modifies.
-    #[must_use]
-    pub fn sections(&self) -> &[S] {
-        &self.sections
+    pub fn diff(&self) -> &Difference {
+        &self.diff
     }
-}
-impl<S> Modify<S> {
     /// Returns a reference to the target resource name.
     #[must_use]
     #[inline]
@@ -158,13 +156,13 @@ impl Create {
 
 macro_rules! event_kind_impl {
     ($type:ty, $enum_name:ident) => {
-        impl<'a, T> From<$type> for Kind<T> {
+        impl<'a> From<$type> for Kind {
             fn from(event: $type) -> Self {
                 Self::$enum_name(event)
             }
         }
-        impl<'a, T> IntoEvent<T> for $type {
-            fn into_ev(self, manager: &Manager) -> Event<T> {
+        impl<'a> IntoEvent for $type {
+            fn into_ev(self, manager: &Manager) -> Event {
                 Event::new(self.into(), manager.uuid())
             }
         }
@@ -174,17 +172,17 @@ macro_rules! event_kind_impl {
 /// Helper trait to convert from `*Event` structs to [`Event`].
 ///
 /// Should not be implemented but used with [`Manager::process_event`].
-pub trait Into<SectionKind> {
+pub trait Into {
     /// Converts `self` into an [`Event`].
-    fn into_ev(self, manager: &Manager) -> Event<SectionKind>;
+    fn into_ev(self, manager: &Manager) -> Event;
 }
-impl<T> Into<T> for Event<T> {
-    fn into_ev(self, _manager: &Manager) -> Event<T> {
+impl Into for Event {
+    fn into_ev(self, _manager: &Manager) -> Event {
         self
     }
 }
 
-event_kind_impl!(Modify<T>, Modify);
+event_kind_impl!(Modify, Modify);
 event_kind_impl!(Create, Create);
 event_kind_impl!(Delete, Delete);
 
@@ -209,12 +207,12 @@ pub fn systime_to_dur(systime: SystemTime) -> Duration {
 /// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub enum Kind<S> {
+pub enum Kind {
     /// Modification.
     ///
     /// You need to make a [`Self::Create`] event before modifying the resource.
     /// If you don't do this, the modification MUST NOT be applied.
-    Modify(Modify<S>),
+    Modify(Modify),
     /// Creation.
     ///
     /// A new resource has been created. Before any other event can affect this resource,
@@ -230,22 +228,22 @@ pub enum Kind<S> {
 /// A change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct Event<S> {
-    kind: Kind<S>,
+pub struct Event {
+    kind: Kind,
     /// A [`Duration`] of time after UNIX_EPOCH.
     timestamp: Duration,
     sender: Uuid,
 }
-impl<S> Event<S> {
+impl Event {
     /// Creates a new event from `kind`.
-    pub fn new(kind: Kind<S>, sender: Uuid) -> Self {
+    pub fn new(kind: Kind, sender: Uuid) -> Self {
         Self::with_timestamp(kind, sender, SystemTime::now())
     }
     /// Creates a new event from `kind` with the `timestamp`.
     ///
     /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
     /// else the sync will risk wrong results, forcing [`crate::MessageKind::HashCheck`].
-    pub fn with_timestamp(kind: Kind<S>, sender: Uuid, timestamp: SystemTime) -> Self {
+    pub fn with_timestamp(kind: Kind, sender: Uuid, timestamp: SystemTime) -> Self {
         Self {
             kind,
             timestamp: timestamp
@@ -268,12 +266,12 @@ impl<S> Event<S> {
     /// Returns a reference to the inner [`Kind`] where all the event data is stored.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn inner(&self) -> &Kind<S> {
+    pub fn inner(&self) -> &Kind {
         &self.kind
     }
     /// Returns a mutable reference to the inner [`Kind`].
     #[inline]
-    pub(crate) fn inner_mut(&mut self) -> &mut Kind<S> {
+    pub(crate) fn inner_mut(&mut self) -> &mut Kind {
         &mut self.kind
     }
     /// Get the timestamp of this event.
@@ -291,28 +289,28 @@ impl<S> Event<S> {
         self.sender
     }
 }
-/// Clones the `resource` [`String`].
-impl<S: Section> From<&Event<S>> for Event<section::Empty> {
-    fn from(ev: &Event<S>) -> Self {
-        let kind = match ev.inner() {
-            Kind::Modify(ev) => Kind::Modify(Modify {
-                resource: ev.resource().into(),
-                sections: ev.sections().iter().map(section::Empty::new).collect(),
-            }),
-            Kind::Create(ev) => Kind::Create(ev.clone()),
-            Kind::Delete(ev) => Kind::Delete(ev.clone()),
-        };
-        Event {
-            kind,
-            timestamp: ev.timestamp(),
-            sender: ev.sender(),
-        }
-    }
-}
+// /// Clones the `resource` [`String`].
+// impl<S: Section> From<&Event<S>> for Event<section::Empty> {
+// fn from(ev: &Event<S>) -> Self {
+// let kind = match ev.inner() {
+// Kind::Modify(ev) => Kind::Modify(Modify {
+// resource: ev.resource().into(),
+// data: ev.data().iter().map(section::Empty::new).collect(),
+// }),
+// Kind::Create(ev) => Kind::Create(ev.clone()),
+// Kind::Delete(ev) => Kind::Delete(ev.clone()),
+// };
+// Event {
+// kind,
+// timestamp: ev.timestamp(),
+// sender: ev.sender(),
+// }
+// }
+// }
 /// A [`Event`] with internal data.
 ///
 /// This is the type that is sent between clients.
-pub type Dataful = Event<VecSection>;
+pub type Dataful = Event;
 
 /// Error during [`Unwinder`] operations.
 #[derive(Debug)]
@@ -320,11 +318,10 @@ pub enum UnwindError {
     /// The resource has previously been destroyed.
     ResourceDestroyed,
     /// An error during an application of a section.
-    /// See [`log::EventApplier::apply`] for considerations about this.
-    Apply(section::ApplyError),
+    Apply(den::ApplyError),
 }
-impl From<section::ApplyError> for UnwindError {
-    fn from(err: section::ApplyError) -> Self {
+impl From<den::ApplyError> for UnwindError {
+    fn from(err: den::ApplyError) -> Self {
         Self::Apply(err)
     }
 }
@@ -337,13 +334,18 @@ pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
     /// May possibly not contain `Self::event`.
     events: &'a [log::ReceivedEvent],
-    rewound_events: Vec<VecSection>,
+    rewound_events: Vec<&'a Difference>,
+    // these are allocated once to optimize allocations
+    buffer1: Vec<u8>,
+    buffer2: Vec<u8>,
 }
 impl<'a> Unwinder<'a> {
     pub(crate) fn new(events: &'a [log::ReceivedEvent]) -> Self {
         Self {
             events,
             rewound_events: vec![],
+            buffer1: vec![],
+            buffer2: vec![],
         }
     }
     /// # Errors
@@ -373,26 +375,21 @@ impl<'a> Unwinder<'a> {
     pub fn sections<'b>(
         &'b self,
         modern_resource_name: &'b str,
-    ) -> Result<impl Iterator<Item = &section::Empty> + 'b, UnwindError> {
+    ) -> Result<impl Iterator<Item = &Difference> + 'b, UnwindError> {
         self.check_name(modern_resource_name)?;
 
-        let iter = self
-            .events
-            .iter()
-            .rev()
-            .filter_map(move |received_ev| {
-                if received_ev.event.resource() != modern_resource_name {
-                    return None;
-                }
-                match received_ev.event.inner() {
-                    EventKind::Modify(ev) => Some(ev.sections().iter().rev()),
-                    EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
-                        "Unexpected delete or create event in unwinding of event log.\
+        let iter = self.events.iter().rev().filter_map(move |received_ev| {
+            if received_ev.event.resource() != modern_resource_name {
+                return None;
+            }
+            match received_ev.event.inner() {
+                EventKind::Modify(ev) => Some(ev.diff()),
+                EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
+                    "Unexpected delete or create event in unwinding of event log.\
                     Please report this bug."
-                    ),
-                }
-            })
-            .flatten();
+                ),
+            }
+        });
         Ok(iter)
     }
     /// Get an iterator over the events stored in this unwinder.
@@ -409,7 +406,7 @@ impl<'a> Unwinder<'a> {
     ///     println!("Resource {} changed in some way.", event.resource());
     /// }
     /// ```
-    pub fn events(&self) -> impl Iterator<Item = &Event<section::Empty>> + '_ {
+    pub fn events(&self) -> impl Iterator<Item = &Event> + '_ {
         self.events.iter().map(|received_ev| &received_ev.event)
     }
     /// Reverts the `resource` with `modern_resource_name` to the bottom of the internal list.
@@ -422,12 +419,12 @@ impl<'a> Unwinder<'a> {
     ///
     /// Returns [`UnwindError::ResourceDestroyed`] if `modern_resource_name` has been re-created or
     /// destroyed during the timeline of this unwinder.
-    /// Returns an error if the new data cannot fit in `resource`.
     pub fn unwind(
         &mut self,
-        resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
+        // resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
+        resource: &[u8],
         modern_resource_name: &'a str,
-    ) -> Result<(), UnwindError> {
+    ) -> Result<Vec<u8>, UnwindError> {
         assert_eq!(
             self.rewound_events.len(),
             0,
@@ -435,6 +432,14 @@ impl<'a> Unwinder<'a> {
         );
 
         self.check_name(modern_resource_name)?;
+
+        let mut first = true;
+        // these are allocated once to optimize allocations
+        let mut b1 = std::mem::take(&mut self.buffer1);
+        // reset slice and set up as `resource`
+        b1.clear();
+        b1.extend_from_slice(resource);
+        let mut b2 = std::mem::take(&mut self.buffer2);
 
         // On move events, only change resource.
         // On delete messages, panic. A bug.
@@ -445,10 +450,30 @@ impl<'a> Unwinder<'a> {
             }
             match received_ev.event.inner() {
                 EventKind::Modify(ev) => {
-                    for section in ev.sections().iter().rev() {
-                        let section = section.revert(resource)?;
-                        self.rewound_events.push(section);
+                    // `TODO`: what do we do with later differences if any data is modified by the
+                    // incoming diff. Currently, we just reapply the diff, but that can leak the
+                    // `fill_byte` and cause the data to get overridden. Do we keep track of an
+                    // offset to apply to all diffs?
+                    // My messy thoughts:
+                    // Make sure to edit diff if content gets inserted - keep track of offset.
+                    // When applying later, push in a unknown segment in the Difference with the
+                    // content of the offset (if we remove 3, remove 1 ref segment before and fill
+                    // that with 5 unknown data. Example assumes block_size=8)
+                    //
+                    // this is very critical with changes that are not close to the last event's
+                    // changes, say much later in a file.
+                    //
+                    // This will be hard but critical to do.
+
+                    // `TODO`: don't hardcode fill_byte.
+                    if first {
+                        ev.diff().revert(resource, &mut b1, b' ')?;
+                    } else {
+                        ev.diff().revert(&b1, &mut b2, b' ')?;
+                        std::mem::swap(&mut b1, &mut b2);
                     }
+                    self.rewound_events.push(ev.diff());
+                    first = false;
                 }
                 EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
                     "Unexpected delete or create event in unwinding of event log.\
@@ -456,7 +481,8 @@ impl<'a> Unwinder<'a> {
                 ),
             }
         }
-        Ok(())
+        self.buffer2 = b2;
+        Ok(b1)
     }
     /// Rewinds the `resource` back up.
     ///
@@ -465,12 +491,21 @@ impl<'a> Unwinder<'a> {
     /// Passes errors from [`DataSection::apply`].
     pub fn rewind(
         &mut self,
-        resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
-    ) -> Result<(), section::ApplyError> {
+        // resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
+        resource: &[u8],
+    ) -> Result<Vec<u8>, den::ApplyError> {
+        let mut vec = resource.to_vec();
+        let mut other = vec![];
         // Unwind the stack, redoing all the events.
-        while let Some(section) = self.rewound_events.pop() {
-            section.apply(resource)?;
+        while let Some(diff) = self.rewound_events.pop() {
+            if diff.apply_overlaps() {
+                diff.apply(&vec, &mut other)?;
+                std::mem::swap(&mut vec, &mut other);
+                other.clear();
+            } else {
+                diff.apply_in_place(&mut vec)?;
+            }
         }
-        Ok(())
+        Ok(vec)
     }
 }

@@ -1400,13 +1400,11 @@ impl Difference {
                 }
                 Segment::BlockRef(block_ref_segment) => {
                     let start = block_ref_segment.start;
-                    let end = cmp::min(block_ref_segment.end(block_size), base.len());
+                    let end = block_ref_segment.end(block_size).min(base.len());
                     // Check that only the last ref goes past the end.
-                    debug_assert!(if end == base.len() {
-                        block_ref_segment.end(block_size) - block_size < base.len()
-                    } else {
-                        true
-                    });
+                    if end == base.len() && block_ref_segment.end(block_size)-block_size >= base.len() {
+                        return Err(Roob);
+                    }
 
                     let range = start..end;
                     base.get(range.clone()).ok_or(Roob)?;

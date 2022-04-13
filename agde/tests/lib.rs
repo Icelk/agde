@@ -10,11 +10,7 @@ fn send_diff() {
     let (message_bin, message_base64, sender_uuid): (Vec<u8>, String, Uuid) = {
         let mut manager = manager();
 
-        let event = event::Modify::new(
-            "test.txt".into(),
-            vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
-            None,
-        );
+        let event = event::Modify::new("test.txt".into(), b"Some test data.", b"");
 
         let message = manager.process_event(event);
 
@@ -38,8 +34,8 @@ fn send_diff() {
                 event.inner(),
                 &EventKind::Modify(event::Modify::new(
                     "test.txt".into(),
-                    vec![VecSection::whole_resource(0, b"Some test data.".to_vec())],
-                    None
+                    b"Some test data.",
+                    b"",
                 ))
             );
 
@@ -47,14 +43,13 @@ fn send_diff() {
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
-                EventKind::Modify(ev) => {
+                EventKind::Modify(_ev) => {
                     assert_eq!(event_applier.resource(), Some("test.txt"));
 
-                    let mut test = Vec::new();
-                    let mut res = SliceBuf::with_whole(&mut test);
-                    res.extend_to_needed(ev.sections(), b' ');
+                    // let mut res = SliceBuf::with_whole(&mut test);
+                    // res.extend_to_needed(ev.data(), b' ');
 
-                    event_applier.apply(&mut res).expect("Buffer too small!");
+                    event_applier.apply(&[]).expect("Buffer too small!");
                 }
                 _ => panic!("Wrong EventKind"),
             }
@@ -70,8 +65,9 @@ fn rework_history() {
     fn process_message(
         manager: &mut Manager,
         message: &Message,
-        resource: &mut SliceBuf<&mut Vec<u8>>,
-    ) {
+        // resource: &mut SliceBuf<&mut Vec<u8>>,
+        resource: &[u8],
+    ) -> Vec<u8> {
         match message.inner() {
             MessageKind::Event(event) => {
                 let event_applier = manager
@@ -81,9 +77,9 @@ fn rework_history() {
                     EventKind::Modify(ev) => {
                         assert_eq!(ev.resource(), "private/secret.txt");
 
-                        resource.extend_to_needed(ev.sections(), b' ');
+                        // resource.extend_to_needed(ev.data(), b' ');
 
-                        event_applier.apply(resource).expect("Buffer too small!");
+                        event_applier.apply(resource).expect("Buffer too small!")
                     }
                     _ => panic!("Wrong EventKind"),
                 }
@@ -96,16 +92,12 @@ fn rework_history() {
     let (first_message, second_message) = {
         let mut sender = manager();
 
-        let first_event = event::Modify::new(
-            "private/secret.txt".into(),
-            vec![VecSection::new(0, 0, "Hello world!".into())],
-            None,
-        )
-        .into();
+        let first_event =
+            event::Modify::new("private/secret.txt".into(), "Hello world!".as_bytes(), b"").into();
         let second_event = event::Modify::new(
             "private/secret.txt".into(),
-            vec![VecSection::new(6, 11, "friend".into())],
-            None,
+            "Hello friend!".as_bytes(),
+            "Hello world!".as_bytes(),
         )
         .into();
         (
@@ -125,21 +117,21 @@ fn rework_history() {
     let mut receiver = manager();
 
     let mut resource = Vec::new();
-    let mut res = SliceBuf::with_whole(&mut resource);
+    // let mut res = SliceBuf::with_whole(&mut resource);
 
     // Process second message first.
-    process_message(&mut receiver, &second_message, &mut res);
+    resource = process_message(&mut receiver, &second_message, &resource);
 
-    assert_eq!(res.filled(), b" ");
-    let filled = res.filled().len();
-    res.set_filled(12);
-    assert_eq!(res.filled(), b"      friend");
-    res.set_filled(filled);
+    // assert_eq!(resource, b" ", "got {:?}", std::str::from_utf8(&resource));
+    // let filled = resource.len();
+    // unsafe { resource.set_len(12) };
+    // assert_eq!(resource, b"      friend");
+    // unsafe { resource.set_len(filled) };
 
     // Now, process first message.
-    process_message(&mut receiver, &first_message, &mut res);
+    resource = process_message(&mut receiver, &first_message, &resource);
 
-    assert_eq!(res.filled(), b"Hello friend!");
+    assert_eq!(resource, b"Hello friend!");
 }
 
 #[test]
@@ -147,19 +139,17 @@ fn basic_diff() {
     let mut resource =
         b"Some test data. Hope this test workes, as the whole diff algorithm is written by me!"
             .to_vec();
-    let mut res = SliceBuf::with_whole(&mut resource);
+    // let mut res = SliceBuf::with_whole(&mut resource);
 
     let mut mgr = manager();
 
     let event = event::Modify::new(
         "diff.bin".into(),
-        vec![VecSection::whole_resource(
-            res.filled().len(),
-            b"Some test data. This test works, as the whole diff algorithm is written by me!"
-                .to_vec(),
-        )],
-        Some(res.filled()),
+        b"Some test data. This test works, as the whole diff algorithm is written by me!",
+        &resource,
     );
+
+    println!("Event: {event:?}");
 
     let message = mgr.process_event(event);
 
@@ -171,10 +161,11 @@ fn basic_diff() {
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
-                EventKind::Modify(ev) => {
-                    res.extend_to_needed(ev.sections(), b' ');
+                EventKind::Modify(_ev) => {
+                    // res.extend_to_needed(ev.data(), b' ');
 
-                    event_applier.apply(&mut res).expect("Buffer too small!");
+                    println!("Resource: {:?}", std::str::from_utf8(&resource));
+                    resource = event_applier.apply(&resource).expect("Buffer too small!");
                 }
                 _ => panic!("Wrong EventKind"),
             }
@@ -183,8 +174,8 @@ fn basic_diff() {
             panic!("Got {:?}, but expected a Event!", kind);
         }
     }
-    let filled = res.filled().len();
-    resource.truncate(filled);
+    // let filled = res.filled().len();
+    // resource.truncate(filled);
     assert_eq!(
         String::from_utf8(resource).unwrap(),
         "Some test data. This test works, as the whole diff algorithm is written by me!"
@@ -298,13 +289,13 @@ ok",
 
     let mut mgr = manager();
 
-    let event = event::Modify::diff("diff.bin".into(), new_vec, &old);
+    let event = event::Modify::new("diff.bin".into(), &new_vec, &old);
 
     let message = mgr.process_event(event);
 
     let mut receiver = manager();
 
-    let mut res = SliceBuf::with_whole(&mut old);
+    // let mut res = SliceBuf::with_whole(&mut old);
 
     match message.inner() {
         MessageKind::Event(event) => {
@@ -312,10 +303,10 @@ ok",
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
-                EventKind::Modify(ev) => {
-                    res.extend_to_needed(ev.sections(), 0);
+                EventKind::Modify(_ev) => {
+                    // res.extend_to_needed(ev.data(), 0);
 
-                    event_applier.apply(&mut res).expect("Buffer too small!");
+                    old = event_applier.apply(&old).expect("Buffer too small!");
                 }
                 _ => panic!("Wrong EventKind"),
             }
@@ -324,9 +315,9 @@ ok",
             panic!("Got {:?}, but expected a Event!", kind);
         }
     }
-    let filled = res.filled().len();
-    println!("Filled {filled}");
-    old.truncate(filled);
+    // let filled = res.filled().len();
+    // println!("Filled {filled}");
+    // old.truncate(filled);
     assert_eq!(
         std::str::from_utf8(&old).unwrap(),
         std::str::from_utf8(new).unwrap(),

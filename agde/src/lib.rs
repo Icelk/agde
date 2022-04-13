@@ -35,7 +35,6 @@ pub mod resource;
 pub mod section;
 pub mod sync;
 
-use std::borrow::Cow;
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display};
@@ -48,7 +47,6 @@ use serde::{Deserialize, Serialize};
 
 pub use event::{Dataful as DatafulEvent, Event, Into as IntoEvent, Kind as EventKind};
 pub use log::{UuidCheck, UuidCheckAction};
-pub use section::{DataSection, Section, SliceBuf, VecSection};
 
 /// The current version of this `agde` library.
 pub const VERSION: semver::Version = semver::Version::new(0, 1, 0);
@@ -490,12 +488,12 @@ impl Manager {
     /// Be careful with [`EventKind::Modify`] as you NEED to have a
     /// [`EventKind::Create`] before it on the same resource.
     #[inline]
-    pub fn process_event(&mut self, event: impl IntoEvent<VecSection>) -> Message {
+    pub fn process_event(&mut self, event: impl IntoEvent) -> Message {
         let event = event.into_ev(self);
 
         let uuid = self.generate_uuid();
 
-        self.event_log.insert(&event, uuid);
+        self.event_log.insert(event.clone(), uuid);
 
         Message::new(MessageKind::Event(event), self.uuid(), uuid)
     }
@@ -616,14 +614,14 @@ impl Manager {
         &'a mut self,
         event: &'a DatafulEvent,
         message_uuid: Uuid,
-    ) -> Result<log::EventApplier<'a, VecSection>, log::Error> {
+    ) -> Result<log::EventApplier<'a>, log::Error> {
         let now = event::dur_now();
         // The timestamp is after now!
         if event.timestamp().saturating_sub(Duration::new(10, 0)) >= now {
             return Err(log::Error::EventInFuture);
         }
 
-        self.event_log.insert(event, message_uuid);
+        self.event_log.insert(event.clone(), message_uuid);
         Ok(self.event_log.event_applier(event, message_uuid))
     }
     /// Handles a [`MessageKind::EventUuidLogCheck`].

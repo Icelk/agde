@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
 use crate::event;
-use crate::{event::dur_now, section, DataSection, Event, EventKind, Section, SliceBuf, Uuid};
+use crate::{event::dur_now, section, Event, EventKind, Uuid};
 
 /// A received event.
 ///
@@ -19,7 +19,8 @@ use crate::{event::dur_now, section, DataSection, Event, EventKind, Section, Sli
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub(crate) struct ReceivedEvent {
-    pub(crate) event: Event<section::Empty>,
+    // `TODO`: store events with the unknown data segments containing no data.
+    pub(crate) event: Event,
     /// Message UUID.
     pub(crate) uuid: Uuid,
 }
@@ -116,8 +117,8 @@ impl Log {
     }
     /// `timestamp` should be the one in [`Event::timestamp`]
     #[inline]
-    pub(crate) fn insert(&mut self, event: &Event<impl Section>, message_uuid: Uuid) {
-        let event = event.into();
+    pub(crate) fn insert(&mut self, event: Event, message_uuid: Uuid) {
+        let event = event;
         let received = ReceivedEvent {
             event,
             uuid: message_uuid,
@@ -242,11 +243,11 @@ impl Log {
 
         event::Unwinder::new(&self.list[cutoff..])
     }
-    pub(crate) fn event_applier<'a, S: DataSection>(
+    pub(crate) fn event_applier<'a>(
         &'a mut self,
-        event: &'a Event<S>,
+        event: &'a Event,
         message_uuid: Uuid,
-    ) -> EventApplier<'a, S> {
+    ) -> EventApplier<'a> {
         fn slice_start(log: &Log, resource: &str, uuid: Uuid) -> usize {
             // `pos` is from the end of the list.
             for (pos, event) in log.list.iter().enumerate().rev() {
@@ -314,15 +315,15 @@ impl Log {
 // Unwinding `events` may not return [`Event::Delete`] if `modern_resource_name` is [`Some`]
 #[derive(Debug)]
 #[must_use]
-pub struct EventApplier<'a, S: DataSection> {
+pub struct EventApplier<'a> {
     /// Ordered from last (temporally).
     /// May possibly not contain `Self::event`.
     events: &'a [ReceivedEvent],
     modern_resource_name: Option<&'a str>,
     /// Needed because the event might be sorted out of the list; slow push.
-    event: &'a Event<S>,
+    event: &'a Event,
 }
-impl<'a, S: DataSection + Debug> EventApplier<'a, S> {
+impl<'a> EventApplier<'a> {
     /// The name of the modified resource on the local store.
     /// If this is [`None`], the resource this event applies to has been deleted since.
     /// Don't call [`Self::apply`] if that's the case.
@@ -333,7 +334,7 @@ impl<'a, S: DataSection + Debug> EventApplier<'a, S> {
     }
     /// Get a reference to the event to be applied.
     #[inline]
-    pub fn event(&self) -> &Event<S> {
+    pub fn event(&self) -> &Event {
         self.event
     }
     /// Must only be called if [`Self::event`] is [`EventKind::Modify`] &
@@ -353,10 +354,11 @@ impl<'a, S: DataSection + Debug> EventApplier<'a, S> {
     /// `resource` must be at least `max(resource.filled() + event.section().len_difference() + 1,
     /// event.section().end() + 1)`
     /// [`Section::apply_len`] guarantees this.
-    pub fn apply<T: AsMut<[u8]> + AsRef<[u8]>>(
+    pub fn apply(
         &self,
-        resource: &mut SliceBuf<T>,
-    ) -> Result<(), section::ApplyError> {
+        // resource: &mut SliceBuf<T>,
+        resource: &[u8],
+    ) -> Result<Vec<u8>, section::ApplyError> {
         let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
@@ -366,63 +368,67 @@ impl<'a, S: DataSection + Debug> EventApplier<'a, S> {
         let current_resource_name = if let Some(name) = self.modern_resource_name {
             name
         } else {
-            return Ok(());
+            // `TODO`: remove the `.to_vec`
+            return Ok(resource.to_vec());
         };
 
-        let events =
-            // Very pretty code.
-            {
-                let last = self.events.first();
+        // let events =
+        // // Very pretty code.
+        // {
+        // let last = self.events.first();
 
-                if let Some(last) = last {
-                    if last.event.timestamp() == self.event.timestamp() {
-                        if let EventKind::Modify(modify) = last.event.inner() {
-                            if ev.sections().len() == modify.sections().len()
-                                && modify.sections().iter().zip(ev.sections().iter()).all(
-                                    |(a, b)| {
-                                        a.start() == b.start()
-                                            && a.end() == b.end()
-                                            && a.new_len() == b.new_len()
-                                    },
-                                )
-                            {
-                                &self.events[1..]
-                            } else {
-                                self.events
-                            }
-                        } else {
-                            self.events
-                        }
-                    } else {
-                        self.events
-                    }
-                } else {
-                    self.events
-                }
-            };
-        let mut unwinder = event::Unwinder::new(events);
+        // if let Some(last) = last {
+        // if last.event.timestamp() == self.event.timestamp() {
+        // if let EventKind::Modify(modify) = last.event.inner() {
+        // if ev.data().len() == modify.data().len()
+        // && modify.data().iter().zip(ev.data().iter()).all(
+        // |(a, b)| {
+        // a.start() == b.start()
+        // && a.end() == b.end()
+        // && a.new_len() == b.new_len()
+        // },
+        // )
+        // {
+        // &self.events[1..]
+        // } else {
+        // self.events
+        // }
+        // } else {
+        // self.events
+        // }
+        // } else {
+        // self.events
+        // }
+        // } else {
+        // self.events
+        // }
+        // };
+        let mut unwinder = event::Unwinder::new(self.events);
 
-        match unwinder.unwind(resource, current_resource_name) {
-            Ok(()) => {}
-            Err(event::UnwindError::Apply(err)) => return Err(err),
+        let mut resource = match unwinder.unwind(resource, current_resource_name) {
+            Ok(r) => r,
+            Err(event::UnwindError::Apply(err)) => return Err(err.into()),
             Err(event::UnwindError::ResourceDestroyed) => {
                 unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
-        }
-
+        };
         // When back there, implement the event.
-        for section in ev.sections() {
-            section.apply(resource)?;
+        if ev.diff().apply_overlaps() {
+            let mut other = Vec::with_capacity(resource.len() + 32);
+            ev.diff().apply(&resource, &mut other)?;
+            resource = other;
+        } else {
+            ev.diff().apply_in_place(&mut resource)?;
         }
 
-        unwinder.rewind(resource)?;
+        resource = unwinder.rewind(&resource)?;
 
         // How will the revert and implement functions on modify work?
         // Can revert be a inverse and just call implement?
         // We need to modify the whole buffer when reverting
         // Directly modify `resource` as the buffer.
         // Have a `PartiallyUnknown` data type for the Sections which have removed data.
-        Ok(())
+        Ok(resource)
     }
 }
 

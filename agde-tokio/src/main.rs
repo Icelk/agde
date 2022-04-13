@@ -81,7 +81,6 @@ impl Metadata {
                             ResourceMeta {
                                 size: metadata.len(),
                                 current_mtime: Some(modified),
-                                // public_mtime: modified,
                             },
                         );
                     } else {
@@ -119,8 +118,6 @@ pub struct ResourceMeta {
     /// In that case, there's always a change. This can occur when data has been written to the
     /// public storage, and the current storage hasn't gotten that data yet.
     pub current_mtime: Option<SystemTime>,
-    // `TODO`: remove this, since we're not using it.
-    // pub public_mtime: SystemTime,
     pub size: u64,
 }
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -153,14 +150,15 @@ pub enum WriteMtime {
 pub type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type ReadFuture = BoxFut<Result<Option<Vec<u8>>, ()>>;
 pub type WriteFuture = BoxFut<Result<(), ()>>;
+pub type DeleteFuture = WriteFuture;
 pub type DiffFuture = BoxFut<Result<Vec<Change>, ()>>;
 pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
 /// The [`SystemTime`] is the time of modification.
 /// When [`Storage::Current`], this should be the time of last change.
 pub type WriteFn = Box<
-    dyn Fn(String, Storage, Vec<u8>, WriteMtime /*, ResourceMeta*/) -> WriteFuture + Send + Sync,
+    dyn Fn(String, Storage, Vec<u8>, WriteMtime) -> WriteFuture + Send + Sync,
 >;
-pub type DeleteFn = Box<dyn Fn(String, Storage) -> WriteFuture + Send + Sync>;
+pub type DeleteFn = Box<dyn Fn(String, Storage) -> DeleteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
 #[must_use]
 pub struct Options {
@@ -217,9 +215,9 @@ impl Options {
                     let mut buf = Vec::with_capacity(4096);
                     file.read_to_end(&mut buf).await.map_err(|_| ())?;
                     Ok(Some(buf))
-                })
+                }) as ReadFuture
             }),
-            write: Box::new(move |resource, storage, data, mtime /*, metadata*/| {
+            write: Box::new(move |resource, storage, data, mtime| {
                 let metadata = Arc::clone(&write_metadata);
                 let offline_metadata = Arc::clone(&write_offline_metadata);
                 Box::pin(async move {
@@ -252,7 +250,6 @@ impl Options {
                             };
                             let meta = ResourceMeta {
                                 current_mtime: mtime,
-                                // public_mtime: mtime,
                                 size: data.len() as u64,
                             };
                             metadata.map.insert(resource, meta);
@@ -286,7 +283,7 @@ impl Options {
                         }
                     }
                     Ok(())
-                })
+                }) as WriteFuture
             }),
             delete: Box::new(move |resource, storage| {
                 let metadata = Arc::clone(&delete_metadata);
@@ -321,7 +318,7 @@ impl Options {
                     }
 
                     Ok(())
-                })
+                }) as DeleteFuture
             }),
             rough_resource_diff: Box::new(move || {
                 let metadata = Arc::clone(&metadata);
@@ -366,7 +363,6 @@ impl Options {
                         }
                     }
                     {
-                        // let metadata = metadata.lock().await;
                         // `TODO`: Optimize this
                         *offline_metadata = metadata.clone();
                         futures::future::try_select(
@@ -378,7 +374,7 @@ impl Options {
                     }
                     debug!("Changed: {:?}", changed);
                     Ok(changed)
-                })
+                }) as DiffFuture
             }),
             startup_timeout: Duration::from_secs(7),
             sync_interval: Duration::from_secs(5),
@@ -595,7 +591,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
                                         if let Some(resource) = resource {
                                             match applier.event().inner() {
-                                                agde::EventKind::Modify(ev) => {
+                                                agde::EventKind::Modify(_ev) => {
                                                     let resource_data = (options.read)(
                                                         resource.to_owned(),
                                                         Storage::Public,
@@ -611,12 +607,12 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                             String::from_utf8_lossy(&data)
                                                         );
 
-                                                        let mut slice =
-                                                            agde::SliceBuf::with_whole(&mut data);
-                                                        slice.extend_to_needed(ev.sections(), 0);
-                                                        applier.apply(&mut slice).unwrap();
-                                                        let len = slice.filled().len();
-                                                        data.truncate(len);
+                                                        /* let mut slice = */
+                                                            /* agde::SliceBuf::with_whole(&mut data); */
+                                                        /* slice.extend_to_needed(ev.data(), 0); */
+                                                        data = applier.apply(&data).unwrap();
+                                                        /* let len = slice.filled().len(); */
+                                                        /* data.truncate(len); */
                                                         (options.write)(
                                                             resource.to_owned(),
                                                             Storage::Public,
@@ -719,7 +715,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             let event = match diff {
                                 // `TODO`: Give successor
                                 Change::Delete(res) => agde::Event::with_timestamp(
-                                    agde::event::Kind::<agde::VecSection>::Delete(
+                                    agde::event::Kind::Delete(
                                         agde::event::Delete::new(res, None),
                                     ),
                                     manager.uuid(),
@@ -728,7 +724,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 Change::Modify(res, created) => {
                                     if created {
                                         let event = agde::Event::with_timestamp(
-                                            agde::event::Kind::<agde::VecSection>::Create(
+                                            agde::event::Kind::Create(
                                                 agde::event::Create::new(res.clone()),
                                             ),
                                             manager.uuid(),
@@ -751,26 +747,19 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
                                     let mut unwinder = manager.unwinder_to(last_check);
 
-                                    let mut base_slice = agde::SliceBuf::with_whole(&mut base);
-                                    base_slice.extend_to_needed(unwinder.sections(&res).expect("error when unwinding public storage. Resource name is valid."), 0);
+                                    /* let mut base_slice = agde::SliceBuf::with_whole(&mut base); */
+                                    /* base_slice.extend_to_needed(unwinder.sections(&res).expect("error when unwinding public storage. Resource name is valid."), 0); */
 
                                     info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
 
-                                    unwinder.unwind(&mut base_slice, &res).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
+                                    base = unwinder.unwind(&base, &res).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
 
                                     warn!(
                                         "Unwould public data, now resource at: '''\n{:?}\n'''",
-                                        base_slice
+                                        base
                                     );
 
-                                    let len = base_slice.filled().len();
-                                    base.truncate(len);
-                                    let event = agde::event::Modify::diff(res, data, &base);
-                                    // let event = agde::event::Modify::new(
-                                    // res,
-                                    // vec![agde::VecSection::whole_resource(len, data)],
-                                    // Some(&base),
-                                    // );
+                                    let event = agde::event::Modify::new(res, &data, &base);
 
                                     agde::Event::with_timestamp(
                                         agde::event::Kind::Modify(event),
@@ -806,7 +795,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         let resource = applier.resource().expect("our own messages are too old");
 
                         match applier.event().inner() {
-                            agde::EventKind::Modify(ev) => {
+                            agde::EventKind::Modify(_ev) => {
                                 let mut resource_data =
                                         (options.read)(resource.to_owned(), Storage::Public)
                                             .await
@@ -814,13 +803,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                             // don't expect, just make a new file.
                                             .expect("we trust our own data - there must have been a create event before modify");
 
-                                let mut slice = agde::SliceBuf::with_whole(&mut resource_data);
-                                slice.extend_to_needed(ev.sections(), 0);
 
-                                applier.apply(&mut slice).unwrap();
-
-                                let len = slice.filled().len();
-                                resource_data.truncate(len);
+                                resource_data = applier.apply(&resource_data).unwrap();
 
                                 (options.write)(
                                     resource.to_owned(),
