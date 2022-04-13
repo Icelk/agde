@@ -543,6 +543,7 @@ pub struct SignatureBuilder {
 
     current: HashBuilder,
     len: usize,
+    total: usize,
 }
 impl SignatureBuilder {
     /// The `hasher` is used as the template hasher from which all other hashers are cloned.
@@ -556,6 +557,7 @@ impl SignatureBuilder {
 
             current: algo.builder(block_size),
             len: 0,
+            total: 0,
         }
     }
     const fn block_available(&self) -> usize {
@@ -572,6 +574,8 @@ impl SignatureBuilder {
     pub fn write(&mut self, data: &[u8]) {
         let mut data = data;
         let mut position = 0;
+
+        self.total += data.len();
 
         while data.len() >= self.block_available() {
             let bytes = &data[..self.block_available()];
@@ -601,6 +605,7 @@ impl SignatureBuilder {
             algo,
             blocks,
             block_size,
+            original_data_len: self.total,
         }
     }
 }
@@ -613,6 +618,7 @@ pub struct Signature {
     algo: HashAlgorithm,
     blocks: Vec<HashResult>,
     block_size: usize,
+    original_data_len: usize,
 }
 impl Signature {
     /// Creates a new [`SignatureBuilder`] in which data can be added to create a list of hashes
@@ -863,7 +869,7 @@ impl Signature {
         Difference {
             segments,
             block_size,
-            original_data_len: data.len(),
+            original_data_len: self.original_data_len,
         }
     }
 }
@@ -1450,14 +1456,11 @@ impl Difference {
         let new_len = current.len().max(self.original_data_len);
         target.reserve(new_len);
         // SAFETY: we copy the data up to `current.len()`
-        unsafe { target.set_len(current.len()) };
+        // if new_len > current.len, the rest is filled below.
+        unsafe { target.set_len(new_len) };
         target[..current.len()].copy_from_slice(current);
 
-        // `TODO`: use better memory copy to fill with byte?
-        let additional_in_original = self.original_data_len.checked_sub(target.len());
-        if let Some(additional) = additional_in_original {
-            target.extend(std::iter::repeat(fill_byte).take(additional));
-        }
+        target[current.len()..].fill(fill_byte);
 
         let block_size = self.block_size();
 
@@ -1472,17 +1475,30 @@ impl Difference {
                     if end > target.len() {
                         return Err(Roob);
                     }
-                    if index+block_size > current.len(){return Err(Roob)}
-                    target[seg.start()..end].copy_from_slice(&current[index..index+block_size]);
+                    if index + block_size > current.len() {
+                        return Err(Roob);
+                    }
+                    target[seg.start()..end].copy_from_slice(&current[index..index + block_size]);
+                    index += block_size;
                 }
                 Segment::BlockRef(seg) => {
                     let end = seg.end(block_size);
-                    if end > target.len() {
+                    let missing = end.checked_sub(target.len());
+                    let mut offset = 0;
+                    if let Some(missing) = missing {
+                        if missing >= block_size {
+                            return Err(Roob);
+                        }
+                        offset = missing;
+                    }
+                    let current_end = index + block_size * seg.block_count() - offset;
+                    let current_end = current_end.min(current.len());
+                    if current_end > current.len() {
                         return Err(Roob);
                     }
-                    let current_end = index+block_size*seg.block_count();
-                    if current_end > current.len(){return Err(Roob)}
-                    target[seg.start()..end].copy_from_slice(&current[index..current_end]);
+                    target[seg.start()..seg.start() + current_end - index]
+                        .copy_from_slice(&current[index..current_end]);
+                    index += block_size * seg.block_count();
                 }
             }
         }
