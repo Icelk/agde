@@ -700,10 +700,11 @@ impl Signature {
         // Special case: Signature contains no hashes.
         // Just send the whole input.
         if self.blocks().is_empty() {
-            let data = Segment::unknown(data);
+            let segment = Segment::unknown(data);
             return Difference {
-                segments: vec![data],
+                segments: vec![segment],
                 block_size,
+                original_data_len: data.len(),
             };
         }
 
@@ -862,6 +863,7 @@ impl Signature {
         Difference {
             segments,
             block_size,
+            original_data_len: data.len(),
         }
     }
 }
@@ -1023,6 +1025,7 @@ impl Segment {
 pub struct Difference {
     segments: Vec<Segment>,
     block_size: usize,
+    original_data_len: usize,
 }
 impl Difference {
     /// Returns a reference to all the internal [`Segment`]s.
@@ -1279,6 +1282,7 @@ impl Difference {
         Ok(Difference {
             segments,
             block_size,
+            original_data_len: self.original_data_len,
         })
     }
     /// Apply `diff` to the `base` data base, appending the result to `out`.
@@ -1413,6 +1417,76 @@ impl Difference {
         // shorten the vec if the new length is less than old
         base.truncate(position);
 
+        Ok(())
+    }
+
+    /// Reverts `current` to what it would have been before applying this diff.
+    /// This completely overrides `target`.
+    ///
+    /// Say I have the data: `hello there - from vim`
+    /// and the diff is `[Segment::Ref(0..8)]`, the new data (`current`) will be
+    /// `hello th`. The length of the original data is stored, but the lost bytes are
+    /// unrecoverable. They are filled with `fill_byte`. That should probably be `b' '` for text
+    /// applications.
+    ///
+    /// # Security
+    ///
+    /// The `diff` should be sanitized if input is suspected to be malicious.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
+    #[allow(clippy::uninit_vec)] // we know what we're doing
+    pub fn revert(
+        &self,
+        current: &[u8],
+        target: &mut Vec<u8>,
+        fill_byte: u8,
+    ) -> Result<(), ApplyError> {
+        use ApplyError::RefOutOfBounds as Roob;
+
+        // Make buffer contain `current` and then optionally `fill_byte`s.
+        target.clear();
+        let new_len = current.len().max(self.original_data_len);
+        target.reserve(new_len);
+        // SAFETY: we copy the data up to `current.len()`
+        unsafe { target.set_len(current.len()) };
+        target[..current.len()].copy_from_slice(current);
+
+        // `TODO`: use better memory copy to fill with byte?
+        let additional_in_original = self.original_data_len.checked_sub(target.len());
+        if let Some(additional) = additional_in_original {
+            target.extend(std::iter::repeat(fill_byte).take(additional));
+        }
+
+        let block_size = self.block_size();
+
+        let mut index = 0;
+        for segment in self.segments() {
+            match segment {
+                Segment::Unknown(unknown) => {
+                    index += unknown.data().len();
+                }
+                Segment::Ref(seg) => {
+                    let end = seg.end(block_size);
+                    if end > target.len() {
+                        return Err(Roob);
+                    }
+                    if index+block_size > current.len(){return Err(Roob)}
+                    target[seg.start()..end].copy_from_slice(&current[index..index+block_size]);
+                }
+                Segment::BlockRef(seg) => {
+                    let end = seg.end(block_size);
+                    if end > target.len() {
+                        return Err(Roob);
+                    }
+                    let current_end = index+block_size*seg.block_count();
+                    if current_end > current.len(){return Err(Roob)}
+                    target[seg.start()..end].copy_from_slice(&current[index..current_end]);
+                }
+            }
+        }
+        target.truncate(self.original_data_len);
         Ok(())
     }
 }
