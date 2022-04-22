@@ -1300,6 +1300,47 @@ impl<S: ExtendVec> Difference<S> {
         self.block_size
     }
 
+    /// Set the block size.
+    ///
+    /// Use [`Difference::minify`] to also trim down the size of the contained data.
+    ///
+    /// `block_size` must be small than [`Self::block_size`].
+    /// [`Self::block_size`] must also be dividable by it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MinifyError::NewLarger`] if `block_size` >= [`Self::block_size`] and
+    /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
+    /// each other.
+    pub fn with_block_size(&mut self, block_size: usize) -> Result<(), MinifyError> {
+        if self.block_size() <= block_size {
+            return Err(MinifyError::NewLarger);
+        }
+        let block_size_shrinkage = self.block_size() / block_size;
+        let block_size_shrinkage_remainder = self.block_size() % block_size;
+        if block_size_shrinkage_remainder != 0 {
+            return Err(MinifyError::NotMultiple);
+        }
+
+        for seg in &mut self.segments {
+            match seg {
+                Segment::Ref(ref_seg) => {
+                    let mut block_seg: SegmentBlockRef = (*ref_seg).into();
+                    block_seg.multiply(block_size_shrinkage);
+                    *seg = Segment::BlockRef(block_seg);
+                }
+                Segment::BlockRef(ref_seg) => {
+                    ref_seg.multiply(block_size_shrinkage);
+                }
+                Segment::Unknown(_) => {}
+            }
+        }
+
+        self.block_size = block_size;
+
+        Ok(())
+    }
+
     /// Returns whether or not applying this diff is impossible to do on a single [`Vec`].
     ///
     /// If the returned value is `true`, the apply function will try to read data from parts of the
