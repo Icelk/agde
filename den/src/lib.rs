@@ -1303,7 +1303,7 @@ impl<S: ExtendVec> Difference<S> {
     /// Returns a mutable reference to all the internal [`Segment`]s.
     ///
     /// Don't use this unless you know what you're doing.
-    /// 
+    ///
     /// Using this function, you can change the building blocks of the diff.
     /// This can be useful for transforming it to use another [`ExtendVec`] for compact metadata
     /// storage (which can later be used to revert).
