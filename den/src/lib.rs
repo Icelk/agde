@@ -978,6 +978,7 @@ impl SegmentRef {
 pub struct SegmentBlockRef {
     /// Start of segment with a length of [`Self::block_count`]*[`Signature::block_size`].
     pub start: usize,
+    /// The number of blocks this segment references.
     pub block_count: usize,
 }
 impl SegmentBlockRef {
@@ -1030,6 +1031,7 @@ impl From<SegmentRef> for SegmentBlockRef {
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct SegmentUnknown<S: ExtendVec = Vec<u8>> {
+    /// The data source to fill the unknown with.
     pub source: S,
 }
 impl<S: ExtendVec> SegmentUnknown<S> {
