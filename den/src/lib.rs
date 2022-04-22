@@ -1299,6 +1299,26 @@ impl<S: ExtendVec> Difference<S> {
     pub fn block_size(&self) -> usize {
         self.block_size
     }
+    /// Approximates the size this takes up in memory or when serializing it with a binary
+    /// serializer.
+    /// The returned value is in bytes.
+    #[must_use]
+    pub fn approximate_binary_size(&self) -> usize {
+        let mut total = 0;
+        // The vec is 3 usizes, and we store two more. On 64-bit platforms (which I assume), these
+        // take up 8 bytes each.
+        total += (3 + 2) * 8;
+        for seg in &self.segments {
+            // 2 because `&[u8]` is 2 bytes wide and
+            // SegmentBlockRef contains two usizes.
+            total += 8 * 2;
+            match seg {
+                Segment::Ref(_) | Segment::BlockRef(_) => {}
+                Segment::Unknown(seg) => total += seg.source().len(),
+            }
+        }
+        total
+    }
 
     /// Set the block size.
     ///

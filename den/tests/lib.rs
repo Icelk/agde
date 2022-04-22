@@ -230,10 +230,16 @@ fn minify() {
         }
     }
     assert_eq!(total, 66);
+
+    let size = diff.approximate_binary_size();
+
     let diff = diff
         .minify(4, local_data.as_bytes())
         .expect("Failed to minify a correct diff.");
     println!("Minified diff {:#?}", diff);
+    let minified_size= diff.approximate_binary_size();
+    println!("Original size: {size}, minified size: {minified_size}");
+    assert!(minified_size <= size);
     total = 0;
     for seg in diff.segments() {
         if let Segment::Unknown(seg) = seg {
