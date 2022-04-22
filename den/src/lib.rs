@@ -530,6 +530,53 @@ const fn zeroed<const SIZE: usize>() -> [u8; SIZE] {
     [0; SIZE]
 }
 
+/// A trait to fill extend a [`Vec`] with more data.
+///
+/// This is by default implemented by all types which can cohere to a byte slice `&[u8]`.
+pub trait ExtendVec: Debug {
+    /// Extend `vec` with our data.
+    /// This must extend with [`ExtendVec::len`] bytes.
+    fn extend(&self, vec: &mut Vec<u8>);
+    /// Copy the bytes of this struct to `position` in `vec`, overriding any data there.
+    /// This must replace [`ExtendVec::len`] bytes.
+    fn replace(&self, vec: &mut Vec<u8>, position: usize);
+    /// The length of the data of this struct.
+    fn len(&self) -> usize;
+    /// If no data is available.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+impl<T: AsRef<[u8]> + Debug> ExtendVec for T {
+    fn extend(&self, vec: &mut Vec<u8>) {
+        let slice = self.as_ref();
+        // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
+        vec.reserve(slice.len());
+        let len = vec.len();
+        // SAFETY: We get uninitialized bytes and write to them. This is fine.
+        // The length is guaranteed to be allocated from above.
+        let destination = unsafe { vec.get_unchecked_mut(len..len + slice.len()) };
+        destination.copy_from_slice(slice);
+        // SAFETY: We set the length to that we've written to above.
+        unsafe { vec.set_len(vec.len() + slice.len()) };
+    }
+    #[allow(clippy::uninit_vec)] // we know what we're doing
+    fn replace(&self, vec: &mut Vec<u8>, position: usize) {
+        let slice = self.as_ref();
+        let new_len = (position + slice.len()).max(vec.len());
+        // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
+        vec.reserve(new_len - vec.len());
+        // SAFETY: We set the length to what we write below.
+        unsafe { vec.set_len(new_len) };
+        let destination = &mut vec[position..(position + slice.len())];
+        destination.copy_from_slice(slice);
+    }
+
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+}
+
 /// Builder of a [`Signature`].
 /// Created using constructors on [`Signature`] (e.g. [`Signature::with_algorithm`]);
 ///
@@ -969,8 +1016,19 @@ impl From<SegmentRef> for SegmentBlockRef {
 /// A segment with unknown contents. This will transmit the data.
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct SegmentUnknown {
-    source: Vec<u8>,
+pub struct SegmentUnknown<S: ExtendVec = Vec<u8>> {
+    source: S,
+}
+impl<S: ExtendVec> SegmentUnknown<S> {
+    /// Create a new [`SegmentUnknown`] from `source`.
+    /// The methods on [`ExtendVec`] is then used to fill the target.
+    pub fn new(source: S) -> Self {
+        Self { source }
+    }
+    /// Get a reference to the data source.
+    pub fn source(&self) -> &S {
+        &self.source
+    }
 }
 impl SegmentUnknown {
     /// Gets a reference to the data transmitted.
@@ -988,17 +1046,25 @@ impl SegmentUnknown {
         self.source
     }
 }
-impl Debug for SegmentUnknown {
+impl<S: ExtendVec + std::any::Any> Debug for SegmentUnknown<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SegmentUnknown")
-            .field("source", &String::from_utf8_lossy(&self.source))
-            .finish()
+        use std::any::Any;
+        // `TODO`: remove the downcasting when specialization lands.
+        if let Some(vec) = (&self.source as &dyn Any).downcast_ref::<Vec<u8>>() {
+            f.debug_struct("SegmentUnknown")
+                .field("source", &String::from_utf8_lossy(vec))
+                .finish()
+        } else {
+            f.debug_struct("SegmentUnknown")
+                .field("source", &self.source)
+                .finish()
+        }
     }
 }
 /// A segment of data corresponding to a multiple of [`Difference::block_size`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub enum Segment {
+pub enum Segment<S: ExtendVec + 'static = Vec<u8>> {
     /// A reference to a block of data.
     ///
     /// This is separate from [`Self::BlockRef`] to save 8 bytes when only 1 ref block is found.
@@ -1007,13 +1073,15 @@ pub enum Segment {
     /// Reference to successive blocks of data.
     BlockRef(SegmentBlockRef),
     /// Data unknown to the one who sent the [`Signature`].
-    Unknown(SegmentUnknown),
+    Unknown(SegmentUnknown<S>),
 }
-impl Segment {
+impl<S: ExtendVec> Segment<S> {
     #[inline]
     fn reference(data: BlockData) -> Self {
         Self::Ref(SegmentRef { start: data.start })
     }
+}
+impl Segment {
     /// Creates a [`Segment::Unknown`] with `data` as the unknown part.
     ///
     /// Should mainly be used in testing.
@@ -1028,94 +1096,12 @@ impl Segment {
 #[allow(clippy::unsafe_derive_deserialize)] // See SAFETY notes.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct Difference {
-    segments: Vec<Segment>,
+pub struct Difference<S: ExtendVec + 'static = Vec<u8>> {
+    segments: Vec<Segment<S>>,
     block_size: usize,
     original_data_len: usize,
 }
 impl Difference {
-    /// Returns a reference to all the internal [`Segment`]s.
-    ///
-    /// This can be used for implementing algorithms other than [`Self::apply`] to apply the data.
-    ///
-    /// > `agde` uses this to convert from this format to their `Section` style.
-    pub fn segments(&self) -> &[Segment] {
-        &self.segments
-    }
-    /// Turns this difference into it's list of segments.
-    ///
-    /// Prefer to use [`Self::segments`] if you don't plan on consuming the internal data.
-    #[must_use]
-    pub fn into_segments(self) -> Vec<Segment> {
-        self.segments
-    }
-    /// The block size used by this diff.
-    #[must_use]
-    pub const fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    /// Returns whether or not applying this diff is impossible to do on a single [`Vec`].
-    ///
-    /// If the returned value is `true`, the apply function will try to read data from parts of the
-    /// `Vec` already overridden.
-    /// You should be able to use a single `Vec` if the returned value is `false`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use den::*;
-    /// let base_data = b"This is a document everyone has. It's about some new difference library.";
-    /// let target_data = b"This is a document only I have. It's about some new difference library.";
-    /// let mut base_data = base_data.to_vec();
-    ///
-    /// let mut signature = Signature::new(128);
-    /// signature.write(&base_data);
-    /// let signature = signature.finish();
-    ///
-    /// let diff = signature.diff(target_data);
-    ///
-    /// // This is the small diff you could serialize with Serde and send.
-    /// let minified = diff.minify(8, &base_data)
-    ///     .expect("This won't panic, as the data hasn't changed from calling the other functions.");
-    ///
-    /// let data = if minified.apply_overlaps() {
-    ///     let mut data = Vec::new();
-    ///     minified.apply(&base_data, &mut data);
-    ///     data
-    /// } else {
-    ///     minified.apply_in_place(&mut base_data);
-    ///     base_data
-    /// };
-    ///
-    /// assert_eq!(data, target_data);
-    /// ```
-
-    #[must_use]
-    pub fn apply_overlaps(&self) -> bool {
-        let mut position = 0;
-        for segment in self.segments() {
-            match segment {
-                Segment::Ref(seg) => {
-                    if seg.start() < position {
-                        return true;
-                    }
-                    position += self.block_size();
-                }
-                Segment::BlockRef(seg) => {
-                    if seg.start() < position {
-                        return true;
-                    }
-                    position += seg.block_count() * self.block_size();
-                }
-                Segment::Unknown(seg) => {
-                    position += seg.data().len();
-                }
-            }
-        }
-        false
-    }
-
     /// Changes the block size to `block_size`, shrinking the [`Segment::Unknown`]s in the process.
     /// This results in a smaller diff.
     ///
@@ -1291,6 +1277,89 @@ impl Difference {
             original_data_len: self.original_data_len,
         })
     }
+}
+impl<S: ExtendVec> Difference<S> {
+    /// Returns a reference to all the internal [`Segment`]s.
+    ///
+    /// This can be used for implementing algorithms other than [`Self::apply`] to apply the data.
+    ///
+    /// > `agde` uses this to convert from this format to their `Section` style.
+    pub fn segments(&self) -> &[Segment<S>] {
+        &self.segments
+    }
+    /// Turns this difference into it's list of segments.
+    ///
+    /// Prefer to use [`Self::segments`] if you don't plan on consuming the internal data.
+    #[must_use]
+    pub fn into_segments(self) -> Vec<Segment<S>> {
+        self.segments
+    }
+    /// The block size used by this diff.
+    #[must_use]
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// Returns whether or not applying this diff is impossible to do on a single [`Vec`].
+    ///
+    /// If the returned value is `true`, the apply function will try to read data from parts of the
+    /// `Vec` already overridden.
+    /// You should be able to use a single `Vec` if the returned value is `false`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use den::*;
+    /// let base_data = b"This is a document everyone has. It's about some new difference library.";
+    /// let target_data = b"This is a document only I have. It's about some new difference library.";
+    /// let mut base_data = base_data.to_vec();
+    ///
+    /// let mut signature = Signature::new(128);
+    /// signature.write(&base_data);
+    /// let signature = signature.finish();
+    ///
+    /// let diff = signature.diff(target_data);
+    ///
+    /// // This is the small diff you could serialize with Serde and send.
+    /// let minified = diff.minify(8, &base_data)
+    ///     .expect("This won't panic, as the data hasn't changed from calling the other functions.");
+    ///
+    /// let data = if minified.apply_overlaps() {
+    ///     let mut data = Vec::new();
+    ///     minified.apply(&base_data, &mut data);
+    ///     data
+    /// } else {
+    ///     minified.apply_in_place(&mut base_data);
+    ///     base_data
+    /// };
+    ///
+    /// assert_eq!(data, target_data);
+    /// ```
+    #[must_use]
+    pub fn apply_overlaps(&self) -> bool {
+        let mut position = 0;
+        for segment in self.segments() {
+            match segment {
+                Segment::Ref(seg) => {
+                    if seg.start() < position {
+                        return true;
+                    }
+                    position += self.block_size();
+                }
+                Segment::BlockRef(seg) => {
+                    if seg.start() < position {
+                        return true;
+                    }
+                    position += seg.block_count() * self.block_size();
+                }
+                Segment::Unknown(seg) => {
+                    position += seg.source().len();
+                }
+            }
+        }
+        false
+    }
+
     /// Apply `diff` to the `base` data base, appending the result to `out`.
     ///
     /// # Security
@@ -1301,17 +1370,6 @@ impl Difference {
     ///
     /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
     pub fn apply(&self, base: &[u8], out: &mut Vec<u8>) -> Result<(), ApplyError> {
-        fn extend_vec_slice<T: Copy>(vec: &mut Vec<T>, slice: &[T]) {
-            // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
-            vec.reserve(slice.len());
-            let len = vec.len();
-            // SAFETY: We get uninitialized bytes and write to them. This is fine.
-            // The length is guaranteed to be allocated from above.
-            let destination = unsafe { vec.get_unchecked_mut(len..len + slice.len()) };
-            destination.copy_from_slice(slice);
-            // SAFETY: We set the length to that we've written to above.
-            unsafe { vec.set_len(vec.len() + slice.len()) };
-        }
         use ApplyError::RefOutOfBounds as Roob;
 
         let block_size = self.block_size();
@@ -1322,7 +1380,7 @@ impl Difference {
                     let end = cmp::min(ref_segment.end(block_size), base.len());
 
                     let data = base.get(start..end).ok_or(Roob)?;
-                    extend_vec_slice(out, data);
+                    data.extend(out);
                 }
                 Segment::BlockRef(block_ref_segment) => {
                     let start = block_ref_segment.start;
@@ -1335,11 +1393,12 @@ impl Difference {
                     });
 
                     let data = base.get(start..end).ok_or(Roob)?;
-                    extend_vec_slice(out, data);
+                    data.extend(out);
                 }
                 Segment::Unknown(unknown_segment) => {
                     let data = &unknown_segment.source;
-                    extend_vec_slice(out, data);
+                    data.extend(out);
+                    // extend_vec_slice(out, data);
                 }
             }
         }
@@ -1373,16 +1432,6 @@ impl Difference {
             unsafe { vec.set_len(new_len) };
             vec.copy_within(range, position);
         }
-        #[allow(clippy::uninit_vec)] // we know what we're doing
-        fn extend_vec_slice<T: Copy>(vec: &mut Vec<T>, slice: &[T], position: usize) {
-            let new_len = (position + slice.len()).max(vec.len());
-            // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
-            vec.reserve(new_len - vec.len());
-            // SAFETY: We set the length to what we write below.
-            unsafe { vec.set_len(new_len) };
-            let destination = &mut vec[position..(position + slice.len())];
-            destination.copy_from_slice(slice);
-        }
         use ApplyError::RefOutOfBounds as Roob;
 
         let block_size = self.block_size();
@@ -1415,7 +1464,7 @@ impl Difference {
                 }
                 Segment::Unknown(unknown_segment) => {
                     let data = &unknown_segment.source;
-                    extend_vec_slice(base, data, position);
+                    data.replace(base, position);
                     position += data.len();
                 }
             }
@@ -1468,7 +1517,7 @@ impl Difference {
         for segment in self.segments() {
             match segment {
                 Segment::Unknown(unknown) => {
-                    index += unknown.data().len();
+                    index += unknown.source().len();
                 }
                 Segment::Ref(seg) => {
                     let end = seg.end(block_size);
