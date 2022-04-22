@@ -947,7 +947,7 @@ struct BlockData {
 #[must_use]
 pub struct SegmentRef {
     /// Start of segment with a length of the [`Signature::block_size`].
-    start: usize,
+    pub start: usize,
 }
 impl SegmentRef {
     /// The start in the base resource this reference is pointing to.
@@ -963,6 +963,12 @@ impl SegmentRef {
     pub fn end(self, block_size: usize) -> usize {
         self.start() + block_size
     }
+    /// Get a new [`SegmentBlockRef`] with [`Self::start`] set to `start`.
+    #[inline]
+    pub fn with_start(mut self, start: usize) -> Self {
+        self.start = start;
+        self
+    }
 }
 /// Several [`SegmentRef`] after each other.
 ///
@@ -971,8 +977,8 @@ impl SegmentRef {
 #[must_use]
 pub struct SegmentBlockRef {
     /// Start of segment with a length of [`Self::block_count`]*[`Signature::block_size`].
-    start: usize,
-    block_count: usize,
+    pub start: usize,
+    pub block_count: usize,
 }
 impl SegmentBlockRef {
     /// The start in the base resource this reference is pointing to.
@@ -993,14 +999,21 @@ impl SegmentBlockRef {
     pub fn end(self, block_size: usize) -> usize {
         self.start + self.block_count * block_size
     }
+    /// Get a new [`SegmentBlockRef`] with [`Self::start`] set to `start`.
     #[inline]
-    fn extend(&mut self, n: usize) {
+    pub fn with_start(mut self, start: usize) -> Self {
+        self.start = start;
+        self
+    }
+    /// Add `n` to [`Self::block_count`].
+    #[inline]
+    pub fn extend(&mut self, n: usize) {
         self.block_count += n;
     }
     /// Multiplies the count of blocks.
     /// Can be useful if the block size changes.
     #[inline]
-    fn multiply(&mut self, n: usize) {
+    pub fn multiply(&mut self, n: usize) {
         self.block_count *= n;
     }
 }
@@ -1017,7 +1030,7 @@ impl From<SegmentRef> for SegmentBlockRef {
 #[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct SegmentUnknown<S: ExtendVec = Vec<u8>> {
-    source: S,
+    pub source: S,
 }
 impl<S: ExtendVec> SegmentUnknown<S> {
     /// Create a new [`SegmentUnknown`] from `source`.
@@ -1286,6 +1299,17 @@ impl<S: ExtendVec> Difference<S> {
     /// > `agde` uses this to convert from this format to their `Section` style.
     pub fn segments(&self) -> &[Segment<S>] {
         &self.segments
+    }
+    /// Returns a mutable reference to all the internal [`Segment`]s.
+    ///
+    /// Don't use this unless you know what you're doing.
+    /// 
+    /// Using this function, you can change the building blocks of the diff.
+    /// This can be useful for transforming it to use another [`ExtendVec`] for compact metadata
+    /// storage (which can later be used to revert).
+    #[must_use]
+    pub fn segments_mut(&mut self) -> &mut Vec<Segment<S>> {
+        &mut self.segments
     }
     /// Turns this difference into it's list of segments.
     ///
