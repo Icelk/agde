@@ -368,7 +368,6 @@ impl<'a> EventApplier<'a> {
     /// bounds.
     pub fn apply(
         &self,
-        // resource: &mut SliceBuf<T>,
         resource: &[u8],
     ) -> Result<Vec<u8>, ApplyError> {
         let ev = if let EventKind::Modify(ev) = self.event.inner() {

@@ -308,7 +308,6 @@ impl<'a> Unwinder<'a> {
     ///
     /// Will never return [`UnwindError::Apply`].
     pub(crate) fn check_name(&self, modern_resource_name: &'a str) -> Result<(), UnwindError> {
-        println!("CHeking name, events: {:?}", self.events);
         for log_event in self.events {
             if log_event.event.resource() == modern_resource_name {
                 match &log_event.event.inner() {
