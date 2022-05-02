@@ -811,7 +811,6 @@ impl Signature {
                             if let Some(block) = blocks.next() {
                                 // check hash(clone rolling hash), if matches with end of prior,
                                 // add 1 to current score & max = max.max(current)
-                                // let mut hasher = self.algorithm().builder(block_size);
                                 hasher.write(block, Some(blocks.pos() - 1));
                                 let hash = hasher.finish_reset().to_bytes();
 
@@ -1046,12 +1045,12 @@ impl<S: ExtendVec> SegmentUnknown<S> {
     }
 }
 impl SegmentUnknown {
-    /// Gets a reference to the data transmitted.
+    /// Get a reference to the data transmitted.
     #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.source
     }
-    /// Gets a mutable reference to the internal data [`Vec`].
+    /// Get a mutable reference to the internal data [`Vec`].
     pub fn data_mut(&mut self) -> &mut Vec<u8> {
         &mut self.source
     }
@@ -1146,22 +1145,7 @@ impl Difference {
                                     // The previous end is this start.
                                     seg.extend(item.block_count());
                                 } else {
-                                    // Check if block segment is only reference.
-                                    // This will never happen above, as we always add to it.
-                                    // This assumes [`SegmentBlockRef::block_count`] is >= 1
-                                    // if item.block_count() == 1 {
-                                    // segments
-                                    // .push(Segment::Ref(SegmentRef { start: item.start() }));
-                                    // } else {
                                     segments.push(Segment::BlockRef(item));
-                                    // }
-                                    // let seg = *seg;
-                                    // if seg.block_count() == 1 {
-                                    // segments
-                                    // .push(Segment::Ref(SegmentRef { start: seg.start() }));
-                                    // } else {
-                                    // segments.push(Segment::BlockRef(seg));
-                                    // }
                                 }
                             }
                             Segment::Unknown(_) => segments.push(Segment::BlockRef(item)),
@@ -1485,7 +1469,6 @@ impl<S: ExtendVec> Difference<S> {
                 Segment::Unknown(unknown_segment) => {
                     let data = &unknown_segment.source;
                     data.extend(out);
-                    // extend_vec_slice(out, data);
                 }
             }
         }
