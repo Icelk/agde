@@ -1262,8 +1262,9 @@ impl Difference {
                     let new = cursor + seg.block_count() * block_size;
                     if base.len() <= new {
                         let diff = new - base.len();
-                        // +7 to ceil the value
-                        let remove_blocks = (diff + 7) / block_size;
+                        // +block_size-1 to ceil the value
+                        // let remove_blocks = ((diff + 1).saturating_sub(block_size)) / block_size;
+                        let remove_blocks = (diff) / block_size;
                         seg.block_count -= remove_blocks;
                     }
                 }
@@ -1459,11 +1460,11 @@ impl<S: ExtendVec> Difference<S> {
                     let start = block_ref_segment.start;
                     let end = cmp::min(block_ref_segment.end(block_size), base.len());
                     // Check that only the last ref goes past the end.
-                    debug_assert!(if end == base.len() {
-                        block_ref_segment.end(block_size) - block_size < base.len()
-                    } else {
-                        true
-                    });
+                    if end == base.len()
+                        && block_ref_segment.end(block_size) - block_size > base.len()
+                    {
+                        return Err(Roob);
+                    }
 
                     let data = base.get(start..end).ok_or(Roob)?;
                     data.extend(out);
