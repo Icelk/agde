@@ -1180,6 +1180,7 @@ impl Difference {
                     let mut block_seg: SegmentBlockRef = (*seg).into();
                     // Multiply all block lengths by `block_size_shrinkage` to make them the length
                     // of new `block_size`.
+                    println!("Ref, mul with {block_size_shrinkage}: {block_seg:?}");
                     block_seg.multiply(block_size_shrinkage);
                     push_segment(&mut segments, Segment::BlockRef(block_seg), block_size);
                 }
@@ -1229,6 +1230,7 @@ impl Difference {
                     };
 
                     if let Some((base_data, start)) = base_data {
+                        println!("minify {:?} at {start}", std::str::from_utf8(base_data));
                         let mut builder = Signature::new(block_size);
                         builder.write(base_data);
                         let signature = builder.finish();

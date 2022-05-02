@@ -391,6 +391,7 @@ impl<'a> EventApplier<'a> {
                 unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
         };
+        println!("Unwound diff {:?} to resource: {:?}", ev.diff(), std::str::from_utf8(&resource));
         // When back there, implement the event.
         if ev.diff().apply_overlaps() {
             let mut other = Vec::with_capacity(resource.len() + 32);
@@ -399,8 +400,10 @@ impl<'a> EventApplier<'a> {
         } else {
             ev.diff().apply_in_place(&mut resource)?;
         }
+        println!("Applied");
 
         resource = unwinder.rewind(&resource)?;
+        println!("Rewound");
 
         // How will the revert and implement functions on modify work?
         // Can revert be a inverse and just call implement?

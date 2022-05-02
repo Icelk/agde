@@ -756,6 +756,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     );
 
                                     let event = agde::event::Modify::new(res, &data, &base);
+                                    println!("Diff: {:#?}",  event.diff());
 
                                     agde::Event::with_timestamp(
                                         agde::event::Kind::Modify(event),
