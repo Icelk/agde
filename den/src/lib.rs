@@ -1396,6 +1396,9 @@ impl<S: ExtendVec> Difference<S> {
 
     /// Apply `diff` to the `base` data base, appending the result to `out`.
     ///
+    /// Consider checking [`Self::apply_overlaps`] and calling [`Self::apply_in_place`]
+    /// to remove the need for the [`Vec`].
+    ///
     /// # Security
     ///
     /// The `diff` should be sanitized if input is suspected to be malicious.
@@ -1412,12 +1415,6 @@ impl<S: ExtendVec> Difference<S> {
                 Segment::Ref(block_ref_segment) => {
                     let start = block_ref_segment.start;
                     let end = cmp::min(block_ref_segment.end(block_size), base.len());
-                    // Check that only the last ref goes past the end.
-                    if end == base.len()
-                        && block_ref_segment.end(block_size) - block_size > base.len()
-                    {
-                        return Err(Roob);
-                    }
 
                     let data = base.get(start..end).ok_or(Roob)?;
                     data.extend(out);
@@ -1467,12 +1464,6 @@ impl<S: ExtendVec> Difference<S> {
                 Segment::Ref(block_ref_segment) => {
                     let start = block_ref_segment.start;
                     let end = block_ref_segment.end(block_size).min(base.len());
-                    // Check that only the last ref goes past the end.
-                    if end == base.len()
-                        && block_ref_segment.end(block_size) - block_size > base.len()
-                    {
-                        return Err(Roob);
-                    }
 
                     let range = start..end;
                     base.get(range.clone()).ok_or(Roob)?;
@@ -1580,6 +1571,13 @@ pub enum ApplyError {
     ///
     /// The data might be malicious or corrupted or the `base` data has changed from constructing
     /// [`Signature`] and [`Difference::apply`].
+    ///
+    /// Previously, this was also thrown when [`SegmentRef::block_count`] caused the end to extend
+    /// past the data more than `block_size`. This has since been relaxed, but it's a good habit to
+    /// only let it extend up to one `block_size`, as it can save space when serializing.
+    /// The [`SegmentRef`] can go past the end to accommodate the case where no data in the end has
+    /// changed. We then simply continue the reference and use all the available data when calling
+    /// [`Difference::apply`].
     RefOutOfBounds,
 }
 
