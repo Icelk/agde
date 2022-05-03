@@ -879,19 +879,19 @@ impl Signature {
 
                 if let Some(last) = segments.last_mut() {
                     match last {
-                        Segment::BlockRef(block_ref_segment) => {
+                        Segment::Ref(block_ref_segment) => {
                             if block_data.start == block_ref_segment.end(block_size) {
                                 block_ref_segment.extend(1);
                             } else {
-                                segments.push(Segment::reference(block_data));
+                                segments.push(Segment::reference(block_data.start));
                             }
                         }
                         Segment::Unknown(_) => {
-                            segments.push(Segment::reference(block_data));
+                            segments.push(Segment::reference(block_data.start));
                         }
                     }
                 } else {
-                    segments.push(Segment::reference(block_data));
+                    segments.push(Segment::reference(block_data.start));
                 }
 
                 blocks.advance(block.len() - 1);
@@ -930,17 +930,15 @@ struct BlockData {
     start: usize,
 }
 /// One or more successive blocks found in the common data.
-///
-/// This is a separate struct to limit serialized size.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 #[must_use]
-pub struct SegmentBlockRef {
+pub struct SegmentRef {
     /// Start of segment with a length of [`Self::block_count`]*[`Signature::block_size`].
     pub start: usize,
     /// The number of blocks this segment references.
     pub block_count: usize,
 }
-impl SegmentBlockRef {
+impl SegmentRef {
     /// The start in the base resource this reference is pointing to.
     #[must_use]
     pub fn start(self) -> usize {
@@ -965,7 +963,7 @@ impl SegmentBlockRef {
     pub fn end(self, block_size: usize) -> usize {
         self.start + self.len(block_size)
     }
-    /// Get a new [`SegmentBlockRef`] with [`Self::start`] set to `start`.
+    /// Get a new [`SegmentRef`] with [`Self::start`] set to `start`.
     #[inline]
     pub fn with_start(mut self, start: usize) -> Self {
         self.start = start;
@@ -1037,15 +1035,18 @@ impl<S: ExtendVec + std::any::Any> Debug for SegmentUnknown<S> {
 #[must_use]
 pub enum Segment<S: ExtendVec + 'static = Vec<u8>> {
     /// Reference to successive block(s) of data.
-    BlockRef(SegmentBlockRef),
+    Ref(SegmentRef),
     /// Data unknown to the one who sent the [`Signature`].
     Unknown(SegmentUnknown<S>),
 }
 impl<S: ExtendVec> Segment<S> {
+    /// Create a new [`Segment::Ref`] from `start`.
+    ///
+    /// [`SegmentRef::block_count`] is set to 1.
     #[inline]
-    fn reference(data: BlockData) -> Self {
-        Self::BlockRef(SegmentBlockRef {
-            start: data.start,
+    pub fn reference(start: usize) -> Self {
+        Self::Ref(SegmentRef {
+            start,
             block_count: 1,
         })
     }
@@ -1087,21 +1088,21 @@ impl Difference {
     pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
         fn push_segment(segments: &mut Vec<Segment>, item: Segment, block_size: usize) {
             match item {
-                Segment::BlockRef(item) => {
+                Segment::Ref(item) => {
                     if let Some(last) = segments.last_mut() {
                         match last {
-                            Segment::BlockRef(seg) => {
+                            Segment::Ref(seg) => {
                                 if seg.end(block_size) == item.start {
                                     // The previous end is this start.
                                     seg.extend(item.block_count());
                                 } else {
-                                    segments.push(Segment::BlockRef(item));
+                                    segments.push(Segment::Ref(item));
                                 }
                             }
-                            Segment::Unknown(_) => segments.push(Segment::BlockRef(item)),
+                            Segment::Unknown(_) => segments.push(Segment::Ref(item)),
                         }
                     } else {
-                        segments.push(Segment::BlockRef(item));
+                        segments.push(Segment::Ref(item));
                     }
                 }
                 Segment::Unknown(_) => segments.push(item),
@@ -1124,10 +1125,10 @@ impl Difference {
         let mut segments = Vec::with_capacity(self.segments().len() * 6 / 5);
         for (last, current, next) in PrePostWindow::new(self.segments()) {
             match current {
-                Segment::BlockRef(seg) => {
+                Segment::Ref(seg) => {
                     let mut seg = *seg;
                     seg.multiply(block_size_shrinkage);
-                    push_segment(&mut segments, Segment::BlockRef(seg), block_size);
+                    push_segment(&mut segments, Segment::Ref(seg), block_size);
                 }
                 Segment::Unknown(seg) => {
                     let target_data = seg.data();
@@ -1139,7 +1140,7 @@ impl Difference {
                         // Get a peek to the next segment.
                         let start = if let Some(last) = last {
                             match last {
-                                Segment::BlockRef(seg) => seg.end(block_size),
+                                Segment::Ref(seg) => seg.end(block_size),
                                 // Improbable, two Unknowns can't be after each other.
                                 // Only through external modification of data.
                                 Segment::Unknown(_) => return Err(MinifyError::SuccessiveUnknowns),
@@ -1148,7 +1149,7 @@ impl Difference {
                             0
                         };
                         let mut end = match next {
-                            Some(Segment::BlockRef(seg)) => seg.start,
+                            Some(Segment::Ref(seg)) => seg.start,
                             Some(Segment::Unknown(_)) => {
                                 return Err(MinifyError::SuccessiveUnknowns)
                             }
@@ -1172,7 +1173,7 @@ impl Difference {
 
                         for mut segment in diff.segments {
                             match &mut segment {
-                                Segment::BlockRef(seg) => seg.start += start,
+                                Segment::Ref(seg) => seg.start += start,
                                 Segment::Unknown(_) => {}
                             }
                             push_segment(&mut segments, segment, block_size);
@@ -1187,8 +1188,8 @@ impl Difference {
         let mut cursor = 0;
         for segment in &mut segments {
             match segment {
-                Segment::BlockRef(seg) => {
-                    let new = cursor + seg.block_count() * block_size;
+                Segment::Ref(seg) => {
+                    let new = cursor + seg.len(block_size);
                     if base.len() <= new {
                         let diff = new - base.len();
                         // +block_size-1 to ceil the value
@@ -1254,7 +1255,7 @@ impl<S: ExtendVec> Difference<S> {
             // SegmentRef contains two usizes.
             total += 8 * 2;
             match seg {
-                Segment::BlockRef(_) => {}
+                Segment::Ref(_) => {}
                 Segment::Unknown(seg) => total += seg.source().len(),
             }
         }
@@ -1285,7 +1286,7 @@ impl<S: ExtendVec> Difference<S> {
 
         for seg in &mut self.segments {
             match seg {
-                Segment::BlockRef(ref_seg) => {
+                Segment::Ref(ref_seg) => {
                     ref_seg.multiply(block_size_shrinkage);
                 }
                 Segment::Unknown(_) => {}
@@ -1337,7 +1338,7 @@ impl<S: ExtendVec> Difference<S> {
         let mut position = 0;
         for segment in self.segments() {
             match segment {
-                Segment::BlockRef(seg) => {
+                Segment::Ref(seg) => {
                     if seg.start() < position {
                         return true;
                     }
@@ -1366,7 +1367,7 @@ impl<S: ExtendVec> Difference<S> {
         let block_size = self.block_size();
         for segment in self.segments() {
             match segment {
-                Segment::BlockRef(block_ref_segment) => {
+                Segment::Ref(block_ref_segment) => {
                     let start = block_ref_segment.start;
                     let end = cmp::min(block_ref_segment.end(block_size), base.len());
                     // Check that only the last ref goes past the end.
@@ -1421,7 +1422,7 @@ impl<S: ExtendVec> Difference<S> {
         let mut position = 0;
         for segment in self.segments() {
             match segment {
-                Segment::BlockRef(block_ref_segment) => {
+                Segment::Ref(block_ref_segment) => {
                     let start = block_ref_segment.start;
                     let end = block_ref_segment.end(block_size).min(base.len());
                     // Check that only the last ref goes past the end.
@@ -1493,7 +1494,7 @@ impl<S: ExtendVec> Difference<S> {
                 Segment::Unknown(unknown) => {
                     index += unknown.source().len();
                 }
-                Segment::BlockRef(seg) => {
+                Segment::Ref(seg) => {
                     let end = seg.end(block_size);
                     let missing = end.checked_sub(target.len());
                     let mut offset = 0;
@@ -1503,14 +1504,14 @@ impl<S: ExtendVec> Difference<S> {
                         }
                         offset = missing;
                     }
-                    let current_end = index + block_size * seg.block_count() - offset;
+                    let current_end = index + seg.len(block_size) - offset;
                     let current_end = current_end.min(current.len());
                     if current_end > current.len() {
                         return Err(Roob);
                     }
                     target[seg.start()..seg.start() + current_end - index]
                         .copy_from_slice(&current[index..current_end]);
-                    index += block_size * seg.block_count();
+                    index += seg.len(block_size);
                 }
             }
         }
