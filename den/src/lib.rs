@@ -79,8 +79,8 @@
 )]
 
 use serde::{Deserialize, Serialize};
-use std::cmp;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::cmp::{self, Ordering};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::hash::{BuildHasher, Hasher};
 use std::ops::Range;
@@ -88,8 +88,8 @@ use twox_hash::xxh3::HasherExt;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum LargeHash<K, V> {
-    Single(V),
-    Multiple(BTreeMap<K, V>),
+    Single(K, V),
+    Multiple(Vec<(K, V)>),
 }
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct LargeHashKey([u8; 8]);
@@ -109,6 +109,8 @@ impl BuildHasher for HashMap128HashBuilder {
         HashMap128Hasher([0; 8])
     }
 }
+/// Hash map for 128-bit hashes as keys. This means we don't have to hash the value, improving
+/// performance.
 struct HashMap128 {
     map: HashMap<[u8; 8], LargeHash<[u8; 16], BlockData>, HashMap128HashBuilder>,
 }
@@ -118,13 +120,52 @@ impl HashMap128 {
             map: HashMap::with_hasher(HashMap128HashBuilder),
         }
     }
-    fn get(&self, key: [u8; 16]) -> Option<BlockData> {
+    fn get(&self, key: [u8; 16], target: usize) -> Option<BlockData> {
         let mut bytes = [0; 8];
         bytes.copy_from_slice(&key[..8]);
         if let Some(option) = self.map.get(&bytes) {
             match option {
-                LargeHash::Single(block) => Some(*block),
-                LargeHash::Multiple(tree) => tree.get(&key).copied(),
+                LargeHash::Single(_key, block) => Some(*block),
+                LargeHash::Multiple(list) => list
+                    .binary_search_by(|probe| probe.0.cmp(&key))
+                    .ok()
+                    .map(|mut idx| {
+                        let mut best = list[idx].1;
+                        let mut best_dist = usize::MAX;
+                        loop {
+                            match best.start.cmp(&target) {
+                                Ordering::Less => {
+                                    idx += 1;
+                                    if idx >= list.len() {
+                                        return best;
+                                    };
+                                    let new = list[idx].1;
+                                    let new_dist = new.start.abs_diff(target);
+                                    if new_dist < best_dist {
+                                        best = new;
+                                        best_dist = new_dist;
+                                    } else {
+                                        return best;
+                                    }
+                                }
+                                Ordering::Greater => {
+                                    if idx == 0 {
+                                        return best;
+                                    };
+                                    idx -= 1;
+                                    let new = list[idx].1;
+                                    let new_dist = new.start.abs_diff(target);
+                                    if new_dist < best_dist {
+                                        best = new;
+                                        best_dist = new_dist;
+                                    } else {
+                                        return best;
+                                    }
+                                }
+                                Ordering::Equal => return best,
+                            }
+                        }
+                    }),
             }
         } else {
             None
@@ -135,23 +176,23 @@ impl HashMap128 {
         bytes.copy_from_slice(&key[..8]);
         if let Some(option) = self.map.get_mut(&bytes) {
             match option {
-                LargeHash::Single(block) => {
-                    let mut tree = BTreeMap::new();
-                    tree.insert(key, *block);
-                    *option = LargeHash::Multiple(tree);
+                LargeHash::Single(old_key, block) => {
+                    let mut list = Vec::with_capacity(2);
+                    list.push((*old_key, *block));
+                    *option = LargeHash::Multiple(list);
                 }
                 LargeHash::Multiple(_) => {}
             }
-            let tree = match option {
-                LargeHash::Single(_) => {
+            let list = match option {
+                LargeHash::Single(_, _) => {
                     unreachable!()
                 }
-                LargeHash::Multiple(tree) => tree,
+                LargeHash::Multiple(list) => list,
             };
 
-            tree.insert(key, value);
+            list.push((key, value));
         } else {
-            self.map.insert(bytes, LargeHash::Single(value));
+            self.map.insert(bytes, LargeHash::Single(key, value));
         }
     }
 }
@@ -728,6 +769,7 @@ impl Signature {
     }
 
     /// Get the [`Difference`] between the data the [`Signature`] represents and the local `data`.
+    /// `data` MUST have the same content as what you feed to [`SignatureBuilder::write`].
     ///
     /// This will return a struct which when serialized (using e.g. `bincode`) is much smaller than
     /// `data`.
@@ -794,7 +836,7 @@ impl Signature {
             let hash = hasher.finish_reset().to_bytes();
 
             // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size` (actually `block_size-1` as the `next` call implicitly increments).
-            if let Some(block_data) = map.get(hash) {
+            if let Some(block_data) = map.get(hash, blocks.pos()) {
                 // If we're looking for a ref (after a unknown, which hasn't been "committed" yet),
                 // check with a offset of 0..<some small integer> for better matches, which give us
                 // longer BlockRefs. This reduces jitter in output.
@@ -814,7 +856,7 @@ impl Signature {
                                 hasher.write(block, Some(blocks.pos() - 1));
                                 let hash = hasher.finish_reset().to_bytes();
 
-                                if let Some(block_data) = map.get(hash) {
+                                if let Some(block_data) = map.get(hash, blocks.pos()) {
                                     match &mut last_end {
                                         Some(end) => {
                                             if block_data.start == *end {
@@ -1565,6 +1607,8 @@ impl<'a, T> Blocks<'a, T> {
     fn go_back(&mut self, n: usize) {
         self.pos -= n;
     }
+    /// Where we're at in the original slice.
+    ///
     /// Clamped to `slice.len()`.
     #[inline]
     fn pos(&self) -> usize {

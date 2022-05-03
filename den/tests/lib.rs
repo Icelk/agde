@@ -290,3 +290,33 @@ fn revert_2() {
     let new = "this is some very messed up data changed the original text, which is now gone";
     revert(old.as_bytes(), new.as_bytes());
 }
+
+#[test]
+fn equal_blocks() {
+    let a = "sim testsim testsim testsimtest this is some more data!";
+    let b = "sim testsim testsim testsimtest this is some more data!\nNow we're talking!";
+
+    let mut signature = Signature::new(256);
+    signature.write(a.as_bytes());
+    let signature = signature.finish();
+    println!("Sig {:#?}", signature);
+
+    let diff = signature.diff(b.as_bytes());
+    println!("Large diff {:#?}", diff);
+
+    let diff = diff
+        .minify(8, a.as_bytes())
+        .expect("Failed to minify a correct diff.");
+    println!("Minified diff {:#?}", diff);
+
+    assert_eq!(
+        diff.segments(),
+        [
+            Segment::Ref(SegmentRef {
+                start: 0,
+                block_count: 6
+            }),
+            Segment::unknown("e data!\nNow we're talking!")
+        ]
+    );
+}
