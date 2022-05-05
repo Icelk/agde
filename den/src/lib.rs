@@ -1126,6 +1126,7 @@ impl Difference {
     /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
     /// [`MinifyError::SuccessiveUnknowns`] is returned if two [`Segment::Unknown`] are after
     /// each other.
+    /// Returns [`MinifyError::Zero`] if `block_size == 0`.
     #[allow(clippy::too_many_lines)]
     pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
         fn push_segment(segments: &mut Vec<Segment>, item: Segment, block_size: usize) {
@@ -1151,6 +1152,9 @@ impl Difference {
             }
         }
 
+        if block_size == 0 {
+            return Err(MinifyError::Zero);
+        }
         if self.block_size() <= block_size {
             return Err(MinifyError::NewLarger);
         }
@@ -1315,8 +1319,11 @@ impl<S: ExtendVec> Difference<S> {
     ///
     /// Returns [`MinifyError::NewLarger`] if `block_size` >= [`Self::block_size`] and
     /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
-    /// each other.
+    /// Returns [`MinifyError::Zero`] if `block_size == 0`.
     pub fn with_block_size(&mut self, block_size: usize) -> Result<(), MinifyError> {
+        if block_size == 0 {
+            return Err(MinifyError::Zero);
+        }
         if self.block_size() <= block_size {
             return Err(MinifyError::NewLarger);
         }
@@ -1562,6 +1569,8 @@ pub enum MinifyError {
     NotMultiple,
     /// Successive unknown segments are not allowed and **SHOULD** never occur.
     SuccessiveUnknowns,
+    /// New block size is 0. That isn't possible!
+    Zero,
 }
 
 /// An error during [`Difference::apply`].
