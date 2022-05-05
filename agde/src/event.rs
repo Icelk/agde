@@ -1,6 +1,6 @@
 //! Events are a type of message which manipulate a resource.
 
-use den::{Difference, Signature};
+use den::{Difference, ExtendVec, Signature};
 
 use crate::{
     log, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
@@ -28,9 +28,9 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
 /// The resource must be initialised using [`Create`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct Modify {
-    resource: String,
-    diff: Difference,
+pub struct Modify<S: ExtendVec + 'static = Vec<u8>> {
+    pub(crate)resource: String,
+    pub(crate)diff: Difference<S>,
 }
 impl Modify {
     /// Get the difference needed to get from `base` to `target`, as a modify event.
@@ -40,9 +40,9 @@ impl Modify {
         Self { resource, diff }
     }
 }
-impl Modify {
+impl<S: ExtendVec + 'static> Modify<S> {
     /// Get a reference to the sections of data this event modifies.
-    pub fn diff(&self) -> &Difference {
+    pub fn diff(&self) -> &Difference<S> {
         &self.diff
     }
     /// Returns a reference to the target resource name.
@@ -146,9 +146,9 @@ macro_rules! event_kind_impl {
 /// Helper trait to convert from `*Event` structs to [`Event`].
 ///
 /// Should not be implemented but used with [`Manager::process_event`].
-pub trait Into {
+pub trait Into<S: ExtendVec + 'static = Vec<u8>> {
     /// Converts `self` into an [`Event`].
-    fn into_ev(self, manager: &Manager) -> Event;
+    fn into_ev(self, manager: &Manager) -> Event<S>;
 }
 impl Into for Event {
     fn into_ev(self, _manager: &Manager) -> Event {
@@ -156,7 +156,16 @@ impl Into for Event {
     }
 }
 
-event_kind_impl!(Modify, Modify);
+impl<'a, S: ExtendVec + 'static> From<Modify<S>> for Kind<S> {
+    fn from(event: Modify<S>) -> Self {
+        Self::Modify(event)
+    }
+}
+impl<'a, S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
+    fn into_ev(self, manager: &Manager) -> Event<S> {
+        Event::new( self.into(), manager.uuid())
+    }
+}
 event_kind_impl!(Create, Create);
 event_kind_impl!(Delete, Delete);
 
@@ -181,12 +190,12 @@ pub fn systime_to_dur(systime: SystemTime) -> Duration {
 /// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub enum Kind {
+pub enum Kind<S: ExtendVec + 'static = Vec<u8>> {
     /// Modification.
     ///
     /// You need to make a [`Self::Create`] event before modifying the resource.
     /// If you don't do this, the modification MUST NOT be applied.
-    Modify(Modify),
+    Modify(Modify<S>),
     /// Creation.
     ///
     /// A new resource has been created. Before any other event can affect this resource,
@@ -202,22 +211,22 @@ pub enum Kind {
 /// A change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct Event {
-    kind: Kind,
+pub struct Event<S: ExtendVec + 'static = Vec<u8>> {
+    kind: Kind<S>,
     /// A [`Duration`] of time after UNIX_EPOCH.
     timestamp: Duration,
     sender: Uuid,
 }
-impl Event {
+impl<S: ExtendVec + 'static> Event<S> {
     /// Creates a new event from `kind`.
-    pub fn new(kind: Kind, sender: Uuid) -> Self {
+    pub fn new(kind: Kind<S>, sender: Uuid) -> Self {
         Self::with_timestamp(kind, sender, SystemTime::now())
     }
     /// Creates a new event from `kind` with the `timestamp`.
     ///
     /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
     /// else the sync will risk wrong results, forcing [`crate::MessageKind::HashCheck`].
-    pub fn with_timestamp(kind: Kind, sender: Uuid, timestamp: SystemTime) -> Self {
+    pub fn with_timestamp(kind: Kind<S>, sender: Uuid, timestamp: SystemTime) -> Self {
         Self {
             kind,
             timestamp: timestamp
@@ -240,13 +249,18 @@ impl Event {
     /// Returns a reference to the inner [`Kind`] where all the event data is stored.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn inner(&self) -> &Kind {
+    pub fn inner(&self) -> &Kind<S> {
         &self.kind
     }
     /// Returns a mutable reference to the inner [`Kind`].
     #[inline]
-    pub(crate) fn inner_mut(&mut self) -> &mut Kind {
+    pub(crate) fn inner_mut(&mut self) -> &mut Kind<S> {
         &mut self.kind
+    }
+    /// Consume `self` and return the inner [`Kind`].
+    #[inline]
+    pub(crate) fn into_inner(self) -> Kind<S> {
+        self.kind
     }
     /// Get the timestamp of this event.
     ///
@@ -290,7 +304,7 @@ pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
     /// May possibly not contain `Self::event`.
     events: &'a [log::ReceivedEvent],
-    rewound_events: Vec<&'a Difference>,
+    rewound_events: Vec<&'a Difference<log::ZeroFiller>>,
     // these are allocated once to optimize allocations
     buffer1: Vec<u8>,
     buffer2: Vec<u8>,
@@ -330,7 +344,7 @@ impl<'a> Unwinder<'a> {
     pub fn sections<'b>(
         &'b self,
         modern_resource_name: &'b str,
-    ) -> Result<impl Iterator<Item = &Difference> + 'b, UnwindError> {
+    ) -> Result<impl Iterator<Item = &Difference<log::ZeroFiller>> + 'b, UnwindError> {
         self.check_name(modern_resource_name)?;
 
         let iter = self.events.iter().rev().filter_map(move |received_ev| {
@@ -361,7 +375,7 @@ impl<'a> Unwinder<'a> {
     ///     println!("Resource {} changed in some way.", event.resource());
     /// }
     /// ```
-    pub fn events(&self) -> impl Iterator<Item = &Event> + '_ {
+    pub fn events(&self) -> impl Iterator<Item = &Event<log::ZeroFiller>> + '_ {
         self.events.iter().map(|received_ev| &received_ev.event)
     }
     /// Reverts the `resource` with `modern_resource_name` to the bottom of the internal list.

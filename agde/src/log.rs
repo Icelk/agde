@@ -6,11 +6,34 @@ use std::fmt::Debug;
 use std::hash::Hasher;
 use std::time::Duration;
 
+use den::ExtendVec;
 use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
 use crate::event;
 use crate::{event::dur_now, Event, EventKind, Uuid};
+
+/// Implements [`ExtendVec`] to fill with zeroes. Reduces memory usage when storing log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZeroFiller {
+    len: usize,
+}
+impl ExtendVec for ZeroFiller {
+    fn extend(&self, vec: &mut Vec<u8>) {
+        // reserve
+        // set len
+        // write
+        vec.extend(std::iter::repeat(0).take(self.len));
+    }
+    fn replace(&self, vec: &mut Vec<u8>, position: usize) {
+        // reserve
+        // set len
+        // write
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+}
 
 /// A received event.
 ///
@@ -20,7 +43,7 @@ use crate::{event::dur_now, Event, EventKind, Uuid};
 #[must_use]
 pub(crate) struct ReceivedEvent {
     // `TODO`: store events with the unknown data segments containing no data.
-    pub(crate) event: Event,
+    pub(crate) event: Event<ZeroFiller>,
     /// Message UUID.
     pub(crate) uuid: Uuid,
 }
@@ -132,10 +155,22 @@ impl Log {
     }
     /// `timestamp` should be the one in [`Event::timestamp`]
     #[inline]
-    pub(crate) fn insert(&mut self, event: Event, message_uuid: Uuid) {
-        let event = event;
+    pub(crate) fn insert(&mut self, ev: Event, message_uuid: Uuid) {
+        let uuid = ev.sender();
+        let timestamp = event::dur_to_systime(ev.timestamp());
+        let new = match ev.into_inner() {
+            EventKind::Modify(ev) => {
+                let event::Modify { diff, resource } = ev;
+                let mut diff = diff.map(|seg| ZeroFiller { len: seg.len() });
+                diff.with_block_size(1).unwrap();
+                EventKind::Modify(event::Modify { resource, diff })
+            }
+            EventKind::Create(ev) => EventKind::Create(ev),
+            EventKind::Delete(ev) => EventKind::Delete(ev),
+        };
+        let ev = Event::with_timestamp(new, uuid, timestamp);
         let received = ReceivedEvent {
-            event,
+            event: ev,
             uuid: message_uuid,
         };
         self._insert(received);
@@ -163,12 +198,7 @@ impl Log {
     #[inline]
     pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
         for (pos, ev) in self.list.iter().enumerate().rev() {
-            println!(
-                "Comparing cutoff{cutoff:?} with event {:?}",
-                ev.event.timestamp()
-            );
             if ev.event.timestamp() <= cutoff {
-                println!("Returnign start at {:?}", pos + 1);
                 return Some(pos + 1);
             }
         }
@@ -366,10 +396,7 @@ impl<'a> EventApplier<'a> {
     ///
     /// Returns a [`ApplyError::RefOutOfBounds`] if the difference of this event is out of
     /// bounds.
-    pub fn apply(
-        &self,
-        resource: &[u8],
-    ) -> Result<Vec<u8>, ApplyError> {
+    pub fn apply(&self, resource: &[u8]) -> Result<Vec<u8>, ApplyError> {
         let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
@@ -391,7 +418,11 @@ impl<'a> EventApplier<'a> {
                 unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
         };
-        println!("Unwound diff {:?} to resource: {:?}", ev.diff(), std::str::from_utf8(&resource));
+        println!(
+            "Unwound diff {:?} to resource: {:?}",
+            ev.diff(),
+            std::str::from_utf8(&resource)
+        );
         // When back there, implement the event.
         if ev.diff().apply_overlaps() {
             let mut other = Vec::with_capacity(resource.len() + 32);
