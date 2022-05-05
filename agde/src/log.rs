@@ -337,7 +337,7 @@ impl Log {
             }
         }
 
-        let slice = &self.list[slice_index..];
+        let slice = &mut self.list[slice_index..];
         // This check is required for the code at [`EventApplier::apply`] to not panic.
         let resource = event::Unwinder::new(slice)
             .check_name(event.resource())
@@ -363,7 +363,7 @@ impl Log {
 pub struct EventApplier<'a> {
     /// Ordered from last (temporally).
     /// May possibly not contain `Self::event`.
-    events: &'a [ReceivedEvent],
+    events: &'a mut [ReceivedEvent],
     modern_resource_name: Option<&'a str>,
     /// Needed because the event might be sorted out of the list; slow push.
     event: &'a Event,
@@ -423,6 +423,7 @@ impl<'a> EventApplier<'a> {
             ev.diff(),
             std::str::from_utf8(&resource)
         );
+        let len = resource.len();
         // When back there, implement the event.
         if ev.diff().apply_overlaps() {
             let mut other = Vec::with_capacity(resource.len() + 32);
@@ -432,9 +433,68 @@ impl<'a> EventApplier<'a> {
             ev.diff().apply_in_place(&mut resource)?;
         }
         println!("Applied");
+        #[allow(clippy::cast_possible_wrap)]
+        let len_diff = resource.len() as isize - len as isize;
+        let offsets = {
+            enum Last {
+                Ref { end: usize },
+                Unknown { len: usize },
+            }
+            struct Offset {
+                idx: usize,
+                len: usize,
+                negative: bool,
+            }
+
+            let diff = ev.diff();
+
+            let mut offsets = Vec::with_capacity(8);
+            let mut counter = 0;
+            let mut last = Last::Unknown { len: 0 };
+
+            for seg in diff.segments() {
+                match seg {
+                    den::Segment::Ref(seg) => {
+                        match last {
+                            Last::Ref { end } => {
+                                if seg.start() >= end {
+                                    offsets.push(Offset {
+                                        idx: seg.start(),
+                                        len: seg.start() - end,
+                                        negative: true,
+                                    });
+                                }
+                            }
+                            Last::Unknown { len } => offsets.push(Offset {
+                                idx: seg.start(),
+                                len,
+                                negative: false,
+                            }),
+                        }
+                        counter += seg.len(diff.block_size());
+                        last = Last::Ref {
+                            end: seg.end(diff.block_size()),
+                        };
+                    }
+                    den::Segment::Unknown(seg) => {
+                        counter += seg.source().len();
+                        last = Last::Unknown {
+                            len: seg.source().len(),
+                        };
+                    }
+                }
+            }
+            offsets
+        };
 
         resource = unwinder.rewind(&resource)?;
         println!("Rewound");
+
+        // `TODO`: use `offsets` to change all other events. Also apply `len_diff` to the
+        // `original_data_len` part of [`Difference`]s.
+        //
+        // That should be everything to get the late edit working!
+        // **queue debugging this spagetti mess of code to find some fundamental issue**
 
         // How will the revert and implement functions on modify work?
         // Can revert be a inverse and just call implement?
