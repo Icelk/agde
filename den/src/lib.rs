@@ -1282,6 +1282,71 @@ impl<S: ExtendVec> Difference<S> {
     pub fn into_segments(self) -> Vec<Segment<S>> {
         self.segments
     }
+    /// Map the [`ExtendVec`]s of the [`Segment::Unknown`]s with `f`.
+    ///
+    /// Creates a new difference with the same length and values.
+    /// Consider using [`Difference::map`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `NS` doesn't have the same [`ExtendVec::len`] as `S`.
+    pub fn map_ref<NS: ExtendVec + 'static>(&self, mut f: impl FnMut(&S) -> NS) -> Difference<NS> {
+        let Self {
+            segments,
+            block_size,
+            original_data_len,
+        } = self;
+
+        Difference {
+            segments: segments
+                .iter()
+                .map(|seg| match seg {
+                    Segment::Unknown(seg) => {
+                        let len = seg.source().len();
+                        let new = f(seg.source());
+                        assert_eq!(len, new.len());
+                        Segment::Unknown(SegmentUnknown { source: new })
+                    }
+                    Segment::Ref(r) => Segment::Ref(*r),
+                })
+                .collect(),
+            block_size: *block_size,
+            original_data_len: *original_data_len,
+        }
+    }
+    /// Map the [`ExtendVec`]s of the [`Segment::Unknown`]s with `f`.
+    ///
+    /// Creates a new difference with the same length and values.
+    /// Still allocates [`Difference::segments`] vector.
+    /// Consider using [`Difference::map_ref`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `NS` doesn't have the same [`ExtendVec::len`] as `S`.
+    pub fn map<NS: ExtendVec + 'static>(self, mut f: impl FnMut(S) -> NS) -> Difference<NS> {
+        let Self {
+            segments,
+            block_size,
+            original_data_len,
+        } = self;
+
+        Difference {
+            segments: segments
+                .into_iter()
+                .map(|seg| match seg {
+                    Segment::Unknown(seg) => {
+                        let len = seg.source().len();
+                        let new = f(seg.source);
+                        assert_eq!(len, new.len());
+                        Segment::Unknown(SegmentUnknown { source: new })
+                    }
+                    Segment::Ref(r) => Segment::Ref(r),
+                })
+                .collect(),
+            block_size,
+            original_data_len,
+        }
+    }
     /// The block size used by this diff.
     #[must_use]
     pub fn block_size(&self) -> usize {
