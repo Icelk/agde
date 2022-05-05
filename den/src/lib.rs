@@ -1005,6 +1005,19 @@ impl SegmentRef {
     pub fn end(self, block_size: usize) -> usize {
         self.start + self.len(block_size)
     }
+    /// Get the length to the end of `diff`. If this [`Segment::Ref`] doesn't reach `diff`'s end,
+    /// [`None`] is returned. Else, the count of bytes until the end of copying is returned.
+    #[inline]
+    #[must_use]
+    pub fn len_to_end(self, diff: &Difference<impl ExtendVec + 'static>) -> Option<usize> {
+        let len = diff.original_data_len;
+        let end = self.end(diff.block_size());
+        if len > end {
+            None
+        } else {
+            Some(end - len)
+        }
+    }
     /// Get a new [`SegmentRef`] with [`Self::start`] set to `start`.
     #[inline]
     pub fn with_start(mut self, start: usize) -> Self {
