@@ -29,8 +29,8 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Modify<S: ExtendVec + 'static = Vec<u8>> {
-    pub(crate)resource: String,
-    pub(crate)diff: Difference<S>,
+    pub(crate) resource: String,
+    pub(crate) diff: Difference<S>,
 }
 impl Modify {
     /// Get the difference needed to get from `base` to `target`, as a modify event.
@@ -163,7 +163,7 @@ impl<'a, S: ExtendVec + 'static> From<Modify<S>> for Kind<S> {
 }
 impl<'a, S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
     fn into_ev(self, manager: &Manager) -> Event<S> {
-        Event::new( self.into(), manager.uuid())
+        Event::new(self.into(), manager.uuid())
     }
 }
 event_kind_impl!(Create, Create);
