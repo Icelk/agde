@@ -507,6 +507,9 @@ impl<'a> EventApplier<'a> {
             assert_eq!(block_size, 1, "blocksize of stored diff must be 1");
 
             for ev in self.events.iter_mut() {
+                if ev.event.resource() != current_resource_name {
+                    continue;
+                }
                 let kind = ev.event.inner_mut();
                 match kind {
                     EventKind::Modify(ev) => {
