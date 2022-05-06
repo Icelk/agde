@@ -584,12 +584,12 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 }
 
                                 match manager.apply_event(event, message.uuid()) {
-                                    Ok(applier) => {
+                                    Ok(mut applier) => {
                                         let resource = applier.resource();
 
                                         if let Some(resource) = resource {
                                             match applier.event().inner() {
-                                                agde::EventKind::Modify(_ev) => {
+                                                agde::EventKind::Modify(_) => {
                                                     let resource_data = (options.read)(
                                                         resource.to_owned(),
                                                         Storage::Public,
@@ -605,14 +605,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                             String::from_utf8_lossy(&data)
                                                         );
 
-                                                        /* let mut slice = */
-                                                        /* agde::SliceBuf::with_whole(&mut data); */
-                                                        /* slice.extend_to_needed(ev.data(), 0); */
+                                                        let resource = resource.to_owned();
                                                         data = applier.apply(&data).unwrap();
-                                                        /* let len = slice.filled().len(); */
-                                                        /* data.truncate(len); */
                                                         (options.write)(
-                                                            resource.to_owned(),
+                                                            resource,
                                                             Storage::Public,
                                                             data,
                                                             WriteMtime::No,
@@ -785,16 +781,16 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
                         debug!("Processing sent message: {event:?}");
 
-                        let applier = manager
+                        let mut applier = manager
                             .apply_event(event, message.uuid())
                             .expect("manager failed to accept our own event");
 
-                        let resource = applier.resource().expect("our own messages are too old");
+                        let resource = applier.resource().expect("our own messages are too old").to_owned();
 
                         match applier.event().inner() {
                             agde::EventKind::Modify(_ev) => {
                                 let mut resource_data =
-                                        (options.read)(resource.to_owned(), Storage::Public)
+                                        (options.read)(resource.clone(), Storage::Public)
                                             .await
                                             .map_err(|()| ApplicationError::StoragePermissions)?
                                             // don't expect, just make a new file.
@@ -803,7 +799,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 resource_data = applier.apply(&resource_data).unwrap();
 
                                 (options.write)(
-                                    resource.to_owned(),
+                                    resource,
                                     Storage::Public,
                                     resource_data,
                                     WriteMtime::LookUpCurrent,
@@ -813,7 +809,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             }
                             agde::EventKind::Create(_) => {
                                 (options.write)(
-                                    resource.to_owned(),
+                                    resource,
                                     Storage::Public,
                                     Vec::new(),
                                     WriteMtime::LookUpCurrent,
@@ -823,7 +819,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             }
                             agde::EventKind::Delete(_) => {
                                 info!("Processing local delete message.");
-                                (options.delete)(resource.to_owned(), Storage::Public)
+                                (options.delete)(resource, Storage::Public)
                                     .await
                                     .map_err(|()| ApplicationError::StoragePermissions)?;
                             }
