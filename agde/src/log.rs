@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use twox_hash::xxh3::HasherExt;
 
 use crate::event;
-use crate::{event::dur_now, Event, EventKind, Uuid};
+use crate::{utils, utils::dur_now, Event, EventKind, Uuid};
 
 /// Implements [`ExtendVec`] to fill with zeroes. Reduces memory usage when storing log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ impl Log {
     #[inline]
     pub(crate) fn insert(&mut self, ev: Event, message_uuid: Uuid) {
         let uuid = ev.sender();
-        let timestamp = event::dur_to_systime(ev.timestamp());
+        let timestamp = utils::dur_to_systime(ev.timestamp());
         let new = match ev.into_inner() {
             EventKind::Modify(ev) => {
                 let event::Modify { diff, resource } = ev;

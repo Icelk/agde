@@ -169,24 +169,6 @@ impl<'a, S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
 event_kind_impl!(Create, Create);
 event_kind_impl!(Delete, Delete);
 
-/// Returns the time since [`UNIX_EPOCH`].
-#[must_use]
-pub fn dur_now() -> Duration {
-    systime_to_dur(SystemTime::now())
-}
-/// Convert `dur` (duration since [`UNIX_EPOCH`]) to [`SystemTime`].
-/// Very cheap conversion.
-#[must_use]
-pub fn dur_to_systime(dur: Duration) -> SystemTime {
-    SystemTime::UNIX_EPOCH + dur
-}
-/// Convert `systime` to [`Duration`] (since [`UNIX_EPOCH`]).
-/// Very cheap conversion.
-#[must_use]
-pub fn systime_to_dur(systime: SystemTime) -> Duration {
-    systime.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO)
-}
-
 /// The kind of change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
@@ -265,7 +247,7 @@ impl<S: ExtendVec + 'static> Event<S> {
     /// Get the timestamp of this event.
     ///
     /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
-    /// Consider using [`dur_to_systime`] to convert it to a [`SystemTime`].
+    /// Consider using [`crate::utils::dur_to_systime`] to convert it to a [`SystemTime`].
     #[inline]
     #[must_use]
     pub fn timestamp(&self) -> Duration {

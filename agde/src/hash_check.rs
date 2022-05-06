@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use twox_hash::xxh3::HasherExt;
 
-use crate::{event, resource, SelectedPier, Uuid};
+use crate::{resource, utils, SelectedPier, Uuid};
 
 /// A check to affirm the selected resources contain the same data.
 ///
@@ -42,7 +42,7 @@ impl Request {
         Self {
             pier: pier.uuid(),
             resources: filter,
-            cutoff_timestamp: event::dur_now().saturating_sub(timestamp_offset),
+            cutoff_timestamp: utils::dur_now().saturating_sub(timestamp_offset),
             offset: timestamp_offset,
         }
     }

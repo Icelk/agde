@@ -32,6 +32,7 @@ pub mod hash_check;
 pub mod log;
 pub mod resource;
 pub mod sync;
+pub mod utils;
 
 use std::cmp;
 use std::collections::{BTreeMap, HashMap};
@@ -550,7 +551,7 @@ impl Manager {
             pier,
             resource::Matcher::all(),
             cmp::min(
-                event::dur_now().saturating_sub(Duration::from_secs(15)),
+                utils::dur_now().saturating_sub(Duration::from_secs(15)),
                 self.event_log.lifetime() / 2,
             ),
         )))
@@ -613,7 +614,7 @@ impl Manager {
         event: &'a DatafulEvent,
         message_uuid: Uuid,
     ) -> Result<log::EventApplier<'a>, log::Error> {
-        let now = event::dur_now();
+        let now = utils::dur_now();
         // The timestamp is after now!
         if event.timestamp().saturating_sub(Duration::new(10, 0)) >= now {
             return Err(log::Error::EventInFuture);
@@ -765,7 +766,7 @@ impl Manager {
 
         let unwinder = self
             .event_log
-            .unwind_to(event::dur_now().saturating_sub(cutoff));
+            .unwind_to(utils::dur_now().saturating_sub(cutoff));
         (
             hash_check::ResponseBuilder::new(sender, check, cutoff),
             unwinder,
@@ -883,7 +884,7 @@ impl Manager {
 
     /// Attempts to get the modern name of the resource named `old_name` at `timestamp`.
     ///
-    /// Consider using [`event::dur_now`].
+    /// Consider using [`utils::dur_now`].
     ///
     /// `timestamp` is duration since `UNIX_EPOCH` when the `old_name` was relevant.
     pub fn modern_resource_name<'a>(
