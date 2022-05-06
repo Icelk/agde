@@ -1024,16 +1024,22 @@ impl SegmentRef {
         self.start = start;
         self
     }
+    /// Get a new [`SegmentRef`] with [`Self::block_count`] set to `n`.
+    #[inline]
+    pub fn with_blocks(mut self, n: usize) -> Self {
+        self.block_count = n;
+        self
+    }
     /// Add `n` to [`Self::block_count`].
     #[inline]
     pub fn extend(&mut self, n: usize) {
-        self.block_count += n;
+        *self = self.with_blocks(self.block_count() + n);
     }
     /// Multiplies the count of blocks.
     /// Can be useful if the block size changes.
     #[inline]
     pub fn multiply(&mut self, n: usize) {
-        self.block_count *= n;
+        *self = self.with_blocks(self.block_count() * n);
     }
 }
 /// A segment with unknown contents. This will transmit the data.
