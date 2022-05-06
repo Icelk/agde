@@ -403,7 +403,15 @@ impl<'a> EventApplier<'a> {
     ///
     /// Returns a [`ApplyError::RefOutOfBounds`] if the difference of this event is out of
     /// bounds.
-    pub fn apply(&self, resource: &[u8]) -> Result<Vec<u8>, ApplyError> {
+    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+    pub fn apply(&mut self, resource: &[u8]) -> Result<Vec<u8>, ApplyError> {
+        #[derive(Debug)]
+        struct Offset {
+            idx: usize,
+            len: usize,
+            negative: bool,
+        }
+
         let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
@@ -442,15 +450,10 @@ impl<'a> EventApplier<'a> {
         println!("Applied");
         #[allow(clippy::cast_possible_wrap)]
         let len_diff = resource.len() as isize - len as isize;
-        let offsets = {
+        let mut offsets = {
             enum Last {
                 Ref { end: usize },
                 Unknown { len: usize },
-            }
-            struct Offset {
-                idx: usize,
-                len: usize,
-                negative: bool,
             }
 
             let diff = ev.diff();
@@ -495,6 +498,75 @@ impl<'a> EventApplier<'a> {
         };
 
         resource = unwinder.rewind(&resource)?;
+
+        {
+            offsets.sort_unstable_by(|a, b| a.idx.cmp(&b.idx));
+            println!("Offsets: {offsets:#?}");
+            let diff = ev.diff();
+            let block_size = diff.block_size();
+            assert_eq!(block_size, 1, "blocksize of stored diff must be 1");
+
+            for ev in self.events.iter_mut() {
+                let kind = ev.event.inner_mut();
+                match kind {
+                    EventKind::Modify(ev) => {
+                        let segments = ev.diff.segments_mut();
+
+                        let mut cursor = 0;
+
+                        for seg in segments {
+                            match seg {
+                                den::Segment::Ref(seg) => {
+                                    let mut start = seg.start();
+                                    let mut blocks = seg.len(block_size);
+                                    for offset in &offsets {
+                                        // `TODO`: or should `seg.start()` actually be the moving
+                                        // `start`?
+                                        if offset.idx <= seg.start() {
+                                            if offset.negative {
+                                                start = start.saturating_sub(offset.len);
+                                            } else {
+                                                start += offset.len;
+                                            }
+                                            continue;
+                                        }
+                                        if offset.idx < seg.end(block_size) {
+                                            if offset.negative {
+                                                blocks = blocks.saturating_sub(offset.len);
+                                            } else {
+                                                blocks += offset.len;
+                                            }
+                                        }
+                                    }
+                                    *seg = seg.with_start(start).with_blocks(blocks);
+                                    cursor += seg.len(block_size);
+                                }
+                                den::Segment::Unknown(seg) => {
+                                    let mut blocks = seg.source().len;
+                                    for offset in &offsets {
+                                        if offset.idx >= cursor
+                                            && offset.idx < cursor + seg.source().len
+                                        {
+                                            if offset.negative {
+                                                blocks = blocks.saturating_sub(offset.len);
+                                            } else {
+                                                blocks += offset.len;
+                                            }
+                                        }
+                                    }
+                                    *seg = den::SegmentUnknown {
+                                        source: ZeroFiller { len },
+                                    };
+                                    cursor += seg.source().len;
+                                }
+                            }
+                        }
+                    }
+                    EventKind::Create(_) | EventKind::Delete(_) => {}
+                }
+            }
+        }
+
         println!("Rewound");
 
         // `TODO`: use `offsets` to change all other events. Also apply `len_diff` to the
