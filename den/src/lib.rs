@@ -1391,6 +1391,13 @@ impl<S: ExtendVec> Difference<S> {
         }
         total
     }
+    /// Get the length of the original data.
+    #[must_use]
+    pub fn original_data_len(&self) -> usize {self.original_data_len}
+    /// Set the length of the original data.
+    ///
+    /// See [`Self::original_data_len`] for more details.
+    pub fn set_original_data_len(&mut self, original_data_len: usize)  {self.original_data_len = original_data_len}
 
     /// Set the block size.
     ///
