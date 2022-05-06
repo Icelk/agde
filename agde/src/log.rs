@@ -168,7 +168,7 @@ impl Log {
         let new = match ev.into_inner() {
             EventKind::Modify(ev) => {
                 let event::Modify { diff, resource } = ev;
-                let mut diff = diff.map(|seg| ZeroFiller { len: seg.len() });
+                let mut diff = diff.map(|seg, _| ZeroFiller { len: seg.len() });
                 diff.with_block_size(1).unwrap();
                 EventKind::Modify(event::Modify { resource, diff })
             }
@@ -500,7 +500,7 @@ impl<'a> EventApplier<'a> {
             offsets.sort_unstable_by(|a, b| a.idx.cmp(&b.idx));
             println!("Offsets: {offsets:#?}");
             let block_size = ev.diff().block_size();
-            assert_eq!(block_size, 1, "blocksize of stored diff must be 1");
+            // assert_eq!(block_size, 1, "blocksize of stored diff must be 1");
 
             for ev in self.events.iter_mut() {
                 if ev.event.resource() != current_resource_name {
@@ -517,7 +517,7 @@ impl<'a> EventApplier<'a> {
                             match seg {
                                 den::Segment::Ref(seg) => {
                                     let mut start = seg.start();
-                                    let mut blocks = seg.len(block_size);
+                                    let mut len = seg.len(block_size);
                                     for offset in &offsets {
                                         // `TODO`: or should `seg.start()` actually be the moving
                                         // `start`?
@@ -531,13 +531,13 @@ impl<'a> EventApplier<'a> {
                                         }
                                         if offset.idx < seg.end(block_size) {
                                             if offset.negative {
-                                                blocks = blocks.saturating_sub(offset.len);
+                                                len = len.saturating_sub(offset.len);
                                             } else {
-                                                blocks += offset.len;
+                                                len += offset.len;
                                             }
                                         }
                                     }
-                                    *seg = seg.with_start(start).with_blocks(blocks);
+                                    *seg = seg.with_start(start).with_blocks(len);
                                     cursor += seg.len(block_size);
                                 }
                                 den::Segment::Unknown(seg) => {

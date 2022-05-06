@@ -1303,30 +1303,40 @@ impl<S: ExtendVec> Difference<S> {
     }
     /// Map the [`ExtendVec`]s of the [`Segment::Unknown`]s with `f`.
     ///
+    /// The second argument of `f` is the start of `S` the applied data.
+    ///
     /// Creates a new difference with the same length and values.
     /// Consider using [`Difference::map`].
     ///
     /// # Panics
     ///
     /// Panics if `NS` doesn't have the same [`ExtendVec::len`] as `S`.
-    pub fn map_ref<NS: ExtendVec + 'static>(&self, mut f: impl FnMut(&S) -> NS) -> Difference<NS> {
+    pub fn map_ref<NS: ExtendVec + 'static>(
+        &self,
+        mut f: impl FnMut(&S, usize) -> NS,
+    ) -> Difference<NS> {
         let Self {
             segments,
             block_size,
             original_data_len,
         } = self;
 
+        let mut counter = 0;
         Difference {
             segments: segments
                 .iter()
                 .map(|seg| match seg {
                     Segment::Unknown(seg) => {
                         let len = seg.source().len();
-                        let new = f(seg.source());
+                        let new = f(seg.source(), counter);
                         assert_eq!(len, new.len());
+                        counter += len;
                         Segment::Unknown(SegmentUnknown { source: new })
                     }
-                    Segment::Ref(r) => Segment::Ref(*r),
+                    Segment::Ref(r) => {
+                        counter += r.len(*block_size);
+                        Segment::Ref(*r)
+                    }
                 })
                 .collect(),
             block_size: *block_size,
@@ -1335,6 +1345,8 @@ impl<S: ExtendVec> Difference<S> {
     }
     /// Map the [`ExtendVec`]s of the [`Segment::Unknown`]s with `f`.
     ///
+    /// The second argument of `f` is the start of `S` the applied data.
+    ///
     /// Creates a new difference with the same length and values.
     /// Still allocates [`Difference::segments`] vector.
     /// Consider using [`Difference::map_ref`].
@@ -1342,12 +1354,14 @@ impl<S: ExtendVec> Difference<S> {
     /// # Panics
     ///
     /// Panics if `NS` doesn't have the same [`ExtendVec::len`] as `S`.
-    pub fn map<NS: ExtendVec + 'static>(self, mut f: impl FnMut(S) -> NS) -> Difference<NS> {
+    pub fn map<NS: ExtendVec + 'static>(self, mut f: impl FnMut(S, usize) -> NS) -> Difference<NS> {
         let Self {
             segments,
             block_size,
             original_data_len,
         } = self;
+
+        let mut counter = 0;
 
         Difference {
             segments: segments
@@ -1355,11 +1369,15 @@ impl<S: ExtendVec> Difference<S> {
                 .map(|seg| match seg {
                     Segment::Unknown(seg) => {
                         let len = seg.source().len();
-                        let new = f(seg.source);
+                        let new = f(seg.source, counter);
                         assert_eq!(len, new.len());
+                        counter += len;
                         Segment::Unknown(SegmentUnknown { source: new })
                     }
-                    Segment::Ref(r) => Segment::Ref(r),
+                    Segment::Ref(r) => {
+                        counter += r.len(block_size);
+                        Segment::Ref(r)
+                    }
                 })
                 .collect(),
             block_size,
@@ -1400,7 +1418,7 @@ impl<S: ExtendVec> Difference<S> {
     ///
     /// See [`Self::original_data_len`] for more details.
     pub fn set_original_data_len(&mut self, original_data_len: usize) {
-        self.original_data_len = original_data_len
+        self.original_data_len = original_data_len;
     }
 
     /// Set the block size.

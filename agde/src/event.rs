@@ -286,7 +286,7 @@ pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
     /// May possibly not contain `Self::event`.
     events: &'a [log::ReceivedEvent],
-    rewound_events: Vec<&'a Difference<log::ZeroFiller>>,
+    rewound_events: Vec<Difference>,
     // these are allocated once to optimize allocations
     buffer1: Vec<u8>,
     buffer2: Vec<u8>,
@@ -401,20 +401,13 @@ impl<'a> Unwinder<'a> {
             }
             match received_ev.event.inner() {
                 EventKind::Modify(ev) => {
-                    // `TODO`: what do we do with later differences if any data is modified by the
-                    // incoming diff. Currently, we just reapply the diff, but that can leak the
-                    // `fill_byte` and cause the data to get overridden. Do we keep track of an
-                    // offset to apply to all diffs?
-                    // My messy thoughts:
-                    // Make sure to edit diff if content gets inserted - keep track of offset.
-                    // When applying later, push in a unknown segment in the Difference with the
-                    // content of the offset (if we remove 3, remove 1 ref segment before and fill
-                    // that with 5 unknown data. Example assumes block_size=8)
-                    //
-                    // this is very critical with changes that are not close to the last event's
-                    // changes, say much later in a file.
-                    //
-                    // This will be hard but critical to do.
+                    let diff = {
+                        ev.diff.map_ref(|s, idx| {
+                            resource
+                                .get(idx..idx + s.len())
+                                .map_or_else(Vec::new, Vec::from)
+                        })
+                    };
 
                     // `TODO`: don't hardcode fill_byte.
                     if first {
@@ -423,7 +416,7 @@ impl<'a> Unwinder<'a> {
                         ev.diff().revert(&b1, &mut b2, b' ')?;
                         std::mem::swap(&mut b1, &mut b2);
                     }
-                    self.rewound_events.push(ev.diff());
+                    self.rewound_events.push(diff);
                     first = false;
                 }
                 EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
