@@ -42,7 +42,6 @@ impl ExtendVec for ZeroFiller {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub(crate) struct ReceivedEvent {
-    // `TODO`: store events with the unknown data segments containing no data.
     pub(crate) event: Event<ZeroFiller>,
     /// Message UUID.
     pub(crate) uuid: Uuid,
@@ -147,10 +146,10 @@ impl Log {
         if self.list.iter().rev().any(|item| *item == ev) {
             return;
         }
-        self.list.push(ev);
-        // `TODO`: optimize sort to stop when the one new added has been found.
-        // Sort from latest.
-        self.list.sort();
+        match self.list.binary_search(&ev) {
+            // Also insert duplicate when idx is found
+            Ok(idx) | Err(idx) => self.list.insert(idx, ev),
+        }
         self.trim();
     }
     /// `timestamp` should be the one in [`Event::timestamp`]
