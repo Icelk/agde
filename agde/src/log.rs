@@ -19,17 +19,25 @@ pub struct ZeroFiller {
     len: usize,
 }
 impl ExtendVec for ZeroFiller {
+    #[inline]
     fn extend(&self, vec: &mut Vec<u8>) {
-        // reserve
-        // set len
-        // write
-        vec.extend(std::iter::repeat(0).take(self.len));
+        vec.reserve(self.len);
+        let old_len = Vec::len(vec);
+        unsafe { vec.set_len(old_len + self.len) };
+        let slice = &mut vec[old_len..old_len + self.len];
+        slice.fill(0);
     }
+    #[inline]
+    #[allow(clippy::uninit_vec)] // we know what we're doing
     fn replace(&self, vec: &mut Vec<u8>, position: usize) {
-        // reserve
-        // set len
-        // write
+        let old_len = Vec::len(vec);
+        let reserve = (position + self.len).saturating_sub(old_len);
+        vec.reserve(reserve);
+        unsafe { vec.set_len(old_len + reserve) };
+        let slice = &mut vec[position..position + self.len];
+        slice.fill(0);
     }
+    #[inline]
     fn len(&self) -> usize {
         self.len
     }
