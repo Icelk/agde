@@ -449,7 +449,7 @@ impl<'a> EventApplier<'a> {
         }
         println!("Applied");
         #[allow(clippy::cast_possible_wrap)]
-        let len_diff = resource.len() as isize - len as isize;
+        let len_diff = utils::sub_usize(resource.len(), len);
         let mut offsets = {
             enum Last {
                 Ref { end: usize },
@@ -459,7 +459,6 @@ impl<'a> EventApplier<'a> {
             let diff = ev.diff();
 
             let mut offsets = Vec::with_capacity(8);
-            let mut counter = 0;
             let mut last = Last::Unknown { len: 0 };
 
             for seg in diff.segments() {
@@ -481,13 +480,11 @@ impl<'a> EventApplier<'a> {
                                 negative: false,
                             }),
                         }
-                        counter += seg.len(diff.block_size());
                         last = Last::Ref {
                             end: seg.end(diff.block_size()),
                         };
                     }
                     den::Segment::Unknown(seg) => {
-                        counter += seg.source().len();
                         last = Last::Unknown {
                             len: seg.source().len(),
                         };
@@ -502,8 +499,7 @@ impl<'a> EventApplier<'a> {
         {
             offsets.sort_unstable_by(|a, b| a.idx.cmp(&b.idx));
             println!("Offsets: {offsets:#?}");
-            let diff = ev.diff();
-            let block_size = diff.block_size();
+            let block_size = ev.diff().block_size();
             assert_eq!(block_size, 1, "blocksize of stored diff must be 1");
 
             for ev in self.events.iter_mut() {
@@ -564,6 +560,10 @@ impl<'a> EventApplier<'a> {
                                 }
                             }
                         }
+
+                        let len =
+                            utils::iusize_add(ev.diff.original_data_len(), len_diff).unwrap_or(0);
+                        ev.diff.set_original_data_len(len);
                     }
                     EventKind::Create(_) | EventKind::Delete(_) => {}
                 }
@@ -571,18 +571,6 @@ impl<'a> EventApplier<'a> {
         }
 
         println!("Rewound");
-
-        // `TODO`: use `offsets` to change all other events. Also apply `len_diff` to the
-        // `original_data_len` part of [`Difference`]s.
-        //
-        // That should be everything to get the late edit working!
-        // **queue debugging this spagetti mess of code to find some fundamental issue**
-
-        // How will the revert and implement functions on modify work?
-        // Can revert be a inverse and just call implement?
-        // We need to modify the whole buffer when reverting
-        // Directly modify `resource` as the buffer.
-        // Have a `PartiallyUnknown` data type for the Sections which have removed data.
         Ok(resource)
     }
 }
