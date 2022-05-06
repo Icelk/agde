@@ -785,7 +785,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             .apply_event(event, message.uuid())
                             .expect("manager failed to accept our own event");
 
-                        let resource = applier.resource().expect("our own messages are too old").to_owned();
+                        let resource = applier
+                            .resource()
+                            .expect("our own messages are too old")
+                            .to_owned();
 
                         match applier.event().inner() {
                             agde::EventKind::Modify(_ev) => {
