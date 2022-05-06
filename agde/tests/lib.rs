@@ -39,7 +39,7 @@ fn send_diff() {
                 ))
             );
 
-            let event_applier = receiver
+            let mut event_applier = receiver
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
@@ -70,7 +70,7 @@ fn rework_history() {
     ) -> Vec<u8> {
         match message.inner() {
             MessageKind::Event(event) => {
-                let event_applier = manager
+                let mut event_applier = manager
                     .apply_event(event, message.uuid())
                     .expect("Got event from future.");
                 match event_applier.event().inner() {
@@ -149,7 +149,7 @@ fn basic_diff() {
 
     match message.inner() {
         MessageKind::Event(event) => {
-            let event_applier = receiver
+            let mut event_applier = receiver
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
@@ -287,7 +287,7 @@ ok",
 
     match message.inner() {
         MessageKind::Event(event) => {
-            let event_applier = receiver
+            let mut event_applier = receiver
                 .apply_event(event, message.uuid())
                 .expect("Got event from future.");
             match event_applier.event().inner() {
