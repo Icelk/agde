@@ -3,7 +3,7 @@
 use den::{Difference, ExtendVec, Signature};
 
 use crate::{
-    log, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
+    log, utils, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
     UNIX_EPOCH,
 };
 
@@ -20,6 +20,7 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
     let granular_diff = rough_diff
         .minify(8, base)
         .expect("The way we are using the function, this should never err.");
+    println!("minified {rough_diff:?}");
     granular_diff
 }
 
@@ -136,8 +137,8 @@ macro_rules! event_kind_impl {
             }
         }
         impl<'a> IntoEvent for $type {
-            fn into_ev(self, manager: &Manager) -> Event {
-                Event::new(self.into(), manager.uuid())
+            fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event {
+                Event::with_timestamp(self.into(), manager.uuid(), timestamp)
             }
         }
     };
@@ -148,10 +149,11 @@ macro_rules! event_kind_impl {
 /// Should not be implemented but used with [`Manager::process_event`].
 pub trait Into<S: ExtendVec + 'static = Vec<u8>> {
     /// Converts `self` into an [`Event`].
-    fn into_ev(self, manager: &Manager) -> Event<S>;
+    fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event<S>;
 }
 impl Into for Event {
-    fn into_ev(self, _manager: &Manager) -> Event {
+    fn into_ev(mut self, _manager: &Manager, timestamp: SystemTime) -> Event {
+        self.timestamp = utils::systime_to_dur(timestamp);
         self
     }
 }
@@ -162,8 +164,8 @@ impl<'a, S: ExtendVec + 'static> From<Modify<S>> for Kind<S> {
     }
 }
 impl<'a, S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
-    fn into_ev(self, manager: &Manager) -> Event<S> {
-        Event::new(self.into(), manager.uuid())
+    fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event<S> {
+        Event::with_timestamp(self.into(), manager.uuid(), timestamp)
     }
 }
 event_kind_impl!(Create, Create);
@@ -208,7 +210,7 @@ impl<S: ExtendVec + 'static> Event<S> {
     ///
     /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
     /// else the sync will risk wrong results, forcing [`crate::MessageKind::HashCheck`].
-    pub fn with_timestamp(kind: Kind<S>, sender: Uuid, timestamp: SystemTime) -> Self {
+    pub(crate) fn with_timestamp(kind: Kind<S>, sender: Uuid, timestamp: SystemTime) -> Self {
         Self {
             kind,
             timestamp: timestamp
@@ -239,11 +241,6 @@ impl<S: ExtendVec + 'static> Event<S> {
     pub(crate) fn inner_mut(&mut self) -> &mut Kind<S> {
         &mut self.kind
     }
-    /// Consume `self` and return the inner [`Kind`].
-    #[inline]
-    pub(crate) fn into_inner(self) -> Kind<S> {
-        self.kind
-    }
     /// Get the timestamp of this event.
     ///
     /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
@@ -257,6 +254,14 @@ impl<S: ExtendVec + 'static> Event<S> {
     #[inline]
     pub fn sender(&self) -> Uuid {
         self.sender
+    }
+    /// Get the [`Difference`], if [`Self::inner`] is [`Kind::Modify`].
+    #[must_use]
+    pub fn diff(&self) -> Option<&Difference<S>> {
+        match self.inner() {
+            Kind::Modify(ev) => Some(ev.diff()),
+            _ => None,
+        }
     }
 }
 /// A [`Event`] with internal data.
@@ -326,7 +331,7 @@ impl<'a> Unwinder<'a> {
     pub fn sections<'b>(
         &'b self,
         modern_resource_name: &'b str,
-    ) -> Result<impl Iterator<Item = &Difference<log::ZeroFiller>> + 'b, UnwindError> {
+    ) -> Result<impl Iterator<Item = &Difference> + 'b, UnwindError> {
         self.check_name(modern_resource_name)?;
 
         let iter = self.events.iter().rev().filter_map(move |received_ev| {
@@ -344,6 +349,7 @@ impl<'a> Unwinder<'a> {
         Ok(iter)
     }
     /// Get an iterator over the events stored in this unwinder.
+    /// The first item is the oldest one. The last is the most recent.
     ///
     /// Useful it you want to get resources affected since a timestamp:
     ///
@@ -357,7 +363,7 @@ impl<'a> Unwinder<'a> {
     ///     println!("Resource {} changed in some way.", event.resource());
     /// }
     /// ```
-    pub fn events(&self) -> impl Iterator<Item = &Event<log::ZeroFiller>> + '_ {
+    pub fn events(&self) -> impl Iterator<Item = &Event> + '_ {
         self.events.iter().map(|received_ev| &received_ev.event)
     }
     /// Reverts the `resource` with `modern_resource_name` to the bottom of the internal list.
@@ -401,13 +407,14 @@ impl<'a> Unwinder<'a> {
             }
             match received_ev.event.inner() {
                 EventKind::Modify(ev) => {
-                    let diff = {
-                        ev.diff.map_ref(|s, idx| {
-                            resource
-                                .get(idx..idx + s.len())
-                                .map_or_else(Vec::new, Vec::from)
-                        })
-                    };
+                    // let diff = {
+                        // ev.diff.map_ref(|s, idx| {
+                            // resource
+                                // .get(idx..idx + s.len())
+                                // .map_or_else(Vec::new, Vec::from)
+                        // })
+                    // };
+                    let diff = ev.diff();
 
                     // `TODO`: don't hardcode fill_byte.
                     if first {
@@ -416,7 +423,7 @@ impl<'a> Unwinder<'a> {
                         ev.diff().revert(&b1, &mut b2, b' ')?;
                         std::mem::swap(&mut b1, &mut b2);
                     }
-                    self.rewound_events.push(diff);
+                    self.rewound_events.push(diff.clone());
                     first = false;
                 }
                 EventKind::Delete(_) | EventKind::Create(_) => unreachable!(

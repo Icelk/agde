@@ -578,7 +578,11 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             agde::MessageKind::InvalidUuid(_)
                             | agde::MessageKind::MismatchingVersions(_) => {}
                             agde::MessageKind::Event(event) => {
-                                info!("Got event from pier {}: {event:?}", message.sender());
+                                info!(
+                                    "Got event from pier {}: {:?} {event:?}",
+                                    message.sender(),
+                                    SystemTime::now()
+                                );
                                 {
                                     changed.lock().await.insert(event.resource().to_owned());
                                 }
@@ -708,61 +712,89 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         if modern.is_some() {
                             let event = match diff {
                                 // `TODO`: Give successor
-                                Change::Delete(res) => agde::Event::with_timestamp(
+                                Change::Delete(res) => agde::Event::new(
                                     agde::event::Kind::Delete(agde::event::Delete::new(res, None)),
                                     manager.uuid(),
-                                    last_check,
                                 ),
-                                Change::Modify(res, created) => {
+                                Change::Modify(resource, created) => {
                                     if created {
-                                        let event = agde::Event::with_timestamp(
+                                        let event = agde::Event::new(
                                             agde::event::Kind::Create(agde::event::Create::new(
-                                                res.clone(),
+                                                resource.clone(),
                                             )),
                                             manager.uuid(),
-                                            // schedule create event a bit before modify.
-                                            last_check - Duration::from_micros(10),
                                         );
-                                        messages.push(manager.process_event(event));
+                                        // schedule create event a bit before modify.
+                                        messages.push(manager.process_event(
+                                            event,
+                                            SystemTime::now() - Duration::from_micros(10),
+                                        ));
                                     }
 
-                                    let data = (options.read)(res.clone(), Storage::Current)
+                                    let data = (options.read)(resource.clone(), Storage::Current)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
 
-                                    let mut base = (options.read)(res.clone(), Storage::Public)
-                                        .await
-                                        .map_err(|_| ApplicationError::StoragePermissions)?
-                                        .unwrap_or_default();
+                                    let mut base =
+                                        (options.read)(resource.clone(), Storage::Public)
+                                            .await
+                                            .map_err(|_| ApplicationError::StoragePermissions)?
+                                            .unwrap_or_default();
 
                                     info!("Read {:?} from public", String::from_utf8_lossy(&base));
+                                    info!(
+                                        "Last check: {last_check:?}, now {:?}",
+                                        SystemTime::now()
+                                    );
 
                                     let mut unwinder = manager.unwinder_to(last_check);
 
-                                    /* let mut base_slice = agde::SliceBuf::with_whole(&mut base); */
-                                    /* base_slice.extend_to_needed(unwinder.sections(&res).expect("error when unwinding public storage. Resource name is valid."), 0); */
-
                                     info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
 
-                                    base = unwinder.unwind(&base, &res).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
+                                    let mut offsets = agde::utils::Offsets::new();
+                                    {
+                                        let mut iter = unwinder
+                                            .events()
+                                            .filter_map(agde::Event::diff)
+                                            .peekable();
+                                        while let Some(diff) = iter.next() {
+                                            let new_len = iter
+                                                .peek()
+                                                .map(|diff| diff.original_data_len())
+                                                .unwrap_or_else(|| base.len());
+                                            let len_diff = agde::utils::sub_usize(
+                                                new_len,
+                                                diff.original_data_len(),
+                                            );
+                                            offsets.add_diff(diff, len_diff);
+                                        }
+                                    }
+
+                                    base = unwinder.unwind(&base, &resource).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
 
                                     warn!(
                                         "Unwould public data, now resource at: '''\n{:?}\n'''",
-                                        base
+                                        std::str::from_utf8(&base)
                                     );
 
-                                    let event = agde::event::Modify::new(res, &data, &base);
-                                    println!("Diff: {:#?}", event.diff());
-
-                                    agde::Event::with_timestamp(
+                                    let event = agde::event::Modify::new(resource, &data, &base);
+                                    let mut event = agde::Event::new(
                                         agde::event::Kind::Modify(event),
                                         manager.uuid(),
-                                        last_check,
-                                    )
+                                    );
+
+                                    offsets.apply(std::iter::once(&mut event));
+
+                                    println!("Diff: {:#?}", event.diff().unwrap());
+                                    // `TODO`: apply and rewind event here, so we don't have to
+                                    // unwind it again below when we apply it.
+
+                                    event
                                 }
                             };
 
-                            messages.push(manager.process_event(event))
+                            // `TODO`: fix this
+                            messages.push(manager.process_event(event, SystemTime::now()))
                         } else {
                             // edited resource has been removed.
                         }

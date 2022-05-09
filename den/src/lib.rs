@@ -1584,9 +1584,9 @@ impl<S: ExtendVec> Difference<S> {
         let mut position = 0;
         for segment in self.segments() {
             match segment {
-                Segment::Ref(block_ref_segment) => {
-                    let start = block_ref_segment.start;
-                    let end = block_ref_segment.end(block_size).min(base.len());
+                Segment::Ref(ref_segment) => {
+                    let start = ref_segment.start;
+                    let end = ref_segment.end(block_size).min(base.len());
 
                     let range = start..end;
                     base.get(range.clone()).ok_or(Roob)?;
@@ -1655,10 +1655,10 @@ impl<S: ExtendVec> Difference<S> {
                     let missing = end.checked_sub(target.len());
                     let mut offset = 0;
                     if let Some(missing) = missing {
-                        if missing >= block_size {
-                            return Err(Roob);
-                        }
-                        offset = missing;
+                        // if missing >= block_size {
+                            // return Err(Roob);
+                        // }
+                        offset = missing.min(block_size);
                     }
                     let current_end = index + seg.len(block_size) - offset;
                     let current_end = current_end.min(current.len());

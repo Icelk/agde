@@ -50,13 +50,13 @@ impl ExtendVec for ZeroFiller {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub(crate) struct ReceivedEvent {
-    pub(crate) event: Event<ZeroFiller>,
+    pub(crate) event: Event,
     /// Message UUID.
-    pub(crate) uuid: Uuid,
+    pub(crate) message_uuid: Uuid,
 }
 impl PartialEq for ReceivedEvent {
     fn eq(&self, other: &Self) -> bool {
-        self.event.timestamp() == other.event.timestamp() && self.uuid == other.uuid
+        self.event.timestamp() == other.event.timestamp() && self.message_uuid == other.message_uuid
     }
 }
 impl Eq for ReceivedEvent {}
@@ -70,7 +70,7 @@ impl Ord for ReceivedEvent {
         use std::cmp::Ordering::Equal;
 
         match self.event.timestamp().cmp(&other.event.timestamp()) {
-            Equal => self.uuid.cmp(&other.uuid),
+            Equal => self.message_uuid.cmp(&other.message_uuid),
             ord => ord,
         }
     }
@@ -133,11 +133,11 @@ impl Log {
         let mut to_drop = 0;
 
         loop {
-            let last = self.list.get(to_drop);
-            if self.list.len() > self.limit as usize {
+            if self.list.len().saturating_sub(to_drop) > self.limit as usize {
                 to_drop += 1;
                 continue;
             }
+            let last = self.list.get(to_drop);
             if let Some(last) = last {
                 if last.event.timestamp() < limit {
                     to_drop += 1;
@@ -163,22 +163,22 @@ impl Log {
     /// `timestamp` should be the one in [`Event::timestamp`]
     #[inline]
     pub(crate) fn insert(&mut self, ev: Event, message_uuid: Uuid) {
-        let uuid = ev.sender();
-        let timestamp = utils::dur_to_systime(ev.timestamp());
-        let new = match ev.into_inner() {
-            EventKind::Modify(ev) => {
-                let event::Modify { diff, resource } = ev;
-                let mut diff = diff.map(|seg, _| ZeroFiller { len: seg.len() });
-                diff.with_block_size(1).unwrap();
-                EventKind::Modify(event::Modify { resource, diff })
-            }
-            EventKind::Create(ev) => EventKind::Create(ev),
-            EventKind::Delete(ev) => EventKind::Delete(ev),
-        };
-        let ev = Event::with_timestamp(new, uuid, timestamp);
+        // let uuid = ev.sender();
+        // let timestamp = utils::dur_to_systime(ev.timestamp());
+        // let new = match ev.into_inner() {
+        // EventKind::Modify(ev) => {
+        // let event::Modify { diff, resource } = ev;
+        // let mut diff = diff.map(|seg, _| ZeroFiller { len: seg.len() });
+        // diff.with_block_size(1).unwrap();
+        // EventKind::Modify(event::Modify { resource, diff })
+        // }
+        // EventKind::Create(ev) => EventKind::Create(ev),
+        // EventKind::Delete(ev) => EventKind::Delete(ev),
+        // };
+        // let ev = Event::with_timestamp(new, uuid, timestamp);
         let received = ReceivedEvent {
             event: ev,
-            uuid: message_uuid,
+            message_uuid,
         };
         self._insert(received);
     }
@@ -196,7 +196,7 @@ impl Log {
     #[inline]
     pub(crate) fn cutoff_from_uuid(&self, cutoff_uuid: Uuid) -> Option<usize> {
         for (pos, ev) in self.list.iter().enumerate() {
-            if ev.uuid == cutoff_uuid {
+            if ev.message_uuid == cutoff_uuid {
                 return Some(pos);
             }
         }
@@ -235,7 +235,7 @@ impl Log {
         cutoff_timestamp: Duration,
     ) -> Result<UuidCheck, UuidError> {
         let uuid = if let Some(ev) = self.list.get(cutoff) {
-            ev.uuid
+            ev.message_uuid
         } else {
             return Err(UuidError::CutoffMissing);
         };
@@ -249,7 +249,7 @@ impl Log {
         let iter = self.list.get(start..end).unwrap();
         let mut hasher = twox_hash::xxh3::Hash128::default();
         for ev in iter {
-            hasher.write(&ev.uuid.inner().to_le_bytes());
+            hasher.write(&ev.message_uuid.inner().to_le_bytes());
         }
         let hash = hasher.finish_ext();
 
@@ -300,10 +300,20 @@ impl Log {
         event: &'a Event,
         message_uuid: Uuid,
     ) -> EventApplier<'a> {
-        fn slice_start(log: &Log, resource: &str, uuid: Uuid) -> usize {
+        fn slice_start(log: &Log, resource: &str, message_uuid: Uuid) -> usize {
+            println!();
+            println!("  Searching for {resource:?} in {:?}", log.list);
             // `pos` is from the end of the list.
             for (pos, event) in log.list.iter().enumerate().rev() {
-                if event.uuid == uuid && event.event.resource() == resource {
+                if event.message_uuid == message_uuid && event.event.resource() == resource {
+                    println!("     LOOK");
+                    println!(
+                        "Found start uuid at pos {} in list (last is latest) {:?}",
+                        pos + 1,
+                        log.list
+                    );
+                    println!("Resulting {:?}", &log.list[pos + 1..]);
+                    println!();
                     // Match!
                     // Also takes the current event in the slice.
                     // ↑ is however not true for the backup return below.
@@ -320,7 +330,7 @@ impl Log {
         if let EventKind::Delete(delete_ev) = event.inner() {
             if let Some(successor) = delete_ev.successor() {
                 for received in &mut self.list[slice_index..] {
-                    if received.uuid == message_uuid {
+                    if received.message_uuid == message_uuid {
                         continue;
                     }
 
@@ -351,6 +361,7 @@ impl Log {
             .ok()
             .map(|_| event.resource());
         // Upholds the contracts described in the comment before [`EventApplier`].
+        println!("New applier with events {slice:?}");
         EventApplier {
             events: slice,
             modern_resource_name: resource,
@@ -405,13 +416,6 @@ impl<'a> EventApplier<'a> {
     /// bounds.
     #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
     pub fn apply(&mut self, resource: &[u8]) -> Result<Vec<u8>, ApplyError> {
-        #[derive(Debug)]
-        struct Offset {
-            idx: usize,
-            len: usize,
-            negative: bool,
-        }
-
         let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
@@ -424,6 +428,7 @@ impl<'a> EventApplier<'a> {
             // `TODO`: remove the `.to_vec`
             return Ok(resource.to_vec());
         };
+        println!("Events: {:?}", self.events);
         let mut unwinder = event::Unwinder::new(self.events);
 
         let mut resource = match unwinder.unwind(resource, current_resource_name) {
@@ -442,133 +447,23 @@ impl<'a> EventApplier<'a> {
         // When back there, implement the event.
         if ev.diff().apply_overlaps() {
             let mut other = Vec::with_capacity(resource.len() + 32);
+            println!("apply: normal");
             ev.diff().apply(&resource, &mut other)?;
             resource = other;
         } else {
+            println!("In place");
             ev.diff().apply_in_place(&mut resource)?;
         }
         println!("Applied");
-        #[allow(clippy::cast_possible_wrap)]
+        println!("og len {len}, now {:?}", resource.len());
         let len_diff = utils::sub_usize(resource.len(), len);
-        let mut offsets = {
-            enum Last {
-                Ref { end: usize },
-                Unknown { len: usize },
-            }
-
-            let diff = ev.diff();
-
-            let mut offsets = Vec::with_capacity(8);
-            let mut last = Last::Unknown { len: 0 };
-
-            for seg in diff.segments() {
-                match seg {
-                    den::Segment::Ref(seg) => {
-                        match last {
-                            Last::Ref { end } => {
-                                if seg.start() >= end {
-                                    offsets.push(Offset {
-                                        idx: seg.start(),
-                                        len: seg.start() - end,
-                                        negative: true,
-                                    });
-                                }
-                            }
-                            Last::Unknown { len } => offsets.push(Offset {
-                                idx: seg.start(),
-                                len,
-                                negative: false,
-                            }),
-                        }
-                        last = Last::Ref {
-                            end: seg.end(diff.block_size()),
-                        };
-                    }
-                    den::Segment::Unknown(seg) => {
-                        last = Last::Unknown {
-                            len: seg.source().len(),
-                        };
-                    }
-                }
-            }
-            offsets
-        };
+        let mut offsets = utils::Offsets::new();
+        // UNWRAP: we know the ONE `ev.diff` has the same `block_size`
+        offsets.add_diff(ev.diff(), len_diff);
 
         resource = unwinder.rewind(&resource)?;
 
-        {
-            offsets.sort_unstable_by(|a, b| a.idx.cmp(&b.idx));
-            println!("Offsets: {offsets:#?}");
-            let block_size = ev.diff().block_size();
-            // assert_eq!(block_size, 1, "blocksize of stored diff must be 1");
-
-            for ev in self.events.iter_mut() {
-                if ev.event.resource() != current_resource_name {
-                    continue;
-                }
-                let kind = ev.event.inner_mut();
-                match kind {
-                    EventKind::Modify(ev) => {
-                        let segments = ev.diff.segments_mut();
-
-                        let mut cursor = 0;
-
-                        for seg in segments {
-                            match seg {
-                                den::Segment::Ref(seg) => {
-                                    let mut start = seg.start();
-                                    let mut len = seg.len(block_size);
-                                    for offset in &offsets {
-                                        // `TODO`: or should `seg.start()` actually be the moving
-                                        // `start`?
-                                        if offset.idx <= seg.start() {
-                                            if offset.negative {
-                                                start = start.saturating_sub(offset.len);
-                                            } else {
-                                                start += offset.len;
-                                            }
-                                            continue;
-                                        }
-                                        if offset.idx < seg.end(block_size) {
-                                            if offset.negative {
-                                                len = len.saturating_sub(offset.len);
-                                            } else {
-                                                len += offset.len;
-                                            }
-                                        }
-                                    }
-                                    *seg = seg.with_start(start).with_blocks(len);
-                                    cursor += seg.len(block_size);
-                                }
-                                den::Segment::Unknown(seg) => {
-                                    let mut blocks = seg.source().len;
-                                    for offset in &offsets {
-                                        if offset.idx >= cursor
-                                            && offset.idx < cursor + seg.source().len
-                                        {
-                                            if offset.negative {
-                                                blocks = blocks.saturating_sub(offset.len);
-                                            } else {
-                                                blocks += offset.len;
-                                            }
-                                        }
-                                    }
-                                    *seg = den::SegmentUnknown {
-                                        source: ZeroFiller { len },
-                                    };
-                                    cursor += seg.source().len;
-                                }
-                            }
-                        }
-
-                        let len =
-                            utils::iusize_add(ev.diff.original_data_len(), len_diff).unwrap_or(0);
-                        ev.diff.set_original_data_len(len);
-                    }
-                    EventKind::Create(_) | EventKind::Delete(_) => {}
-                }
-            }
-        }
+        offsets.apply(self.events.iter_mut().map(|ev|&mut ev.event));
 
         println!("Rewound");
         Ok(resource)

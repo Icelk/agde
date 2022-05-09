@@ -484,11 +484,14 @@ impl Manager {
     }
     /// Takes a [`DatafulEvent`] and returns a [`Message`].
     ///
+    /// `last_event_send` is the timestamp of when you last sent messages. It's used as the
+    /// creation date for the changes, as all our changes are diffed to that point in time.
+    ///
     /// Be careful with [`EventKind::Modify`] as you NEED to have a
     /// [`EventKind::Create`] before it on the same resource.
     #[inline]
-    pub fn process_event(&mut self, event: impl IntoEvent) -> Message {
-        let event = event.into_ev(self);
+    pub fn process_event(&mut self, event: impl IntoEvent, last_event_send: SystemTime) -> Message {
+        let event = event.into_ev(self, last_event_send);
 
         let uuid = self.generate_uuid();
 
@@ -904,11 +907,7 @@ impl Manager {
     pub fn unwinder_to(&self, timestamp: SystemTime) -> event::Unwinder {
         let events_start = self
             .event_log
-            .cutoff_from_time(
-                timestamp
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO),
-            )
+            .cutoff_from_time(utils::systime_to_dur(timestamp))
             .unwrap_or(0);
         let events = &self.event_log.list[events_start..];
 
