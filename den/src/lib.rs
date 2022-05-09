@@ -1437,6 +1437,9 @@ impl<S: ExtendVec> Difference<S> {
         if block_size == 0 {
             return Err(MinifyError::Zero);
         }
+        if self.block_size() == block_size {
+            return Ok(())
+        }
         if self.block_size() <= block_size {
             return Err(MinifyError::NewLarger);
         }
