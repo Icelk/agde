@@ -445,7 +445,7 @@ impl<'a> EventApplier<'a> {
         );
         let len = resource.len();
         // When back there, implement the event.
-        if ev.diff().apply_overlaps() {
+        if ev.diff().apply_overlaps(resource.len()) {
             let mut other = Vec::with_capacity(resource.len() + 32);
             println!("apply: normal");
             ev.diff().apply(&resource, &mut other)?;
@@ -463,7 +463,7 @@ impl<'a> EventApplier<'a> {
 
         resource = unwinder.rewind(&resource)?;
 
-        offsets.apply(self.events.iter_mut().map(|ev|&mut ev.event));
+        offsets.apply(self.events.iter_mut().map(|ev| &mut ev.event));
 
         println!("Rewound");
         Ok(resource)

@@ -479,13 +479,13 @@ impl HashResult {
     fn to_bytes(self) -> [u8; 16] {
         match self {
             Self::None4(bytes) | Self::CyclicPoly32(bytes) | Self::Adler32(bytes) => {
-                to_16_bytes(&bytes)
+                to_16_le_bytes(&bytes)
             }
             Self::None8(bytes)
             | Self::Fnv(bytes)
             | Self::XXH3_64(bytes)
-            | Self::CyclicPoly64(bytes) => to_16_bytes(&bytes),
-            Self::None16(bytes) | Self::XXH3_128(bytes) => to_16_bytes(&bytes),
+            | Self::CyclicPoly64(bytes) => to_16_le_bytes(&bytes),
+            Self::None16(bytes) | Self::XXH3_128(bytes) => to_16_le_bytes(&bytes),
         }
     }
 }
@@ -558,7 +558,7 @@ impl StackSlice<16> {
 }
 
 #[must_use]
-fn to_16_bytes<const SIZE: usize>(bytes: &[u8; SIZE]) -> [u8; 16] {
+fn to_16_le_bytes<const SIZE: usize>(bytes: &[u8; SIZE]) -> [u8; 16] {
     let mut bytes_fixed = zeroed();
 
     bytes_fixed[..SIZE].copy_from_slice(bytes);
@@ -1409,7 +1409,7 @@ impl<S: ExtendVec> Difference<S> {
         }
         total
     }
-    /// Get the length of the original data.
+    /// Get the length of the original data - the data fed to [`SignatureBuilder::write`].
     #[must_use]
     pub fn original_data_len(&self) -> usize {
         self.original_data_len
@@ -1438,7 +1438,7 @@ impl<S: ExtendVec> Difference<S> {
             return Err(MinifyError::Zero);
         }
         if self.block_size() == block_size {
-            return Ok(())
+            return Ok(());
         }
         if self.block_size() <= block_size {
             return Err(MinifyError::NewLarger);
@@ -1465,6 +1465,8 @@ impl<S: ExtendVec> Difference<S> {
 
     /// Returns whether or not applying this diff is impossible to do on a single [`Vec`].
     ///
+    /// `base_len` is the length of `base` passed to [`Self::apply`] or [`Self::apply_in_place`].
+    ///
     /// If the returned value is `true`, the apply function will try to read data from parts of the
     /// `Vec` already overridden.
     /// You should be able to use a single `Vec` if the returned value is `false`.
@@ -1487,7 +1489,7 @@ impl<S: ExtendVec> Difference<S> {
     /// let minified = diff.minify(8, &base_data)
     ///     .expect("This won't panic, as the data hasn't changed from calling the other functions.");
     ///
-    /// let data = if minified.apply_overlaps() {
+    /// let data = if minified.apply_overlaps(base_data.len()) {
     ///     let mut data = Vec::new();
     ///     minified.apply(&base_data, &mut data);
     ///     data
@@ -1499,20 +1501,41 @@ impl<S: ExtendVec> Difference<S> {
     /// assert_eq!(data, target_data);
     /// ```
     #[must_use]
-    pub fn apply_overlaps(&self) -> bool {
+    pub fn apply_overlaps(&self, base_len: usize) -> bool {
+        self._apply_overlaps(base_len, false)
+    }
+    fn _apply_overlaps(&self, base_len: usize, adaptive_end: bool) -> bool {
+        let previous_data_end = self.original_data_len();
         let mut position = 0;
+        let mut found_end = false;
+
         for segment in self.segments() {
             match segment {
                 Segment::Ref(seg) => {
                     if seg.start() < position {
                         return true;
                     }
+                    if adaptive_end {
+                        let seg_end = seg.end(self.block_size());
+                        // `ref_segment` is to the very end.
+                        if seg_end >= previous_data_end {
+                            // Then, max out end, even if new end is after the previous data's end.
+                            let end = seg_end.min(base_len);
+                            let additional = base_len - end;
+                            found_end = true;
+                            position += additional;
+                        }
+                    }
+
                     position += seg.len(self.block_size());
                 }
                 Segment::Unknown(seg) => {
                     position += seg.source().len();
                 }
             }
+        }
+        if adaptive_end && !found_end {
+            return true;
         }
         false
     }
@@ -1529,15 +1552,34 @@ impl<S: ExtendVec> Difference<S> {
     /// # Errors
     ///
     /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
+    /// If `base` is the same data written to [`SignatureBuilder::write`], this error will not
+    /// occur, granted this diff is derived from that [`Signature`].
     pub fn apply(&self, base: &[u8], out: &mut Vec<u8>) -> Result<(), ApplyError> {
+        self._apply(base, out, false)
+    }
+    #[inline(always)]
+    fn _apply(&self, base: &[u8], out: &mut Vec<u8>, adaptive_end: bool) -> Result<(), ApplyError> {
         use ApplyError::RefOutOfBounds as Roob;
 
         let block_size = self.block_size();
+        let previous_data_end = self.original_data_len();
+        let mut found_end = false;
+
         for segment in self.segments() {
             match segment {
-                Segment::Ref(block_ref_segment) => {
-                    let start = block_ref_segment.start;
-                    let end = cmp::min(block_ref_segment.end(block_size), base.len());
+                Segment::Ref(ref_segment) => {
+                    let start = ref_segment.start;
+                    let seg_end = ref_segment.end(block_size);
+                    let mut end = seg_end.min(base.len());
+
+                    if adaptive_end {
+                        // `ref_segment` is to the very end.
+                        if seg_end >= previous_data_end {
+                            // Then, max out end, even if new end is after the previous data's end.
+                            end = base.len();
+                            found_end = true;
+                        }
+                    }
 
                     let data = base.get(start..end).ok_or(Roob)?;
                     data.extend(out);
@@ -1546,6 +1588,19 @@ impl<S: ExtendVec> Difference<S> {
                     let data = &unknown_segment.source;
                     data.extend(out);
                 }
+            }
+        }
+
+        if adaptive_end {
+            // previous_data_end is the length of the data written to Signature,
+            // base is the new, potentially modified data.
+            //
+            // If we've added to the end, push the additional bytes to `out`, as a last-effort
+            // to not lose any data.
+            //
+            // This will only occur if no other ref covered the end
+            if !found_end && base.len() > previous_data_end {
+                out.extend_from_slice(&base[previous_data_end..]);
             }
         }
 
@@ -1568,6 +1623,9 @@ impl<S: ExtendVec> Difference<S> {
     ///
     /// See [`Self::apply_overlaps`].
     pub fn apply_in_place(&self, base: &mut Vec<u8>) -> Result<(), ApplyError> {
+        self._apply_in_place(base, false)
+    }
+    fn _apply_in_place(&self, base: &mut Vec<u8>, adaptive_end: bool) -> Result<(), ApplyError> {
         #[allow(clippy::uninit_vec)] // we know what we're doing
         fn copy_within_vec<T: Copy>(vec: &mut Vec<T>, range: Range<usize>, position: usize) {
             let range_len = range.len();
@@ -1580,13 +1638,27 @@ impl<S: ExtendVec> Difference<S> {
         }
         use ApplyError::RefOutOfBounds as Roob;
 
+        // `TODO`: calculate allocation needed before
+
         let block_size = self.block_size();
+        let previous_data_end = self.original_data_len();
+
         let mut position = 0;
+
         for segment in self.segments() {
             match segment {
                 Segment::Ref(ref_segment) => {
                     let start = ref_segment.start;
-                    let end = ref_segment.end(block_size).min(base.len());
+                    let seg_end = ref_segment.end(block_size);
+                    let mut end = seg_end.min(base.len());
+
+                    if adaptive_end {
+                        // `ref_segment` is to the very end.
+                        if seg_end >= previous_data_end {
+                            // Then, max out end, even if new end is after the previous data's end.
+                            end = base.len();
+                        }
+                    }
 
                     let range = start..end;
                     base.get(range.clone()).ok_or(Roob)?;
@@ -1600,6 +1672,7 @@ impl<S: ExtendVec> Difference<S> {
                 }
             }
         }
+
         // shorten the vec if the new length is less than old
         base.truncate(position);
 
@@ -1656,7 +1729,7 @@ impl<S: ExtendVec> Difference<S> {
                     let mut offset = 0;
                     if let Some(missing) = missing {
                         // if missing >= block_size {
-                            // return Err(Roob);
+                        // return Err(Roob);
                         // }
                         offset = missing.min(block_size);
                     }

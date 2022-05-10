@@ -408,11 +408,11 @@ impl<'a> Unwinder<'a> {
             match received_ev.event.inner() {
                 EventKind::Modify(ev) => {
                     // let diff = {
-                        // ev.diff.map_ref(|s, idx| {
-                            // resource
-                                // .get(idx..idx + s.len())
-                                // .map_or_else(Vec::new, Vec::from)
-                        // })
+                    // ev.diff.map_ref(|s, idx| {
+                    // resource
+                    // .get(idx..idx + s.len())
+                    // .map_or_else(Vec::new, Vec::from)
+                    // })
                     // };
                     let diff = ev.diff();
 
@@ -449,7 +449,7 @@ impl<'a> Unwinder<'a> {
         let mut other = vec![];
         // Unwind the stack, redoing all the events.
         while let Some(diff) = self.rewound_events.pop() {
-            if diff.apply_overlaps() {
+            if diff.apply_overlaps(vec.len()) {
                 diff.apply(&vec, &mut other)?;
                 std::mem::swap(&mut vec, &mut other);
                 other.clear();
