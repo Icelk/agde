@@ -1229,7 +1229,6 @@ impl Difference {
                     };
 
                     if let Some((base_data, start)) = base_data {
-                        println!("minify {:?} at {start}", std::str::from_utf8(base_data));
                         let mut builder = Signature::new(block_size);
                         builder.write(base_data);
                         let signature = builder.finish();
@@ -1535,7 +1534,8 @@ impl<S: ExtendVec> Difference<S> {
             }
         }
         if adaptive_end && !found_end {
-            return true;
+            // only if position is after previous_data_end, we can't copy within slice.
+            return position > previous_data_end;
         }
         false
     }
@@ -1644,6 +1644,7 @@ impl<S: ExtendVec> Difference<S> {
         let previous_data_end = self.original_data_len();
 
         let mut position = 0;
+        let mut found_end = false;
 
         for segment in self.segments() {
             match segment {
@@ -1657,6 +1658,7 @@ impl<S: ExtendVec> Difference<S> {
                         if seg_end >= previous_data_end {
                             // Then, max out end, even if new end is after the previous data's end.
                             end = base.len();
+                            found_end = true;
                         }
                     }
 
@@ -1671,6 +1673,12 @@ impl<S: ExtendVec> Difference<S> {
                     position += data.len();
                 }
             }
+        }
+
+        if !found_end && position < previous_data_end {
+            let len = Vec::len(base);
+            copy_within_vec(base, previous_data_end..len, position);
+            position += len - previous_data_end;
         }
 
         // shorten the vec if the new length is less than old
