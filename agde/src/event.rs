@@ -436,13 +436,6 @@ impl<'a> Unwinder<'a> {
             }
             match received_ev.event.inner() {
                 EventKind::Modify(ev) => {
-                    // let diff = {
-                    // ev.diff.map_ref(|s, idx| {
-                    // resource
-                    // .get(idx..idx + s.len())
-                    // .map_or_else(Vec::new, Vec::from)
-                    // })
-                    // };
                     let diff = ev.diff();
 
                     // `TODO`: don't hardcode fill_byte.

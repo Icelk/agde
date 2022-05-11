@@ -747,6 +747,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         SystemTime::now()
                                     );
 
+                                    // `TODO`: rewind events ↓ on the current buffer instead.
+                                    //
+                                    // This avoids filling the unwound data with zeroes or ' 's,
+                                    // which results in less erroneous diffs.
                                     let mut unwinder = manager.unwinder_to(last_check);
 
                                     info!("Events {:?}", unwinder.events().collect::<Vec<_>>());

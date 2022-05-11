@@ -1812,9 +1812,6 @@ impl<S: ExtendVec> Difference<S> {
                     let missing = end.checked_sub(target.len());
                     let mut offset = 0;
                     if let Some(missing) = missing {
-                        // if missing >= block_size {
-                        // return Err(Roob);
-                        // }
                         offset = missing.min(block_size);
                     }
                     let current_end = index + seg.len(block_size) - offset;
