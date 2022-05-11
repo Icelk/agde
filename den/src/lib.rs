@@ -1503,6 +1503,26 @@ impl<S: ExtendVec> Difference<S> {
     pub fn apply_overlaps(&self, base_len: usize) -> bool {
         self._apply_overlaps(base_len, false)
     }
+    /// Returns whether or not applying this diff is impossible to do on a single [`Vec`].
+    ///
+    /// `base_len` is the length of `base` passed to [`Self::apply`] or [`Self::apply_in_place`].
+    ///
+    /// If the returned value is `true`, the apply function will try to read data from parts of the
+    /// `Vec` already overridden.
+    /// You should be able to use a single `Vec` if the returned value is `false`.
+    ///
+    /// The adaptive end part means that if `base` isn't the same as fed to
+    /// [`SignatureBuilder::write`], we'll try to write any additional written data to the end.
+    /// This makes it feasible to apply diffs after modifying `base`, without all
+    /// modifications being overridden.
+    ///
+    /// # Examples
+    ///
+    /// See [`Self::apply_overlaps`].
+    #[must_use]
+    pub fn apply_overlaps_adaptive_end(&self, base_len: usize) -> bool {
+        self._apply_overlaps(base_len, true)
+    }
     fn _apply_overlaps(&self, base_len: usize, adaptive_end: bool) -> bool {
         let previous_data_end = self.original_data_len();
         let mut position = 0;
@@ -1556,6 +1576,28 @@ impl<S: ExtendVec> Difference<S> {
     /// occur, granted this diff is derived from that [`Signature`].
     pub fn apply(&self, base: &[u8], out: &mut Vec<u8>) -> Result<(), ApplyError> {
         self._apply(base, out, false)
+    }
+    /// Apply `diff` to the `base` data base, appending the result to `out`.
+    ///
+    /// Consider checking [`Self::apply_overlaps`] and calling [`Self::apply_in_place`]
+    /// to remove the need for the [`Vec`].
+    ///
+    /// The adaptive end part means that if `base` isn't the same as fed to
+    /// [`SignatureBuilder::write`], we'll try to write any additional written data to the end.
+    /// This makes it feasible to apply diffs after modifying `base`, without all
+    /// modifications being overridden.
+    ///
+    /// # Security
+    ///
+    /// The `diff` should be sanitized if input is suspected to be malicious.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
+    /// If `base` is the same data written to [`SignatureBuilder::write`], this error will not
+    /// occur, granted this diff is derived from that [`Signature`].
+    pub fn apply_adaptive_end(&self, base: &[u8], out: &mut Vec<u8>) -> Result<(), ApplyError> {
+        self._apply(base, out, true)
     }
     #[inline(always)]
     fn _apply(&self, base: &[u8], out: &mut Vec<u8>, adaptive_end: bool) -> Result<(), ApplyError> {
@@ -1617,6 +1659,8 @@ impl<S: ExtendVec> Difference<S> {
     ///
     /// # Errors
     ///
+    /// If this returns an error, consider `base` to be bogus data.
+    ///
     /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
     ///
     /// # Examples
@@ -1624,6 +1668,32 @@ impl<S: ExtendVec> Difference<S> {
     /// See [`Self::apply_overlaps`].
     pub fn apply_in_place(&self, base: &mut Vec<u8>) -> Result<(), ApplyError> {
         self._apply_in_place(base, false)
+    }
+    /// Apply `diff` to the `base` data base, mutating the `base` data.
+    /// You **MUST** check that this is possible using [`Self::apply_overlaps_adaptive_end`].
+    /// Neglecting that step will result in data loss and erroneous data.
+    /// This WILL NOT give an error in case of breaking that contract.
+    ///
+    /// The adaptive end part means that if `base` isn't the same as fed to
+    /// [`SignatureBuilder::write`], we'll try to write any additional written data to the end.
+    /// This makes it feasible to apply diffs after modifying `base`, without all
+    /// modifications being overridden.
+    ///
+    /// # Security
+    ///
+    /// The `diff` should be sanitized if input is suspected to be malicious.
+    ///
+    /// # Errors
+    ///
+    /// If this returns an error, consider `base` to be bogus data.
+    ///
+    /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
+    ///
+    /// # Examples
+    ///
+    /// See [`Self::apply_overlaps`].
+    pub fn apply_in_place_adaptive_end(&self, base: &mut Vec<u8>) -> Result<(), ApplyError> {
+        self._apply_in_place(base, true)
     }
     fn _apply_in_place(&self, base: &mut Vec<u8>, adaptive_end: bool) -> Result<(), ApplyError> {
         #[allow(clippy::uninit_vec)] // we know what we're doing

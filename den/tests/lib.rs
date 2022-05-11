@@ -320,3 +320,31 @@ fn equal_blocks() {
         ]
     );
 }
+
+#[test]
+fn apply_adaptive_end_no_ends() {
+    let s1 = "Here we're writing something completely else.";
+    let s2 = "This is some data";
+    let s3 = "Here we're writing something completely else. i've continued writing";
+
+    let mut s = Signature::new(8);
+    s.write(s1.as_bytes());
+    let s = s.finish();
+
+    let diff = s.diff(s2.as_bytes());
+
+    assert_eq!(diff.segments().len(), 1);
+    assert!(matches!(diff.segments()[0], den::Segment::Unknown(_)));
+
+    {
+    let mut vec = s3.as_bytes().to_vec();
+    assert!(!diff.apply_overlaps_adaptive_end(vec.len()));
+    diff.apply_in_place_adaptive_end(&mut vec).unwrap();
+    assert_eq!(std::str::from_utf8(&vec).unwrap(), "This is some data i've continued writing");
+    }
+    {
+    let mut other = Vec::new();
+    diff.apply_adaptive_end(s3.as_bytes(), &mut other).unwrap();
+    assert_eq!(std::str::from_utf8(&other).unwrap(), "This is some data i've continued writing");
+    }
+}
