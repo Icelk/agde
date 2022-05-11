@@ -337,14 +337,20 @@ fn apply_adaptive_end_no_ends() {
     assert!(matches!(diff.segments()[0], den::Segment::Unknown(_)));
 
     {
-    let mut vec = s3.as_bytes().to_vec();
-    assert!(!diff.apply_overlaps_adaptive_end(vec.len()));
-    diff.apply_in_place_adaptive_end(&mut vec).unwrap();
-    assert_eq!(std::str::from_utf8(&vec).unwrap(), "This is some data i've continued writing");
+        let mut vec = s3.as_bytes().to_vec();
+        assert!(!diff.apply_overlaps_adaptive_end(vec.len()));
+        diff.apply_in_place_adaptive_end(&mut vec).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&vec).unwrap(),
+            "This is some data i've continued writing"
+        );
     }
     {
-    let mut other = Vec::new();
-    diff.apply_adaptive_end(s3.as_bytes(), &mut other).unwrap();
-    assert_eq!(std::str::from_utf8(&other).unwrap(), "This is some data i've continued writing");
+        let mut other = Vec::new();
+        diff.apply_adaptive_end(s3.as_bytes(), &mut other).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&other).unwrap(),
+            "This is some data i've continued writing"
+        );
     }
 }

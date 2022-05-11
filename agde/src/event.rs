@@ -320,7 +320,7 @@ pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
     /// May possibly not contain `Self::event`.
     events: &'a [log::ReceivedEvent],
-    rewound_events: Vec<Difference>,
+    rewound_events: Vec<&'a Difference>,
     // these are allocated once to optimize allocations
     buffer1: Vec<u8>,
     buffer2: Vec<u8>,
@@ -452,7 +452,7 @@ impl<'a> Unwinder<'a> {
                         ev.diff().revert(&b1, &mut b2, b' ')?;
                         std::mem::swap(&mut b1, &mut b2);
                     }
-                    self.rewound_events.push(diff.clone());
+                    self.rewound_events.push(diff);
                     first = false;
                 }
                 EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
