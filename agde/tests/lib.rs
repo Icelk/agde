@@ -100,10 +100,10 @@ fn rework_history() {
         .into();
         (
             sender.process_event(
-                Event::new(first_event, sender.uuid()),
+                Event::new(first_event, &sender),
                 SystemTime::now() - Duration::from_secs(10),
             ),
-            sender.process_event(Event::new(second_event, sender.uuid()), SystemTime::now()),
+            sender.process_event(Event::new(second_event, &sender), SystemTime::now()),
         )
     };
 

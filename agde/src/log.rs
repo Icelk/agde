@@ -222,6 +222,16 @@ impl Log {
         self.cutoff_from_time(target).map(|cutoff| (cutoff, target))
     }
 
+    /// Get the latest event touching `resource`.
+    ///
+    /// This returns [`None`] if no events touch `resource`.
+    pub(crate) fn latest_event(&self, resource: &str) -> Option<&ReceivedEvent> {
+        self.list
+            .iter()
+            .rev()
+            .find(|ev| ev.event.resource() == resource)
+    }
+
     /// Get the hashed log with `count` events and `cutoff` as the latest event to be included.
     ///
     /// # Errors
@@ -463,7 +473,14 @@ impl<'a> EventApplier<'a> {
 
         resource = unwinder.rewind(&resource)?;
 
-        offsets.apply(self.events.iter_mut().map(|ev| &mut ev.event));
+        offsets.apply(
+            self.events
+                .iter_mut()
+                .filter(|stored_ev| {
+                    stored_ev.event.latest_event_timestamp() < self.event.timestamp()
+                })
+                .map(|ev| &mut ev.event),
+        );
 
         println!("Rewound");
         Ok(resource)

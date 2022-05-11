@@ -714,7 +714,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 // `TODO`: Give successor
                                 Change::Delete(res) => agde::Event::new(
                                     agde::event::Kind::Delete(agde::event::Delete::new(res, None)),
-                                    manager.uuid(),
+                                    &*manager,
                                 ),
                                 Change::Modify(resource, created) => {
                                     if created {
@@ -722,7 +722,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                             agde::event::Kind::Create(agde::event::Create::new(
                                                 resource.clone(),
                                             )),
-                                            manager.uuid(),
+                                            &*manager,
                                         );
                                         // schedule create event a bit before modify.
                                         messages.push(manager.process_event(
@@ -780,7 +780,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     let event = agde::event::Modify::new(resource, &data, &base);
                                     let mut event = agde::Event::new(
                                         agde::event::Kind::Modify(event),
-                                        manager.uuid(),
+                                        &*manager,
                                     );
 
                                     offsets.apply(std::iter::once(&mut event));

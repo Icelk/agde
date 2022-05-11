@@ -1385,6 +1385,7 @@ impl<S: ExtendVec> Difference<S> {
     }
     /// The block size used by this diff.
     #[must_use]
+    #[inline]
     pub fn block_size(&self) -> usize {
         self.block_size
     }
@@ -1410,12 +1411,14 @@ impl<S: ExtendVec> Difference<S> {
     }
     /// Get the length of the original data - the data fed to [`SignatureBuilder::write`].
     #[must_use]
+    #[inline]
     pub fn original_data_len(&self) -> usize {
         self.original_data_len
     }
     /// Set the length of the original data.
     ///
     /// See [`Self::original_data_len`] for more details.
+    #[inline]
     pub fn set_original_data_len(&mut self, original_data_len: usize) {
         self.original_data_len = original_data_len;
     }
@@ -1523,6 +1526,8 @@ impl<S: ExtendVec> Difference<S> {
     pub fn apply_overlaps_adaptive_end(&self, base_len: usize) -> bool {
         self._apply_overlaps(base_len, true)
     }
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn _apply_overlaps(&self, base_len: usize, adaptive_end: bool) -> bool {
         let previous_data_end = self.original_data_len();
         let mut position = 0;
@@ -1695,6 +1700,7 @@ impl<S: ExtendVec> Difference<S> {
     pub fn apply_in_place_adaptive_end(&self, base: &mut Vec<u8>) -> Result<(), ApplyError> {
         self._apply_in_place(base, true)
     }
+    #[inline(always)]
     fn _apply_in_place(&self, base: &mut Vec<u8>, adaptive_end: bool) -> Result<(), ApplyError> {
         #[allow(clippy::uninit_vec)] // we know what we're doing
         fn copy_within_vec<T: Copy>(vec: &mut Vec<T>, range: Range<usize>, position: usize) {

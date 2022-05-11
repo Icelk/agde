@@ -4,7 +4,6 @@ use den::{Difference, ExtendVec, Signature};
 
 use crate::{
     log, utils, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
-    UNIX_EPOCH,
 };
 
 /// Creates a granular [`Difference`] between `base` and `target`.
@@ -52,7 +51,7 @@ impl<S: ExtendVec + 'static> Modify<S> {
     pub fn resource(&self) -> &str {
         &self.resource
     }
-    /// Sets the inner `resource`.
+    /// Set the inner `resource`.
     #[inline]
     pub(crate) fn set_resource(&mut self, resource: String) {
         self.resource = resource;
@@ -138,7 +137,7 @@ macro_rules! event_kind_impl {
         }
         impl<'a> IntoEvent for $type {
             fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event {
-                Event::with_timestamp(self.into(), manager.uuid(), timestamp)
+                Event::with_timestamp(self.into(), manager, timestamp)
             }
         }
     };
@@ -165,7 +164,7 @@ impl<'a, S: ExtendVec + 'static> From<Modify<S>> for Kind<S> {
 }
 impl<'a, S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
     fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event<S> {
-        Event::with_timestamp(self.into(), manager.uuid(), timestamp)
+        Event::with_timestamp(self.into(), manager, timestamp)
     }
 }
 event_kind_impl!(Create, Create);
@@ -192,6 +191,19 @@ pub enum Kind<S: ExtendVec + 'static = Vec<u8>> {
     /// The redirections will stop when a new [`Self::Create`] event is triggered.
     Delete(Delete),
 }
+impl<S: ExtendVec + 'static> Kind<S> {
+    /// Returns a reference to the target resource name.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    #[must_use]
+    pub fn resource(&self) -> &str {
+        match &self {
+            Kind::Modify(ev) => ev.resource(),
+            Kind::Create(ev) => ev.resource(),
+            Kind::Delete(ev) => ev.resource(),
+        }
+    }
+}
 /// A change of data.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
@@ -199,24 +211,35 @@ pub struct Event<S: ExtendVec + 'static = Vec<u8>> {
     kind: Kind<S>,
     /// A [`Duration`] of time after UNIX_EPOCH.
     timestamp: Duration,
+    /// A [`Duration`] of time after UNIX_EPOCH.
+    ///
+    /// This gives the receiver information about when to modify later events when this event
+    /// arrives. If event 2 (stored in the log) has this set to before event 1's `timestamp`, we
+    /// use [`utils::Offsets`] to modify event 2. If this is set to after event 1's `timestamp`, we
+    /// do nothing.
+    ///
+    /// This provides some resistance against simultaneous changes (where the issuer doesn't yet
+    /// know about the pier's new diff).
+    latest_event: Duration,
     sender: Uuid,
 }
 impl<S: ExtendVec + 'static> Event<S> {
     /// Creates a new event from `kind`.
-    pub fn new(kind: Kind<S>, sender: Uuid) -> Self {
+    pub fn new(kind: Kind<S>, sender: &Manager) -> Self {
         Self::with_timestamp(kind, sender, SystemTime::now())
     }
     /// Creates a new event from `kind` with the `timestamp`.
     ///
     /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
-    /// else the sync will risk wrong results, forcing [`crate::MessageKind::HashCheck`].
-    pub(crate) fn with_timestamp(kind: Kind<S>, sender: Uuid, timestamp: SystemTime) -> Self {
+    /// else you risk wrong results from the sync mechanism, forcing [`crate::MessageKind::HashCheck`].
+    pub(crate) fn with_timestamp(kind: Kind<S>, sender: &Manager, timestamp: SystemTime) -> Self {
+        let latest_event = sender.event_log.latest_event(kind.resource());
+        let latest_event = latest_event.map_or_else(|| Duration::ZERO, |ev| ev.event.timestamp());
         Self {
             kind,
-            timestamp: timestamp
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO),
-            sender,
+            timestamp: utils::systime_to_dur(timestamp),
+            latest_event,
+            sender: sender.uuid(),
         }
     }
     /// Returns a reference to the target resource name.
@@ -224,11 +247,7 @@ impl<S: ExtendVec + 'static> Event<S> {
     #[inline(always)]
     #[must_use]
     pub fn resource(&self) -> &str {
-        match &self.kind {
-            Kind::Modify(ev) => ev.resource(),
-            Kind::Create(ev) => ev.resource(),
-            Kind::Delete(ev) => ev.resource(),
-        }
+        self.inner().resource()
     }
     /// Returns a reference to the inner [`Kind`] where all the event data is stored.
     #[allow(clippy::inline_always)]
@@ -257,11 +276,21 @@ impl<S: ExtendVec + 'static> Event<S> {
     }
     /// Get the [`Difference`], if [`Self::inner`] is [`Kind::Modify`].
     #[must_use]
+    #[inline]
     pub fn diff(&self) -> Option<&Difference<S>> {
         match self.inner() {
             Kind::Modify(ev) => Some(ev.diff()),
             _ => None,
         }
+    }
+    /// Get the timestamp of the last event observed by the issuer of this event.
+    ///
+    /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
+    /// Consider using [`crate::utils::dur_to_systime`] to convert it to a [`SystemTime`].
+    #[inline]
+    #[must_use]
+    pub fn latest_event_timestamp(&self) -> Duration {
+        self.latest_event
     }
 }
 /// A [`Event`] with internal data.
