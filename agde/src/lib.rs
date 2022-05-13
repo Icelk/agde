@@ -490,8 +490,8 @@ impl Manager {
     /// Be careful with [`EventKind::Modify`] as you NEED to have a
     /// [`EventKind::Create`] before it on the same resource.
     #[inline]
-    pub fn process_event(&mut self, event: impl IntoEvent, last_event_send: SystemTime) -> Message {
-        let event = event.into_ev(self, last_event_send);
+    pub fn process_event(&mut self, event: impl IntoEvent) -> Message {
+        let event = event.into_ev(self);
 
         let uuid = self.generate_uuid();
 

@@ -12,7 +12,7 @@ fn send_diff() {
 
         let event = event::Modify::new("test.txt".into(), b"Some test data.", b"");
 
-        let message = manager.process_event(event, SystemTime::now());
+        let message = manager.process_event(event);
 
         (message.to_bin(), message.to_base64(), manager.uuid())
     };
@@ -100,10 +100,10 @@ fn rework_history() {
         .into();
         (
             sender.process_event(
-                Event::new(first_event, &sender),
-                SystemTime::now() - Duration::from_secs(10),
+                Event::new(first_event, &sender)
+                    .with_timestamp(SystemTime::now() - Duration::from_secs(10)),
             ),
-            sender.process_event(Event::new(second_event, &sender), SystemTime::now()),
+            sender.process_event(Event::new(second_event, &sender)),
         )
     };
 
@@ -138,7 +138,7 @@ fn basic_diff() {
 
     println!("Event: {event:?}");
 
-    let message = mgr.process_event(event, SystemTime::now());
+    let message = mgr.process_event(event);
 
     let mut receiver = manager();
 
@@ -276,7 +276,7 @@ ok",
 
     let event = event::Modify::new("diff.bin".into(), &new_vec, &old);
 
-    let message = mgr.process_event(event, SystemTime::now());
+    let message = mgr.process_event(event);
 
     let mut receiver = manager();
 

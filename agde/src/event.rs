@@ -136,8 +136,8 @@ macro_rules! event_kind_impl {
             }
         }
         impl<'a> IntoEvent for $type {
-            fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event {
-                Event::with_timestamp(self.into(), manager, timestamp)
+            fn into_ev(self, manager: &Manager) -> Event {
+                Event::new(self.into(), manager)
             }
         }
     };
@@ -148,11 +148,10 @@ macro_rules! event_kind_impl {
 /// Should not be implemented but used with [`Manager::process_event`].
 pub trait Into<S: ExtendVec + 'static = Vec<u8>> {
     /// Converts `self` into an [`Event`].
-    fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event<S>;
+    fn into_ev(self, manager: &Manager) -> Event<S>;
 }
 impl Into for Event {
-    fn into_ev(mut self, _manager: &Manager, timestamp: SystemTime) -> Event {
-        self.timestamp = utils::systime_to_dur(timestamp);
+    fn into_ev(self, _manager: &Manager) -> Event {
         self
     }
 }
@@ -163,8 +162,8 @@ impl<'a, S: ExtendVec + 'static> From<Modify<S>> for Kind<S> {
     }
 }
 impl<'a, S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
-    fn into_ev(self, manager: &Manager, timestamp: SystemTime) -> Event<S> {
-        Event::with_timestamp(self.into(), manager, timestamp)
+    fn into_ev(self, manager: &Manager) -> Event<S> {
+        Event::new(self.into(), manager)
     }
 }
 event_kind_impl!(Create, Create);
@@ -225,22 +224,25 @@ pub struct Event<S: ExtendVec + 'static = Vec<u8>> {
 }
 impl<S: ExtendVec + 'static> Event<S> {
     /// Creates a new event from `kind`.
-    pub fn new(kind: Kind<S>, sender: &Manager) -> Self {
-        Self::with_timestamp(kind, sender, SystemTime::now())
-    }
-    /// Creates a new event from `kind` with the `timestamp`.
     ///
-    /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
-    /// else you risk wrong results from the sync mechanism, forcing [`crate::MessageKind::HashCheck`].
-    pub(crate) fn with_timestamp(kind: Kind<S>, sender: &Manager, timestamp: SystemTime) -> Self {
+    /// Create an `Event` with the [`Self::timestamp`] set to the current time.
+    pub fn new(kind: Kind<S>, sender: &Manager) -> Self {
         let latest_event = sender.event_log.latest_event(kind.resource());
         let latest_event = latest_event.map_or_else(|| Duration::ZERO, |ev| ev.event.timestamp());
         Self {
             kind,
-            timestamp: utils::systime_to_dur(timestamp),
+            timestamp: utils::systime_to_dur(SystemTime::now()),
             latest_event,
             sender: sender.uuid(),
         }
+    }
+    /// Override [`Self::timestamp`] with `timestamp`.
+    ///
+    /// **NOTE**: Be very careful with this. `timestamp` MUST be within a second of real time,
+    /// else you risk wrong results from the sync mechanism, forcing [`crate::MessageKind::HashCheck`].
+    pub fn with_timestamp(mut self, timestamp: SystemTime) -> Self {
+        self.timestamp = utils::systime_to_dur(timestamp);
+        self
     }
     /// Returns a reference to the target resource name.
     #[allow(clippy::inline_always)]

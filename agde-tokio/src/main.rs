@@ -723,12 +723,12 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                 resource.clone(),
                                             )),
                                             &*manager,
+                                        )
+                                        .with_timestamp(
+                                            SystemTime::now() - Duration::from_micros(10),
                                         );
                                         // schedule create event a bit before modify.
-                                        messages.push(manager.process_event(
-                                            event,
-                                            SystemTime::now() - Duration::from_micros(10),
-                                        ));
+                                        messages.push(manager.process_event(event));
                                     }
 
                                     let data = (options.read)(resource.clone(), Storage::Current)
@@ -797,8 +797,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 }
                             };
 
-                            // `TODO`: fix this
-                            messages.push(manager.process_event(event, SystemTime::now()))
+                            messages.push(manager.process_event(event))
                         } else {
                             // edited resource has been removed.
                         }
