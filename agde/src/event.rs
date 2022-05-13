@@ -409,7 +409,6 @@ impl<'a> Unwinder<'a> {
     /// destroyed during the timeline of this unwinder.
     pub fn unwind(
         &mut self,
-        // resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
         resource: &[u8],
         modern_resource_name: &'a str,
     ) -> Result<Vec<u8>, UnwindError> {
@@ -466,7 +465,6 @@ impl<'a> Unwinder<'a> {
     /// Passes errors from [`Difference::apply`].
     pub fn rewind(
         &mut self,
-        // resource: &mut SliceBuf<impl AsMut<[u8]> + AsRef<[u8]>>,
         resource: &[u8],
     ) -> Result<Vec<u8>, den::ApplyError> {
         let mut vec = resource.to_vec();
