@@ -525,7 +525,7 @@ impl<'a> Rewinder<'a> {
         let mut vec = data.into();
         let mut other = std::mem::take(&mut self.buf);
 
-        // if event started ev from beginning, don't apply the 
+        // if event started ev from beginning, don't apply the
         let breaking_idx = self
             .events
             .iter()
