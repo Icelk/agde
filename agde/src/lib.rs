@@ -44,7 +44,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-pub use event::{Dataful as DatafulEvent, Event, Into as IntoEvent, Kind as EventKind};
+pub use event::{Dataful as DatafulEvent, Event, IntoEvent, Kind as EventKind};
 pub use log::{UuidCheck, UuidCheckAction};
 
 /// The current version of this `agde` library.
@@ -912,6 +912,29 @@ impl Manager {
         let events = &self.event_log.list[events_start..];
 
         event::Unwinder::new(events)
+    }
+    /// Get an [`event::Rewinder`] which can apply all the stored diffs received since the last
+    /// data commit to a resource.
+    ///
+    /// This keeps track of which diffs have been delivered since last calling this.
+    ///
+    /// This is critical when rewinding the `current` storage before diffing it to the `public`
+    /// storage to send an event.
+    /// Use [`event::Rewinder::rewind`] on all the modified resources.
+    ///
+    /// The [`event::Rewinder`] can be reused for several resources.
+    pub fn rewind_from_last_commit(&mut self) -> event::Rewinder {
+        let cutoff = self
+            .event_log
+            .cutoff_from_time(
+                self.event_log
+                    .required_event_timestamp
+                    .unwrap_or(Duration::ZERO),
+            )
+            .unwrap_or(0);
+        self.event_log.required_event_timestamp = Some(utils::dur_now());
+        let slice = &self.event_log.list[cutoff..];
+        event::Rewinder::new(slice)
     }
 
     /// Get an iterator of the piers filtered by `filter`.

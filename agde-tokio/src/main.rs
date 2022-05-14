@@ -731,15 +731,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         messages.push(manager.process_event(event));
                                     }
 
-                                    let data = (options.read)(resource.clone(), Storage::Current)
+                                    let mut data = (options.read)(resource.clone(), Storage::Current)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
 
-                                    let mut base =
-                                        (options.read)(resource.clone(), Storage::Public)
-                                            .await
-                                            .map_err(|_| ApplicationError::StoragePermissions)?
-                                            .unwrap_or_default();
+                                    let base = (options.read)(resource.clone(), Storage::Public)
+                                        .await
+                                        .map_err(|_| ApplicationError::StoragePermissions)?
+                                        .unwrap_or_default();
 
                                     info!("Read {:?} from public", String::from_utf8_lossy(&base));
                                     info!(
@@ -751,30 +750,40 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     //
                                     // This avoids filling the unwound data with zeroes or ' 's,
                                     // which results in less erroneous diffs.
-                                    let mut unwinder = manager.unwinder_to(last_check);
+                                    // let mut unwinder = manager.unwinder_to(last_check);
+                                    let mut rewinder = manager.rewind_from_last_commit();
 
-                                    info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
+                                    // info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
 
-                                    let mut offsets = agde::utils::Offsets::new();
-                                    {
-                                        let mut iter = unwinder
-                                            .events()
-                                            .filter_map(agde::Event::diff)
-                                            .peekable();
-                                        while let Some(diff) = iter.next() {
-                                            let new_len = iter
-                                                .peek()
-                                                .map(|diff| diff.original_data_len())
-                                                .unwrap_or_else(|| base.len());
-                                            let len_diff = agde::utils::sub_usize(
-                                                new_len,
-                                                diff.original_data_len(),
-                                            );
-                                            offsets.add_diff(diff, len_diff);
+                                    // let mut offsets = agde::utils::Offsets::new();
+                                    // {
+                                    // let mut iter = unwinder
+                                    // .events()
+                                    // .filter_map(agde::Event::diff)
+                                    // .peekable();
+                                    // while let Some(diff) = iter.next() {
+                                    // let new_len = iter
+                                    // .peek()
+                                    // .map(|diff| diff.original_data_len())
+                                    // .unwrap_or_else(|| base.len());
+                                    // let len_diff = agde::utils::sub_usize(
+                                    // new_len,
+                                    // diff.original_data_len(),
+                                    // );
+                                    // offsets.add_diff(diff, len_diff);
+                                    // }
+                                    // }
+
+                                    data = match rewinder.rewind(&resource, data) {
+                                        Err(agde::event::RewindError::ResourceDestroyed(_)) => {
+                                            todo!("Copy from public to current");
                                         }
-                                    }
-
-                                    base = unwinder.unwind(&base, &resource).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
+                                        Err(agde::event::RewindError::ApplyError(err)) => {
+                                            Err(err).expect("error when applying diffs to current")
+                                        }
+                                        Ok(vec) => vec,
+                                    };
+                                    // base = unwinder.unwind(&base, &resource).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
 
                                     warn!(
                                         "Unwould public data, now resource at: '''\n{:?}\n'''",
@@ -782,12 +791,12 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     );
 
                                     let event = agde::event::Modify::new(resource, &data, &base);
-                                    let mut event = agde::Event::new(
+                                    let event = agde::Event::new(
                                         agde::event::Kind::Modify(event),
                                         &*manager,
                                     );
 
-                                    offsets.apply(std::iter::once(&mut event));
+                                    // offsets.apply(std::iter::once(&mut event));
 
                                     println!("Diff: {:#?}", event.diff().unwrap());
                                     // `TODO`: apply and rewind event here, so we don't have to
@@ -828,11 +837,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         match applier.event().inner() {
                             agde::EventKind::Modify(_ev) => {
                                 let mut resource_data =
-                                        (options.read)(resource.clone(), Storage::Public)
-                                            .await
-                                            .map_err(|()| ApplicationError::StoragePermissions)?
-                                            // don't expect, just make a new file.
-                                            .expect("we trust our own data - there must have been a create event before modify");
+                                    (options.read)(resource.clone(), Storage::Public)
+                                        .await
+                                        .map_err(|()| ApplicationError::StoragePermissions)?
+                                        // don't expect, just make a new file.
+                                        .expect(
+                                            "we trust our own data - there must \
+                                            have been a create event before modify",
+                                        );
 
                                 resource_data = applier.apply(&resource_data).unwrap();
 

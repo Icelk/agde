@@ -106,6 +106,9 @@ pub(crate) struct Log {
     pub(crate) list: Vec<ReceivedEvent>,
     pub(crate) lifetime: Duration,
     pub(crate) limit: u32,
+
+    /// A timestamp after which all events MUST be stored.
+    pub(crate) required_event_timestamp: Option<Duration>,
 }
 impl Log {
     pub(crate) fn new(lifetime: Duration, limit: u32) -> Self {
@@ -113,6 +116,8 @@ impl Log {
             list: Vec::new(),
             lifetime,
             limit,
+
+            required_event_timestamp: None,
         }
     }
     /// Get a reference to the event log's lifetime.
@@ -139,7 +144,11 @@ impl Log {
             }
             let last = self.list.get(to_drop);
             if let Some(last) = last {
-                if last.event.timestamp() < limit {
+                if last.event.timestamp() < limit
+                    && self
+                        .required_event_timestamp
+                        .map_or(true, |required| last.event.timestamp() < required)
+                {
                     to_drop += 1;
                     continue;
                 }

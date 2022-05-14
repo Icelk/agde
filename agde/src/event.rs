@@ -2,9 +2,7 @@
 
 use den::{Difference, ExtendVec, Signature};
 
-use crate::{
-    log, utils, Deserialize, Duration, EventKind, IntoEvent, Manager, Serialize, SystemTime, Uuid,
-};
+use crate::{log, utils, Deserialize, Duration, EventKind, Manager, Serialize, SystemTime, Uuid};
 
 /// Creates a granular [`Difference`] between `base` and `target`.
 ///
@@ -146,11 +144,12 @@ macro_rules! event_kind_impl {
 /// Helper trait to convert from `*Event` structs to [`Event`].
 ///
 /// Should not be implemented but used with [`Manager::process_event`].
-pub trait Into<S: ExtendVec + 'static = Vec<u8>> {
+#[allow(clippy::module_name_repetitions)] // We can't call it `Into`!
+pub trait IntoEvent<S: ExtendVec + 'static = Vec<u8>> {
     /// Converts `self` into an [`Event`].
     fn into_ev(self, manager: &Manager) -> Event<S>;
 }
-impl Into for Event {
+impl IntoEvent for Event {
     fn into_ev(self, _manager: &Manager) -> Event {
         self
     }
@@ -320,7 +319,6 @@ impl From<den::ApplyError> for UnwindError {
 #[derive(Debug)]
 pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
-    /// May possibly not contain `Self::event`.
     events: &'a [log::ReceivedEvent],
     rewound_events: Vec<&'a Difference>,
     // these are allocated once to optimize allocations
@@ -463,10 +461,7 @@ impl<'a> Unwinder<'a> {
     /// # Errors
     ///
     /// Passes errors from [`Difference::apply`].
-    pub fn rewind(
-        &mut self,
-        resource: &[u8],
-    ) -> Result<Vec<u8>, den::ApplyError> {
+    pub fn rewind(&mut self, resource: &[u8]) -> Result<Vec<u8>, den::ApplyError> {
         let mut vec = resource.to_vec();
         let mut other = vec![];
         // Unwind the stack, redoing all the events.
@@ -479,6 +474,86 @@ impl<'a> Unwinder<'a> {
                 diff.apply_in_place(&mut vec)?;
             }
         }
+        Ok(vec)
+    }
+}
+
+#[derive(Debug)]
+/// An error when [rewinding](Rewinder::rewind).
+pub enum RewindError {
+    /// An error occurred when applying a diff.
+    ApplyError(den::ApplyError),
+    /// The resource has been destroyed since last commit. Throw away your changes.
+    ///
+    /// The inner byte array is the `data` supposed to be rewound.
+    ResourceDestroyed(Vec<u8>),
+}
+impl From<den::ApplyError> for RewindError {
+    fn from(err: den::ApplyError) -> Self {
+        Self::ApplyError(err)
+    }
+}
+
+/// Struct to apply all the diffs from a specified timestamp to a resource.
+///
+/// See [`Manager::rewind_from`] for more info.
+#[derive(Debug)]
+pub struct Rewinder<'a> {
+    /// Ordered from last (temporally).
+    events: &'a [log::ReceivedEvent],
+    buf: Vec<u8>,
+}
+impl<'a> Rewinder<'a> {
+    pub(crate) fn new(slice: &'a [log::ReceivedEvent]) -> Self {
+        Self {
+            events: slice,
+            buf: Vec::new(),
+        }
+    }
+    /// Rewinds the `resource` back up to the most recent version.
+    ///
+    /// # Errors
+    ///
+    /// Passes errors from [`Difference::apply`].
+    pub fn rewind(
+        &mut self,
+        resource: &str,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<Vec<u8>, RewindError> {
+        // `TODO`: return list of errors if any apply fails, but just
+        // continue and collect all errors in a vec, to then return them.
+        let mut vec = data.into();
+        let mut other = std::mem::take(&mut self.buf);
+
+        // if event started ev from beginning, don't apply the 
+        let breaking_idx = self
+            .events
+            .iter()
+            .rposition(|ev| ev.event.resource() == resource && ev.event.diff().is_none());
+
+        if breaking_idx.is_some() {
+            return Err(RewindError::ResourceDestroyed(vec));
+        }
+
+        // Unwind the stack, redoing all the events.
+        for received_event in self.events {
+            if received_event.event.resource() != resource {
+                continue;
+            }
+            let diff = if let Some(diff) = received_event.event.diff() {
+                diff
+            } else {
+                continue;
+            };
+            if diff.apply_overlaps(vec.len()) {
+                diff.apply(&vec, &mut other)?;
+                std::mem::swap(&mut vec, &mut other);
+                other.clear();
+            } else {
+                diff.apply_in_place(&mut vec)?;
+            }
+        }
+        self.buf = other;
         Ok(vec)
     }
 }
