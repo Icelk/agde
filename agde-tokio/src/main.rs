@@ -731,16 +731,19 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         messages.push(manager.process_event(event));
                                     }
 
-                                    let mut data = (options.read)(resource.clone(), Storage::Current)
+                                    let mut current = (options.read)(resource.clone(), Storage::Current)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
 
-                                    let base = (options.read)(resource.clone(), Storage::Public)
+                                    let public = (options.read)(resource.clone(), Storage::Public)
                                         .await
                                         .map_err(|_| ApplicationError::StoragePermissions)?
                                         .unwrap_or_default();
 
-                                    info!("Read {:?} from public", String::from_utf8_lossy(&base));
+                                    info!(
+                                        "Read {:?} from public",
+                                        String::from_utf8_lossy(&public)
+                                    );
                                     info!(
                                         "Last check: {last_check:?}, now {:?}",
                                         SystemTime::now()
@@ -751,46 +754,60 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     // This avoids filling the unwound data with zeroes or ' 's,
                                     // which results in less erroneous diffs.
                                     // let mut unwinder = manager.unwinder_to(last_check);
+                                    let last_commit =
+                                        manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH);
+                                    let mut unwinder = manager.unwinder_to(last_commit);
+
+                                    let modern_resource_name = if let Some(n) =
+                                        manager.modern_resource_name(&resource, last_commit)
+                                    {
+                                        n
+                                    } else {
+                                        // if the file has been replaced, we shouldn't either
+                                        // way calculate a diff. See the comment below for why
+                                        // we don't copy the file from public to current here.
+                                        continue;
+                                    };
+
+                                    let unwound_public =
+                                        unwinder.unwind(&public, modern_resource_name).expect(
+                                            "error when unwinding public storage. \
+                                            Resource name is valid and capacity is checked.",
+                                        );
+
+                                    let old_diff = agde::event::diff(&unwound_public, &current);
+
+                                    let mut offsets = agde::utils::Offsets::new();
+                                    offsets.add_diff(
+                                        &old_diff,
+                                        agde::utils::sub_usize(current.len(), unwound_public.len()),
+                                    );
+
+                                    // `TODO`: apply `offsets` to all the events in
+                                    // `rewind_from_last_commit`.
+
                                     let mut rewinder = manager.rewind_from_last_commit();
 
-                                    // info!("Events {:?}", unwinder.events().collect::<Vec<_>>());
-
-                                    // let mut offsets = agde::utils::Offsets::new();
-                                    // {
-                                    // let mut iter = unwinder
-                                    // .events()
-                                    // .filter_map(agde::Event::diff)
-                                    // .peekable();
-                                    // while let Some(diff) = iter.next() {
-                                    // let new_len = iter
-                                    // .peek()
-                                    // .map(|diff| diff.original_data_len())
-                                    // .unwrap_or_else(|| base.len());
-                                    // let len_diff = agde::utils::sub_usize(
-                                    // new_len,
-                                    // diff.original_data_len(),
-                                    // );
-                                    // offsets.add_diff(diff, len_diff);
-                                    // }
-                                    // }
-
-                                    data = match rewinder.rewind(&resource, data) {
+                                    current = match rewinder.rewind(&resource, current) {
                                         Err(agde::event::RewindError::ResourceDestroyed(_)) => {
-                                            todo!("Copy from public to current");
+                                            // since we keep track of the incoming events and
+                                            // which resources have been changed, this will get
+                                            // copied below.
+                                            continue;
                                         }
                                         Err(agde::event::RewindError::ApplyError(err)) => {
                                             Err(err).expect("error when applying diffs to current")
                                         }
                                         Ok(vec) => vec,
                                     };
-                                    // base = unwinder.unwind(&base, &resource).expect("error when unwinding public storage. Resource name is valid and capacity is checked.");
 
                                     warn!(
                                         "Unwould public data, now resource at: '''\n{:?}\n'''",
-                                        std::str::from_utf8(&base)
+                                        std::str::from_utf8(&public)
                                     );
 
-                                    let event = agde::event::Modify::new(resource, &data, &base);
+                                    let event =
+                                        agde::event::Modify::new(resource, &current, &public);
                                     let event = agde::Event::new(
                                         agde::event::Kind::Modify(event),
                                         &*manager,

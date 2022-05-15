@@ -886,10 +886,6 @@ impl Manager {
     }
 
     /// Attempts to get the modern name of the resource named `old_name` at `timestamp`.
-    ///
-    /// Consider using [`utils::dur_now`].
-    ///
-    /// `timestamp` is duration since `UNIX_EPOCH` when the `old_name` was relevant.
     pub fn modern_resource_name<'a>(
         &self,
         old_name: &'a str,
@@ -935,6 +931,10 @@ impl Manager {
         self.event_log.required_event_timestamp = Some(utils::dur_now());
         let slice = &self.event_log.list[cutoff..];
         event::Rewinder::new(slice)
+    }
+    /// Get the time of the last call to [`Self::rewind_from_last_commit`].
+    pub fn last_commit(&self) -> Option<SystemTime> {
+        self.event_log.required_event_timestamp.map(utils::dur_to_systime)
     }
 
     /// Get an iterator of the piers filtered by `filter`.
