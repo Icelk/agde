@@ -1,5 +1,7 @@
 //! Utilities for working with some datatypes used by agde.
 
+use den::{Difference, Segment};
+
 use crate::{utils, Duration, Event, EventKind, SystemTime, UNIX_EPOCH};
 
 /// Returns the time since [`UNIX_EPOCH`].
@@ -85,7 +87,7 @@ impl Offsets {
     ///
     /// `len_diff` is the difference in length before and after applying `diff` to your data, like
     /// `after - before`. Consider using [`utils::sub_usize`].
-    pub fn add_diff(&mut self, diff: &den::Difference, len_diff: isize) {
+    pub fn add_diff(&mut self, diff: &Difference, len_diff: isize) {
         enum Last {
             Ref { end: usize },
             Unknown { len: usize },
@@ -95,7 +97,7 @@ impl Offsets {
 
         for seg in diff.segments() {
             match seg {
-                den::Segment::Ref(seg) => {
+                Segment::Ref(seg) => {
                     match last {
                         Last::Ref { end } => {
                             if seg.start() >= end {
@@ -117,7 +119,7 @@ impl Offsets {
                         end: seg.end(diff.block_size()),
                     };
                 }
-                den::Segment::Unknown(seg) => {
+                Segment::Unknown(seg) => {
                     last = Last::Unknown {
                         len: seg.source().len(),
                     };
@@ -126,6 +128,74 @@ impl Offsets {
         }
 
         self.len_diff += len_diff;
+    }
+
+    /// Apply these offsets to a single `diff`.
+    ///
+    /// Use [`Self::apply`] for a more convenient function.
+    #[allow(clippy::missing_panics_doc)]
+    pub fn apply_single(&self, diff: &mut Difference) {
+        diff.with_block_size(1).unwrap();
+        let block_size = diff.block_size();
+
+        // let mut max = 0;
+        // for seg in diff.segments() {
+            // match seg {
+                // Segment::Ref(seg) => max += seg.len(block_size),
+                // Segment::Unknown(seg) => max += seg.source().len(),
+            // }
+        // }
+
+        let mut cursor = 0;
+
+        for seg in diff.segments_mut() {
+            match seg {
+                Segment::Ref(seg) => {
+                    let mut start = seg.start();
+                    let mut len = seg.len(block_size);
+                    for offset in &self.offsets {
+                        // `TODO`: or should `seg.start()` actually be the moving
+                        // `start`?
+                        if offset.idx < seg.start() {
+                            if offset.negative {
+                                start = start.saturating_sub(offset.len);
+                            } else {
+                                start += offset.len;
+                            }
+                            continue;
+                        }
+                        if offset.idx <= seg.end(block_size) {
+                            if offset.negative {
+                                len = len.saturating_sub(offset.len);
+                            } else {
+                                len += offset.len;
+                            }
+                        }
+                    }
+                    // if seg.end(block_size) >= max {
+                        // len = utils::iusize_add(len, self.len_diff).unwrap_or(0);
+                    // }
+                    *seg = seg.with_start(start).with_blocks(len);
+                    cursor += seg.len(block_size);
+                }
+                Segment::Unknown(seg) => {
+                    let mut blocks = seg.source().len();
+                    for offset in &self.offsets {
+                        if offset.idx >= cursor && offset.idx < cursor + seg.source().len() {
+                            if offset.negative {
+                                blocks = blocks.saturating_sub(offset.len);
+                            } else {
+                                blocks += offset.len;
+                            }
+                        }
+                    }
+                    cursor += seg.source().len();
+                }
+            }
+        }
+
+        let len = utils::iusize_add(diff.original_data_len(), self.len_diff).unwrap_or(0);
+        diff.set_original_data_len(len);
     }
     /// Apply the offsets on `events` to adjust them to the events that have since changed
     /// ([`Self::add_diff`]).
@@ -141,60 +211,7 @@ impl Offsets {
             let kind = ev.inner_mut();
             match kind {
                 EventKind::Modify(ev) => {
-                    ev.diff.with_block_size(1).unwrap();
-                    let block_size = ev.diff().block_size();
-                    let segments = ev.diff.segments_mut();
-
-                    let mut cursor = 0;
-
-                    for seg in segments {
-                        match seg {
-                            den::Segment::Ref(seg) => {
-                                let mut start = seg.start();
-                                let mut len = seg.len(block_size);
-                                for offset in &self.offsets {
-                                    // `TODO`: or should `seg.start()` actually be the moving
-                                    // `start`?
-                                    if offset.idx < seg.start() {
-                                        if offset.negative {
-                                            start = start.saturating_sub(offset.len);
-                                        } else {
-                                            start += offset.len;
-                                        }
-                                        continue;
-                                    }
-                                    if offset.idx <= seg.end(block_size) {
-                                        if offset.negative {
-                                            len = len.saturating_sub(offset.len);
-                                        } else {
-                                            len += offset.len;
-                                        }
-                                    }
-                                }
-                                *seg = seg.with_start(start).with_blocks(len);
-                                cursor += seg.len(block_size);
-                            }
-                            den::Segment::Unknown(seg) => {
-                                let mut blocks = seg.source().len();
-                                for offset in &self.offsets {
-                                    if offset.idx >= cursor
-                                        && offset.idx < cursor + seg.source().len()
-                                    {
-                                        if offset.negative {
-                                            blocks = blocks.saturating_sub(offset.len);
-                                        } else {
-                                            blocks += offset.len;
-                                        }
-                                    }
-                                }
-                                cursor += seg.source().len();
-                            }
-                        }
-                    }
-
-                    let len =
-                        utils::iusize_add(ev.diff.original_data_len(), self.len_diff).unwrap_or(0);
-                    ev.diff.set_original_data_len(len);
+                    self.apply_single(&mut ev.diff);
                 }
                 EventKind::Create(_) | EventKind::Delete(_) => {}
             }

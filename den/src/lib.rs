@@ -856,7 +856,7 @@ impl Signature {
                                 hasher.write(block, Some(blocks.pos() - 1));
                                 let hash = hasher.finish_reset().to_bytes();
 
-                                if let Some(block_data) = map.get(hash, blocks.pos()) {
+                                if let Some(block_data) = map.get(hash, blocks.pos() - 1) {
                                     match &mut last_end {
                                         Some(end) => {
                                             if block_data.start == *end {
@@ -1249,20 +1249,17 @@ impl Difference {
             }
         }
 
-        let mut cursor = 0;
         for segment in &mut segments {
             match segment {
                 Segment::Ref(seg) => {
-                    let new = cursor + seg.len(block_size);
+                    let new = seg.end(block_size);
                     if base.len() <= new {
                         let diff = new - base.len();
-                        // +block_size-1 to ceil the value
-                        // let remove_blocks = ((diff + 1).saturating_sub(block_size)) / block_size;
                         let remove_blocks = (diff) / block_size;
                         seg.block_count -= remove_blocks;
                     }
                 }
-                Segment::Unknown(seg) => cursor += seg.data().len(),
+                Segment::Unknown(_) => {}
             }
         }
 
@@ -1751,7 +1748,7 @@ impl<S: ExtendVec> Difference<S> {
             }
         }
 
-        if !found_end && position < previous_data_end {
+        if !found_end && position < previous_data_end && previous_data_end < Vec::len(base) {
             let len = Vec::len(base);
             copy_within_vec(base, previous_data_end..len, position);
             position += len - previous_data_end;
@@ -1801,11 +1798,11 @@ impl<S: ExtendVec> Difference<S> {
 
         let block_size = self.block_size();
 
-        let mut index = 0;
+        let mut cursor = 0;
         for segment in self.segments() {
             match segment {
                 Segment::Unknown(unknown) => {
-                    index += unknown.source().len();
+                    cursor += unknown.source().len();
                 }
                 Segment::Ref(seg) => {
                     let end = seg.end(block_size);
@@ -1814,14 +1811,15 @@ impl<S: ExtendVec> Difference<S> {
                     if let Some(missing) = missing {
                         offset = missing.min(block_size);
                     }
-                    let current_end = index + seg.len(block_size) - offset;
+                    let current_end = cursor + seg.len(block_size) - offset;
                     let current_end = current_end.min(current.len());
                     if current_end > current.len() {
                         return Err(Roob);
                     }
-                    target[seg.start()..seg.start() + current_end - index]
-                        .copy_from_slice(&current[index..current_end]);
-                    index += seg.len(block_size);
+                    println!("end: {current_end}, cursor: {cursor}");
+                    target[seg.start()..seg.start() + current_end - cursor]
+                        .copy_from_slice(&current[cursor..current_end]);
+                    cursor += seg.len(block_size);
                 }
             }
         }

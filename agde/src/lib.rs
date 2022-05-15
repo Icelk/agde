@@ -934,7 +934,9 @@ impl Manager {
     }
     /// Get the time of the last call to [`Self::rewind_from_last_commit`].
     pub fn last_commit(&self) -> Option<SystemTime> {
-        self.event_log.required_event_timestamp.map(utils::dur_to_systime)
+        self.event_log
+            .required_event_timestamp
+            .map(utils::dur_to_systime)
     }
 
     /// Get an iterator of the piers filtered by `filter`.

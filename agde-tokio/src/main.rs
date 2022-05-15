@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -172,7 +173,7 @@ pub struct Options {
 
     pub force_pull: bool,
 }
-// `TODO`: Add option to write new resource changes to `Current` is that resource hasn't been
+// `TODO`: Add option to write new resource changes to `Current` if that resource hasn't been
 // changed in current.
 impl Options {
     pub async fn fs(force_pull: bool) -> Result<Self, io::Error> {
@@ -749,11 +750,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         SystemTime::now()
                                     );
 
-                                    // `TODO`: rewind events ↓ on the current buffer instead.
-                                    //
-                                    // This avoids filling the unwound data with zeroes or ' 's,
-                                    // which results in less erroneous diffs.
-                                    // let mut unwinder = manager.unwinder_to(last_check);
                                     let last_commit =
                                         manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH);
                                     let mut unwinder = manager.unwinder_to(last_commit);
@@ -783,12 +779,22 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         agde::utils::sub_usize(current.len(), unwound_public.len()),
                                     );
 
-                                    // `TODO`: apply `offsets` to all the events in
-                                    // `rewind_from_last_commit`.
-
                                     let mut rewinder = manager.rewind_from_last_commit();
 
-                                    current = match rewinder.rewind(&resource, current) {
+                                    current = match rewinder.rewind_with_modify_diff(
+                                        &resource,
+                                        current,
+                                        |diff| {
+                                            let mut diff = diff.clone();
+                                            let original_data_len = diff.original_data_len();
+                                            offsets.apply_single(&mut diff);
+                                            // ignore `offsets`'s changes, as `apply_adaptive_end`
+                                            // takes care of that.
+                                            diff.set_original_data_len(original_data_len);
+                                            println!("Diff changed with {offsets:?}, now {diff:?}");
+                                            Cow::Owned(diff)
+                                        },
+                                    ) {
                                         Err(agde::event::RewindError::ResourceDestroyed(_)) => {
                                             // since we keep track of the incoming events and
                                             // which resources have been changed, this will get
@@ -813,11 +819,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         &*manager,
                                     );
 
-                                    // offsets.apply(std::iter::once(&mut event));
-
                                     println!("Diff: {:#?}", event.diff().unwrap());
-                                    // `TODO`: apply and rewind event here, so we don't have to
-                                    // unwind it again below when we apply it.
 
                                     event
                                 }
@@ -952,6 +954,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
     };
     result.map_err(|err| Box::new(err) as DynError)
 }
+
 async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {
     info!("Connecting to {url:?}.");
     let result = tokio_tungstenite::connect_async(url).await;

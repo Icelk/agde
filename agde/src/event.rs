@@ -1,5 +1,7 @@
 //! Events are a type of message which manipulate a resource.
 
+use std::borrow::Cow;
+
 use den::{Difference, ExtendVec, Signature};
 
 use crate::{log, utils, Deserialize, Duration, EventKind, Manager, Serialize, SystemTime, Uuid};
@@ -17,7 +19,7 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
     let granular_diff = rough_diff
         .minify(8, base)
         .expect("The way we are using the function, this should never err.");
-    println!("minified {rough_diff:?}");
+    println!("minified {granular_diff:?}");
     granular_diff
 }
 
@@ -511,14 +513,16 @@ impl<'a> Rewinder<'a> {
         }
     }
     /// Rewinds the `resource` back up to the most recent version.
+    /// `diff_modification` can be used to change the diff just before it's applied.
     ///
     /// # Errors
     ///
     /// Passes errors from [`Difference::apply`].
-    pub fn rewind(
+    pub fn rewind_with_modify_diff(
         &mut self,
         resource: &str,
         data: impl Into<Vec<u8>>,
+        mut diff_modification: impl FnMut(&Difference) -> Cow<'_, Difference>,
     ) -> Result<Vec<u8>, RewindError> {
         // `TODO`: return list of errors if any apply fails, but just
         // continue and collect all errors in a vec, to then return them.
@@ -535,7 +539,7 @@ impl<'a> Rewinder<'a> {
             return Err(RewindError::ResourceDestroyed(vec));
         }
 
-        // Unwind the stack, redoing all the events.
+        // Apply all events.
         for received_event in self.events {
             if received_event.event.resource() != resource {
                 continue;
@@ -545,15 +549,28 @@ impl<'a> Rewinder<'a> {
             } else {
                 continue;
             };
-            if diff.apply_overlaps(vec.len()) {
-                diff.apply(&vec, &mut other)?;
+            let diff = diff_modification(diff);
+            if diff.apply_overlaps_adaptive_end(vec.len()) {
+                diff.apply_adaptive_end(&vec, &mut other)?;
                 std::mem::swap(&mut vec, &mut other);
                 other.clear();
             } else {
-                diff.apply_in_place(&mut vec)?;
+                diff.apply_in_place_adaptive_end(&mut vec)?;
             }
         }
         self.buf = other;
         Ok(vec)
+    }
+    /// Rewinds the `resource` back up to the most recent version.
+    ///
+    /// # Errors
+    ///
+    /// Passes errors from [`Difference::apply`].
+    pub fn rewind(
+        &mut self,
+        resource: &str,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<Vec<u8>, RewindError> {
+        self.rewind_with_modify_diff(resource, data, |d| Cow::Borrowed(d))
     }
 }
