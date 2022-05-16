@@ -725,9 +725,9 @@ impl Signature {
             0..=4 => Signature::with_algorithm(HashAlgorithm::None4, block_size),
             5..=8 => Signature::with_algorithm(HashAlgorithm::None8, block_size),
             9..=16 => Signature::with_algorithm(HashAlgorithm::None16, block_size),
-            17..=511 => Signature::with_algorithm(HashAlgorithm::XXH3_64, block_size),
-            // 512..
-            _ => Signature::with_algorithm(HashAlgorithm::XXH3_128, block_size),
+            17..=256 => Signature::with_algorithm(HashAlgorithm::CyclicPoly32, block_size),
+            // 256..
+            _ => Signature::with_algorithm(HashAlgorithm::CyclicPoly64, block_size),
         }
     }
     /// This will create a new [`SignatureBuilder`] with the `algorithm`. Consider using [`Self::new`]
@@ -831,12 +831,13 @@ impl Signature {
         let mut hasher = self.algorithm().builder(block_size);
 
         // Iterate over data, in windows. Find hash.
+        let mut unknown = 0;
         while let Some(block) = blocks.next() {
             hasher.write(block, Some(blocks.pos() - 1));
             let hash = hasher.finish_reset().to_bytes();
 
             // If hash matches, push previous data to unknown, and push a ref. Advance by `block_size` (actually `block_size-1` as the `next` call implicitly increments).
-            if let Some(block_data) = map.get(hash, blocks.pos()) {
+            if let Some(block_data) = map.get(hash, blocks.pos() - unknown) {
                 // If we're looking for a ref (after a unknown, which hasn't been "committed" yet),
                 // check with a offset of 0..<some small integer> for better matches, which give us
                 // longer BlockRefs. This reduces jitter in output.
@@ -856,7 +857,7 @@ impl Signature {
                                 hasher.write(block, Some(blocks.pos() - 1));
                                 let hash = hasher.finish_reset().to_bytes();
 
-                                if let Some(block_data) = map.get(hash, blocks.pos() - 1) {
+                                if let Some(block_data) = map.get(hash, blocks.pos() - unknown) {
                                     match &mut last_end {
                                         Some(end) => {
                                             if block_data.start == *end {
@@ -938,6 +939,8 @@ impl Signature {
 
                 blocks.advance(block.len() - 1);
                 last_ref_block = blocks.pos();
+            } else {
+                unknown += 1;
             }
         }
 
@@ -1136,6 +1139,33 @@ impl Difference {
     /// Changes the block size to `block_size`, shrinking the [`Segment::Unknown`]s in the process.
     /// This results in a smaller diff.
     ///
+    /// Consider [`Self::minify_with_builder`] for using custom signature settings.
+    ///
+    /// # Errors
+    ///
+    /// tl;dr, you can [`Option::unwrap`] this if it comes straight from [`Signature::diff`] or
+    /// this very function. If it's untrusted data, handle the errors.
+    ///
+    /// Returns [`MinifyError::NewLarger`] if `block_size` >= [`Self::block_size`] and
+    /// [`MinifyError::NotMultiple`] if [`Self::block_size`] is not a multiple of `block_size`.
+    /// [`MinifyError::SuccessiveUnknowns`] is returned if two [`Segment::Unknown`] are after
+    /// each other.
+    /// Returns [`MinifyError::Zero`] if `block_size == 0`.
+    pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
+        self.minify_with_builder(block_size, base, |block_size: usize| {
+            Signature::new(block_size)
+        })
+    }
+    /// Changes the block size to `block_size`, shrinking the [`Segment::Unknown`]s in the process.
+    /// This results in a smaller diff.
+    ///
+    /// `signature_builder` takes the block size and gives the signature builder to use.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `signature_builder` returns a [`SignatureBuilder`] with a different `block_size`
+    /// from what's supplied.
+    ///
     /// # Errors
     ///
     /// tl;dr, you can [`Option::unwrap`] this if it comes straight from [`Signature::diff`] or
@@ -1147,7 +1177,12 @@ impl Difference {
     /// each other.
     /// Returns [`MinifyError::Zero`] if `block_size == 0`.
     #[allow(clippy::too_many_lines)]
-    pub fn minify(&self, block_size: usize, base: &[u8]) -> Result<Self, MinifyError> {
+    pub fn minify_with_builder(
+        &self,
+        block_size: usize,
+        base: &[u8],
+        mut signature_builder: impl FnMut(usize) -> SignatureBuilder,
+    ) -> Result<Self, MinifyError> {
         fn push_segment(segments: &mut Vec<Segment>, item: Segment, block_size: usize) {
             match item {
                 Segment::Ref(item) => {
@@ -1229,7 +1264,12 @@ impl Difference {
                     };
 
                     if let Some((base_data, start)) = base_data {
-                        let mut builder = Signature::new(block_size);
+                        let mut builder = signature_builder(block_size);
+                        assert_eq!(
+                            builder.block_size, block_size,
+                            "signature built from `signature_builder` \
+                            callback has to have the given block size"
+                        );
                         builder.write(base_data);
                         let signature = builder.finish();
 

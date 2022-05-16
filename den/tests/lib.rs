@@ -354,3 +354,75 @@ fn apply_adaptive_end_no_ends() {
         );
     }
 }
+
+#[test]
+fn diff_segments_1() {
+    // This is the data we have
+    let local_data = "wee h test3ch test3ch test 3chok hi hello there my old friend
+
+how are you?";
+    // This is the data we want to get.
+    let remote_data = "ye! wee h test3ch test3ch test 3chok hi hello there my old friend
+
+how are you?";
+
+    let mut signature = Signature::with_algorithm(HashAlgorithm::CyclicPoly64, 256);
+    signature.write(local_data.as_bytes());
+    let signature = signature.finish();
+
+    let now = std::time::Instant::now();
+    let diff = signature.diff(remote_data.as_bytes());
+    let diff = diff.minify(8, local_data.as_bytes()).unwrap();
+    println!("Segments {:#?}", diff.segments());
+    println!("Took {:?}", now.elapsed());
+
+    assert_eq!(
+        diff.segments(),
+        [
+            Segment::unknown("ye! "),
+            Segment::Ref(SegmentRef {
+                start: 0,
+                block_count: 10
+            })
+        ]
+    )
+}
+
+#[test]
+fn diff_segments_2() {
+    // This is the data we have
+    let local_data = "wee h test3ch test3ch test 3chok hi hello there my old friend
+
+how are you? good!";
+    // This is the data we want to get.
+    let remote_data = "ye! wee h test3ch test3ch test 3chok hi hello there my old friend
+
+hou? good!
+ou?";
+
+    let mut signature = Signature::new(256);
+    signature.write(local_data.as_bytes());
+    let signature = signature.finish();
+
+    let now = std::time::Instant::now();
+    let diff = signature.diff(remote_data.as_bytes());
+    let diff = diff.minify(8, local_data.as_bytes()).unwrap();
+    println!("Segments {:#?}", diff.segments());
+    println!("Took {:?}", now.elapsed());
+
+    assert_eq!(
+        diff.segments(),
+        [
+            Segment::unknown("ye! "),
+            Segment::Ref(SegmentRef {
+                start: 0,
+                block_count: 8
+            }),
+            Segment::Ref(SegmentRef {
+                start: 72,
+                block_count: 1
+            }),
+            Segment::unknown("!\nou?")
+        ]
+    )
+}

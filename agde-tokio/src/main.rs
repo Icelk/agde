@@ -718,19 +718,21 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     &*manager,
                                 ),
                                 Change::Modify(resource, created) => {
-                                    if created {
+                                    let create_ev = if created {
                                         let event = agde::Event::new(
                                             agde::event::Kind::Create(agde::event::Create::new(
                                                 resource.clone(),
                                             )),
                                             &*manager,
                                         )
+                                        // schedule create event a bit before modify.
                                         .with_timestamp(
                                             SystemTime::now() - Duration::from_micros(10),
                                         );
-                                        // schedule create event a bit before modify.
-                                        messages.push(manager.process_event(event));
-                                    }
+                                        Some(event)
+                                    } else {
+                                        None
+                                    };
 
                                     let mut current = (options.read)(resource.clone(), Storage::Current)
                                         .await
@@ -752,32 +754,33 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
                                     let last_commit =
                                         manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH);
-                                    let mut unwinder = manager.unwinder_to(last_commit);
+                                    let offsets = if !created {
+                                        let mut unwinder = manager.unwinder_to(last_commit);
 
-                                    let modern_resource_name = if let Some(n) =
-                                        manager.modern_resource_name(&resource, last_commit)
-                                    {
-                                        n
-                                    } else {
-                                        // if the file has been replaced, we shouldn't either
-                                        // way calculate a diff. See the comment below for why
-                                        // we don't copy the file from public to current here.
-                                        continue;
-                                    };
-
-                                    let unwound_public =
-                                        unwinder.unwind(&public, modern_resource_name).expect(
-                                            "error when unwinding public storage. \
+                                        // here, `resource` is just the modern name. See the code
+                                        // above for more info
+                                        let unwound_public =
+                                            unwinder.unwind(&public, &resource).expect(
+                                                "error when unwinding public storage. \
                                             Resource name is valid and capacity is checked.",
+                                            );
+
+                                        let old_diff = agde::event::diff(&unwound_public, &current);
+
+                                        println!("  OLD DIFF {old_diff:?}");
+
+                                        let mut offsets = agde::utils::Offsets::new();
+                                        offsets.add_diff(
+                                            &old_diff,
+                                            agde::utils::sub_usize(
+                                                current.len(),
+                                                unwound_public.len(),
+                                            ),
                                         );
-
-                                    let old_diff = agde::event::diff(&unwound_public, &current);
-
-                                    let mut offsets = agde::utils::Offsets::new();
-                                    offsets.add_diff(
-                                        &old_diff,
-                                        agde::utils::sub_usize(current.len(), unwound_public.len()),
-                                    );
+                                        offsets
+                                    } else {
+                                        agde::utils::Offsets::new()
+                                    };
 
                                     let mut rewinder = manager.rewind_from_last_commit();
 
@@ -799,6 +802,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                             // since we keep track of the incoming events and
                                             // which resources have been changed, this will get
                                             // copied below.
+                                            println!("Resource destroyed");
                                             continue;
                                         }
                                         Err(agde::event::RewindError::ApplyError(err)) => {
@@ -821,6 +825,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
                                     println!("Diff: {:#?}", event.diff().unwrap());
 
+                                    if let Some(ev) = create_ev {
+                                        messages.push(manager.process_event(ev));
+                                    }
                                     event
                                 }
                             };
@@ -830,6 +837,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             // edited resource has been removed.
                         }
                     }
+
+                    manager.update_last_commit();
                 }
 
                 {

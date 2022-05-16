@@ -48,12 +48,17 @@ pub fn iusize_add(a: usize, b: isize) -> Option<usize> {
         Some(a + b as usize)
     }
 }
+/// `a+b` but with better overflow properties than `(a as isize + b) as usize`.
+/// Saturates the output to 0 if `a-b < 0`
+#[must_use]
+pub fn iusize_add_saturating(a: usize, b: isize) -> usize {
+    iusize_add(a, b).unwrap_or(0)
+}
 
 #[derive(Debug)]
 struct Offset {
     idx: usize,
-    len: usize,
-    negative: bool,
+    len: isize,
 }
 
 /// The offsets previous events cause on any future events which have not taken the previous ones
@@ -73,6 +78,9 @@ impl Offsets {
         }
     }
     fn push(&mut self, offset: Offset) {
+        if offset.len == 0 {
+            return;
+        }
         match self
             .offsets
             .binary_search_by(|probe| probe.idx.cmp(&offset.idx))
@@ -100,19 +108,16 @@ impl Offsets {
                 Segment::Ref(seg) => {
                     match last {
                         Last::Ref { end } => {
-                            if seg.start() >= end {
-                                self.push(Offset {
-                                    idx: seg.start(),
-                                    len: seg.start() - end,
-                                    negative: true,
-                                });
-                            }
+                            self.push(Offset {
+                                idx: seg.start(),
+                                len: utils::sub_usize(end, seg.start()),
+                            });
                         }
                         Last::Unknown { len: 0 } => {}
+                        #[allow(clippy::cast_possible_wrap)]
                         Last::Unknown { len } => self.push(Offset {
                             idx: seg.start(),
-                            len,
-                            negative: false,
+                            len: len as _,
                         }),
                     }
                     last = Last::Ref {
@@ -138,14 +143,6 @@ impl Offsets {
         diff.with_block_size(1).unwrap();
         let block_size = diff.block_size();
 
-        // let mut max = 0;
-        // for seg in diff.segments() {
-            // match seg {
-                // Segment::Ref(seg) => max += seg.len(block_size),
-                // Segment::Unknown(seg) => max += seg.source().len(),
-            // }
-        // }
-
         let mut cursor = 0;
 
         for seg in diff.segments_mut() {
@@ -157,24 +154,13 @@ impl Offsets {
                         // `TODO`: or should `seg.start()` actually be the moving
                         // `start`?
                         if offset.idx < seg.start() {
-                            if offset.negative {
-                                start = start.saturating_sub(offset.len);
-                            } else {
-                                start += offset.len;
-                            }
+                            start = utils::iusize_add_saturating(start, offset.len);
                             continue;
                         }
                         if offset.idx <= seg.end(block_size) {
-                            if offset.negative {
-                                len = len.saturating_sub(offset.len);
-                            } else {
-                                len += offset.len;
-                            }
+                            len = utils::iusize_add_saturating(len, offset.len);
                         }
                     }
-                    // if seg.end(block_size) >= max {
-                        // len = utils::iusize_add(len, self.len_diff).unwrap_or(0);
-                    // }
                     *seg = seg.with_start(start).with_blocks(len);
                     cursor += seg.len(block_size);
                 }
@@ -182,11 +168,7 @@ impl Offsets {
                     let mut blocks = seg.source().len();
                     for offset in &self.offsets {
                         if offset.idx >= cursor && offset.idx < cursor + seg.source().len() {
-                            if offset.negative {
-                                blocks = blocks.saturating_sub(offset.len);
-                            } else {
-                                blocks += offset.len;
-                            }
+                            blocks = utils::iusize_add_saturating(blocks, offset.len);
                         }
                     }
                     cursor += seg.source().len();
@@ -221,5 +203,47 @@ impl Offsets {
 impl Default for Offsets {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[allow(clippy::cast_possible_wrap)]
+mod tests {
+    #[test]
+    fn offsets() {
+        use den::{Segment, SegmentRef, Signature};
+
+        let diff = {
+            let mut sig = Signature::new(8);
+            sig.write(b"");
+            let sig = sig.finish();
+            let mut diff = sig.diff(b"");
+            *diff.segments_mut() = [
+                Segment::unknown("ye! "),
+                Segment::Ref(SegmentRef {
+                    start: 0,
+                    block_count: 1,
+                }),
+                Segment::Ref(SegmentRef {
+                    start: 16,
+                    block_count: 1,
+                }),
+                Segment::Ref(SegmentRef {
+                    start: 16,
+                    block_count: 7,
+                }),
+                Segment::unknown("ou?"),
+            ]
+            .to_vec();
+            diff
+        };
+        let mut total = 0_isize;
+
+        let mut offsets = super::Offsets::new();
+        offsets.add_diff(&diff, 0);
+        println!("Offsets: {offsets:?}");
+        for offset in offsets.offsets {
+            total += offset.len;
+        }
+        assert_eq!(total, 4);
     }
 }

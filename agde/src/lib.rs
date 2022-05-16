@@ -886,6 +886,8 @@ impl Manager {
     }
 
     /// Attempts to get the modern name of the resource named `old_name` at `timestamp`.
+    ///
+    /// If `old_name` is valid, it's returned.
     pub fn modern_resource_name<'a>(
         &self,
         old_name: &'a str,
@@ -912,14 +914,15 @@ impl Manager {
     /// Get an [`event::Rewinder`] which can apply all the stored diffs received since the last
     /// data commit to a resource.
     ///
-    /// This keeps track of which diffs have been delivered since last calling this.
+    /// You have to call [`Self::update_last_commit`] after each "merge" - after each occurrence of
+    /// diffing.
     ///
     /// This is critical when rewinding the `current` storage before diffing it to the `public`
     /// storage to send an event.
     /// Use [`event::Rewinder::rewind`] on all the modified resources.
     ///
     /// The [`event::Rewinder`] can be reused for several resources.
-    pub fn rewind_from_last_commit(&mut self) -> event::Rewinder {
+    pub fn rewind_from_last_commit(&self) -> event::Rewinder {
         let cutoff = self
             .event_log
             .cutoff_from_time(
@@ -928,8 +931,8 @@ impl Manager {
                     .unwrap_or(Duration::ZERO),
             )
             .unwrap_or(0);
-        self.event_log.required_event_timestamp = Some(utils::dur_now());
         let slice = &self.event_log.list[cutoff..];
+        println!("cutoff: {cutoff}, slice: {slice:#?}");
         event::Rewinder::new(slice)
     }
     /// Get the time of the last call to [`Self::rewind_from_last_commit`].
@@ -937,6 +940,12 @@ impl Manager {
         self.event_log
             .required_event_timestamp
             .map(utils::dur_to_systime)
+    }
+    /// Update the inner timestamp of the last commit.
+    ///
+    /// See [`Self::rewind_from_last_commit`] for more details.
+    pub fn update_last_commit(&mut self) {
+        self.event_log.required_event_timestamp = Some(utils::dur_now());
     }
 
     /// Get an iterator of the piers filtered by `filter`.

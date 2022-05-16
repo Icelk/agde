@@ -214,6 +214,7 @@ impl Log {
     #[inline]
     pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
         for (pos, ev) in self.list.iter().enumerate().rev() {
+            println!("Iter ev @{pos} {ev:?}");
             if ev.event.timestamp() <= cutoff {
                 return Some(pos + 1);
             }
@@ -488,7 +489,8 @@ impl<'a> EventApplier<'a> {
                 .filter(|stored_ev| {
                     stored_ev.event.latest_event_timestamp() < self.event.timestamp()
                 })
-                .map(|ev| &mut ev.event),
+                .map(|ev| &mut ev.event)
+                .inspect(|ev| println!("Applying log Offsets to ev: {ev:?}")),
         );
 
         println!("Rewound");
