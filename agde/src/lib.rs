@@ -742,14 +742,21 @@ impl Manager {
             }
             highest.map(|(uuid, _)| SelectedPier::new(uuid))
         } else {
-            self.choose_pier(|uuid, _| {
+            // if we for some reason didn't set our results, `TODO`: warn in else clause.
+            if let Some(ours) = conversation.get(&self.uuid()) {
+                if most_popular.0 == ours.hash() {
+                    return None;
+                }
+            }
+            let pier = self.choose_pier(|uuid, _| {
                 let pier_check = if let Some(check) = conversation.get(&uuid) {
                     check
                 } else {
                     return false;
                 };
                 pier_check.hash() == most_popular.0
-            })
+            });
+            pier
         }
     }
     /// Use the [`event::Unwinder`] before inserting any hashes.
