@@ -56,7 +56,7 @@ impl Metadata {
                 let mut map = HashMap::new();
 
                 let path = match storage {
-                    Storage::Public => ".agde/",
+                    Storage::Public | Storage::Meta => ".agde/",
                     Storage::Current => "./",
                 };
 
@@ -142,6 +142,8 @@ pub enum Storage {
     Public,
     /// The copy of data the user writes to.
     Current,
+    /// Storage of metadata objects.
+    Meta,
 }
 pub enum WriteMtime {
     LookUpCurrent,
@@ -202,6 +204,7 @@ impl Options {
                     let path = match storage {
                         Storage::Public => format!(".agde/files/{resource}",),
                         Storage::Current => format!("./{resource}"),
+                        Storage::Meta => format!(".agde/{resource}"),
                     };
                     let file = tokio::fs::File::open(&path).await;
                     let mut file = match file {
@@ -223,6 +226,7 @@ impl Options {
                     let path = match storage {
                         Storage::Public => format!(".agde/files/{resource}",),
                         Storage::Current => format!("./{resource}"),
+                        Storage::Meta => format!(".agde/{resource}"),
                     };
 
                     if let Some(path) = Path::new(&path).parent() {
@@ -234,6 +238,8 @@ impl Options {
                     file.write_all(&data).await.map_err(|_| ())?;
                     file.flush().await.map_err(|_| ())?;
                     match storage {
+                        // meta storage obviously doesn't affect the files' metadata.
+                        Storage::Meta => {}
                         Storage::Public => {
                             let mut metadata = metadata.lock().await;
 
@@ -291,6 +297,7 @@ impl Options {
                     let path = match storage {
                         Storage::Public => format!(".agde/files/{resource}",),
                         Storage::Current => format!("./{resource}"),
+                        Storage::Meta => format!(".agde/{resource}"),
                     };
                     if storage == Storage::Current {
                         let mut metadata = offline_metadata.lock().await;
@@ -364,7 +371,7 @@ impl Options {
                     {
                         // `TODO`: Optimize this
                         *offline_metadata = metadata.clone();
-                        futures::future::try_select(
+                        futures::future::try_join(
                             Box::pin(metadata.sync("metadata")),
                             Box::pin(offline_metadata.sync("metadata-offline")),
                         )
@@ -422,6 +429,25 @@ async fn main() {
 }
 
 async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(), DynError> {
+    let state = (options.read)("clean".to_owned(), Storage::Meta)
+        .await
+        .map_err(|_| ApplicationError::StoragePermissions)?;
+
+    if state.as_deref() != Some("y") {
+        error!("State isn't clean.");
+
+        // `TODO`: copy files from public to current, all the ones which have changed according to
+        // offline_metadata. If options.force_pull:
+        (options.write)(
+            "clean".to_owned(),
+            Storage::Meta,
+            "y".into(),
+            WriteMtime::No,
+        )
+        .await
+        .map_err(|_| ApplicationError::StoragePermissions)?;
+    }
+
     let (mut write, mut read) = connect_ws(url).await?;
 
     // changes since last Storage sync
@@ -526,6 +552,116 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
     let read = Arc::new(Mutex::new(read));
     let manager = Arc::new(Mutex::new(manager));
 
+    // `TODO`: do this outside of run, as we shouldn't call this several times.
+    // It's also system specific.
+    {
+        let manager = Arc::clone(&manager);
+        let options = Arc::clone(&options);
+        let handler = ctrlc::set_handler(move || {
+            info!("Caught ctrlc");
+            let manager = Arc::clone(&manager);
+            let options = Arc::clone(&options);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .max_blocking_threads(1)
+                .build()
+                .expect("failed to start tokio when handling ctrlc");
+            let returned = runtime.block_on(async move {
+                let clean = (options.read)("clean".to_owned(), Storage::Meta)
+                    .await
+                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                if clean.as_deref() == Some(b"y") {
+                    info!("State clean. Exiting.");
+                    return Ok(());
+                }
+                error!("State not clean. Trying to apply diffs to current buffer.");
+
+                let mut manager = manager.lock().await;
+
+                let diff = (options.rough_resource_diff)()
+                    .await
+                    .map_err(|_| ApplicationError::StoragePermissions)?;
+
+                {
+                    for diff in diff {
+                        let modern = manager.modern_resource_name(
+                            diff.resource(),
+                            manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH),
+                        );
+                        if modern.is_some() {
+                            match diff {
+                                Change::Delete(_) => {}
+                                Change::Modify(resource, created) => {
+                                    let mut current =
+                                        (options.read)(resource.clone(), Storage::Current)
+                                            .await
+                                            .map_err(|_| ApplicationError::StoragePermissions)?
+                                            .expect(
+                                                "configuration should not return \
+                                                    Modified if the Current storage \
+                                                    version doesn't exist.",
+                                            );
+
+                                    let public = (options.read)(resource.clone(), Storage::Public)
+                                        .await
+                                        .map_err(|_| ApplicationError::StoragePermissions)?
+                                        .unwrap_or_default();
+
+                                    current = if let Some(current) = rewind_current(
+                                        &mut *manager,
+                                        created,
+                                        &resource,
+                                        &public,
+                                        &current,
+                                    )
+                                    .await
+                                    {
+                                        current
+                                    } else {
+                                        // since we keep track of the incoming events and
+                                        // which resources have been changed, this will get
+                                        // copied below.
+                                        continue;
+                                    };
+
+                                    (options.write)(
+                                        resource,
+                                        Storage::Current,
+                                        current,
+                                        WriteMtime::No,
+                                    )
+                                    .await
+                                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // we are clean again!
+                (options.write)(
+                    "clean".to_owned(),
+                    Storage::Meta,
+                    "y".into(),
+                    WriteMtime::No,
+                )
+                .await
+                .map_err(|_| ApplicationError::StoragePermissions)?;
+
+                Ok::<(), ApplicationError>(())
+            });
+
+            if let Err(err) = returned {
+                error!("Error on ctrlc cleanup: {err:?}");
+            }
+
+            info!("Successfully cleaned up.");
+            std::process::exit(0);
+        });
+        if handler.is_err() {
+            warn!("Failed to set ctrlc handler.");
+        };
+    }
+
     let accept_handle = {
         let manager = Arc::clone(&manager);
         let write = Arc::clone(&write);
@@ -593,6 +729,17 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         let resource = applier.resource();
 
                                         if let Some(resource) = resource {
+                                            // write to `.agde/clean` that we aren't clean (we have
+                                            // public diffs not applied to `current`)
+                                            (options.write)(
+                                                "clean".to_owned(),
+                                                Storage::Meta,
+                                                "n".into(),
+                                                WriteMtime::No,
+                                            )
+                                            .await
+                                            .map_err(|()| ApplicationError::StoragePermissions)?;
+
                                             match applier.event().inner() {
                                                 agde::EventKind::Modify(_) => {
                                                     let resource_data = (options.read)(
@@ -752,63 +899,22 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         SystemTime::now()
                                     );
 
-                                    let last_commit =
-                                        manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH);
-                                    let offsets = if !created {
-                                        let mut unwinder = manager.unwinder_to(last_commit);
-
-                                        // here, `resource` is just the modern name. See the code
-                                        // above for more info
-                                        let unwound_public =
-                                            unwinder.unwind(&public, &resource).expect(
-                                                "error when unwinding public storage. \
-                                            Resource name is valid and capacity is checked.",
-                                            );
-
-                                        let old_diff = agde::event::diff(&unwound_public, &current);
-
-                                        println!("  OLD DIFF {old_diff:?}");
-
-                                        let mut offsets = agde::utils::Offsets::new();
-                                        offsets.add_diff(
-                                            &old_diff,
-                                            agde::utils::sub_usize(
-                                                current.len(),
-                                                unwound_public.len(),
-                                            ),
-                                        );
-                                        offsets
-                                    } else {
-                                        agde::utils::Offsets::new()
-                                    };
-
-                                    let mut rewinder = manager.rewind_from_last_commit();
-
-                                    current = match rewinder.rewind_with_modify_diff(
+                                    current = if let Some(current) = rewind_current(
+                                        &mut *manager,
+                                        created,
                                         &resource,
-                                        current,
-                                        |diff| {
-                                            let mut diff = diff.clone();
-                                            let original_data_len = diff.original_data_len();
-                                            offsets.apply_single(&mut diff);
-                                            // ignore `offsets`'s changes, as `apply_adaptive_end`
-                                            // takes care of that.
-                                            diff.set_original_data_len(original_data_len);
-                                            println!("Diff changed with {offsets:?}, now {diff:?}");
-                                            Cow::Owned(diff)
-                                        },
-                                    ) {
-                                        Err(agde::event::RewindError::ResourceDestroyed(_)) => {
-                                            // since we keep track of the incoming events and
-                                            // which resources have been changed, this will get
-                                            // copied below.
-                                            println!("Resource destroyed");
-                                            continue;
-                                        }
-                                        Err(agde::event::RewindError::ApplyError(err)) => {
-                                            Err(err).expect("error when applying diffs to current")
-                                        }
-                                        Ok(vec) => vec,
+                                        &public,
+                                        &current,
+                                    )
+                                    .await
+                                    {
+                                        current
+                                    } else {
+                                        // since we keep track of the incoming events and
+                                        // which resources have been changed, this will get
+                                        // copied below.
+                                        println!("Resource destroyed");
+                                        continue;
                                     };
 
                                     warn!(
@@ -841,7 +947,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                     manager.update_last_commit();
                 }
 
-                {
+                // Execute `apply` and `send` at the same time!
+                let apply = async {
                     let mut manager = manager.lock().await;
 
                     for message in &messages {
@@ -930,8 +1037,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         changes.clear();
                     }
                     debug!("Successfully applied diffs.");
-                }
-                {
+                    Ok(())
+                };
+                // Execute `apply` and `send` at the same time!
+                let send = async {
                     let mut write = write.lock().await;
                     for message in &messages {
                         let message = message.to_bin().into();
@@ -946,6 +1055,19 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         .await
                         .map_err(|_| ApplicationError::UnexpectedServerClose)?;
                     debug!("Successfully sent diffs.");
+                    Ok(())
+                };
+                futures::future::try_join(apply, send).await?;
+                {
+                    // `TODO`: don't call this every time we diff!
+                    (options.write)(
+                        "clean".to_owned(),
+                        Storage::Meta,
+                        "y".into(),
+                        WriteMtime::No,
+                    )
+                    .await
+                    .map_err(|()| ApplicationError::StoragePermissions)?;
                 }
 
                 last_check = SystemTime::now();
@@ -964,6 +1086,58 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
         }
     };
     result.map_err(|err| Box::new(err) as DynError)
+}
+
+/// Continue if this return [`None`] - then the resource is destroyed.
+async fn rewind_current(
+    manager: &mut Manager,
+    created: bool,
+    resource: &str,
+    public: &[u8],
+    current: &[u8],
+) -> Option<Vec<u8>> {
+    let last_commit = manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH);
+    let offsets = if !created {
+        let mut unwinder = manager.unwinder_to(last_commit);
+
+        // here, `resource` is just the modern name. See the code
+        // above for more info
+        let unwound_public = unwinder.unwind(public, resource).expect(
+            "error when unwinding public storage. Resource name is valid and capacity is checked.",
+        );
+
+        let old_diff = agde::event::diff(&unwound_public, current);
+
+        println!("  OLD DIFF {old_diff:?}");
+
+        let mut offsets = agde::utils::Offsets::new();
+        offsets.add_diff(
+            &old_diff,
+            agde::utils::sub_usize(current.len(), unwound_public.len()),
+        );
+        offsets
+    } else {
+        agde::utils::Offsets::new()
+    };
+
+    let mut rewinder = manager.rewind_from_last_commit();
+
+    match rewinder.rewind_with_modify_diff(resource, current, |diff| {
+        let mut diff = diff.clone();
+        let original_data_len = diff.original_data_len();
+        offsets.apply_single(&mut diff);
+        // ignore `offsets`'s changes, as `apply_adaptive_end`
+        // takes care of that.
+        diff.set_original_data_len(original_data_len);
+        println!("Diff changed with {offsets:?}, now {diff:?}");
+        Cow::Owned(diff)
+    }) {
+        Err(agde::event::RewindError::ResourceDestroyed(_)) => None,
+        Err(agde::event::RewindError::ApplyError(err)) => {
+            Err(err).expect("error when applying diffs to current")
+        }
+        Ok(vec) => Some(vec),
+    }
 }
 
 async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {

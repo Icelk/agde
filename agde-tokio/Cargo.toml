@@ -17,11 +17,12 @@ license = "LGPL-3.0-or-later"
 [dependencies]
 agde = { path = "../agde" }
 
+bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
+ctrlc = "3.2"
 env_logger = "0.9"
+futures = { version = "0.3", default-features = false }
 log = "0.4"
+serde = { version = "^1", features = ["derive"] }
 tokio = { version = "=1.17", features = ["macros", "rt-multi-thread", "parking_lot", "time", "sync", "fs"] }
 tokio-tungstenite = { version = "0.17", features = ["rustls-tls-webpki-roots"] }
-futures = { version = "0.3", default-features = false }
 walkdir = "2"
-serde = { version = "^1", features = ["derive"] }
-bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
