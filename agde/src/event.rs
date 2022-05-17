@@ -498,7 +498,7 @@ impl From<den::ApplyError> for RewindError {
 
 /// Struct to apply all the diffs from a specified timestamp to a resource.
 ///
-/// See [`Manager::rewind_from`] for more info.
+/// See [`Manager::rewind_from_last_commit`] for more info.
 #[derive(Debug)]
 pub struct Rewinder<'a> {
     /// Ordered from last (temporally).
