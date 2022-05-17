@@ -556,7 +556,19 @@ pub enum UuidCheckAction {
     /// Do nothing.
     Nothing,
 }
-type Conversation = HashMap<Uuid, UuidCheck>;
+#[derive(Debug)]
+struct Conversation {
+    messages: HashMap<Uuid, UuidCheck>,
+    last_modified: Duration,
+}
+impl Conversation {
+    fn new() -> Self {
+        Self {
+            messages: HashMap::new(),
+            last_modified: utils::dur_now(),
+        }
+    }
+}
 #[derive(Debug)]
 pub(crate) struct UuidReplies {
     conversations: HashMap<Uuid, Conversation>,
@@ -573,11 +585,28 @@ impl UuidReplies {
         let conversation = self
             .conversations
             .entry(conversation)
-            .or_insert_with(HashMap::new);
-        conversation.insert(source, check);
+            .or_insert_with(Conversation::new);
+        conversation.messages.insert(source, check);
+        conversation.last_modified = utils::dur_now();
+    }
+    pub(crate) fn update(&mut self, conversation: Uuid) {
+        let mut conversation = self.conversations.get_mut(&conversation);
+        if let Some(c) = &mut conversation {
+            c.last_modified = utils::dur_now();
+        }
     }
     pub(crate) fn get(&self, conversation: Uuid) -> Option<&HashMap<Uuid, UuidCheck>> {
-        self.conversations.get(&conversation)
+        let conversation = self.conversations.get(&conversation);
+        conversation.map(|c| &c.messages)
+    }
+    pub(crate) fn remove(&mut self, conversation: Uuid) {
+        self.conversations.remove(&conversation);
+    }
+    pub(crate) fn clean(&mut self) {
+        let now = utils::dur_now();
+        let threshold = now - Duration::from_secs(60 * 5);
+        self.conversations
+            .retain(|_, conversation| conversation.last_modified > threshold);
     }
 }
 impl Default for UuidReplies {

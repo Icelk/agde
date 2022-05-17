@@ -954,6 +954,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
         })
     };
 
+    // `TODO`: periodic calls (`clean_event_uuid_log_checks`, periodic (hash, event log) checks)
+
     let result = match futures::future::select(accept_handle, local_watcher).await {
         futures::future::Either::Left((result, other))
         | futures::future::Either::Right((result, other)) => {

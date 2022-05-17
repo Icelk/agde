@@ -680,13 +680,27 @@ impl Manager {
 
         action
     }
+    /// Trims the memory usage of the cache used by [`Self::apply_event_uuid_log_check`].
+    ///
+    /// Call this maybe once per minute.
+    /// This just checks modification timestamps, so it's pretty fast.
+    ///
+    /// This removes conversations not used by agde for 5 minutes. This is a implementation detail
+    /// and can not be relied upon.
+    #[inline]
+    pub fn clean_event_uuid_log_checks(&mut self) {
+        self.event_uuid_conversation_piers.clean();
+    }
     /// Assures you are using the "correct" version of the files.
     /// This return [`None`] if that's the case.
     /// Otherwise returns an appropriate pier to get data from.
     ///
     /// Also returns [`None`] if the conversation wasn't found or no responses were sent.
+    ///
+    /// This will clear the conversation with `conversation_uuid`.
     #[allow(clippy::missing_panics_doc)] // It's safe.
     pub fn assure_event_uuid_log(&mut self, conversation_uuid: Uuid) -> Option<SelectedPier> {
+        self.event_uuid_conversation_piers.update(conversation_uuid);
         let conversation = self.event_uuid_conversation_piers.get(conversation_uuid)?;
         let total_reponses = conversation.len();
         // We are the one response.
@@ -756,6 +770,7 @@ impl Manager {
                 };
                 pier_check.hash() == most_popular.0
             });
+            self.event_uuid_conversation_piers.remove(conversation_uuid);
             pier
         }
     }
