@@ -433,19 +433,44 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
         .await
         .map_err(|_| ApplicationError::StoragePermissions)?;
 
-    if state.as_deref() != Some("y") {
+    if state.as_deref() != Some(b"y") {
         error!("State isn't clean.");
 
-        // `TODO`: copy files from public to current, all the ones which have changed according to
-        // offline_metadata. If options.force_pull:
-        (options.write)(
-            "clean".to_owned(),
-            Storage::Meta,
-            "y".into(),
-            WriteMtime::No,
-        )
-        .await
-        .map_err(|_| ApplicationError::StoragePermissions)?;
+        if options.force_pull {
+            error!("Overriding local changes since no state file was found.");
+
+            let changes = (options.rough_resource_diff)()
+                .await
+                .map_err(|_| ApplicationError::StoragePermissions)?;
+
+            for change in changes {
+                let resource = match change {
+                    Change::Modify(resource, _) | Change::Delete(resource) => resource,
+                };
+                let actual = (options.read)(resource.to_owned(), Storage::Public)
+                    .await
+                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                if let Some(actual) = actual {
+                    (options.write)(
+                        resource,
+                        Storage::Current,
+                        actual,
+                        WriteMtime::LookUpCurrent,
+                    )
+                    .await
+                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                }
+            }
+
+            (options.write)(
+                "clean".to_owned(),
+                Storage::Meta,
+                "y".into(),
+                WriteMtime::No,
+            )
+            .await
+            .map_err(|_| ApplicationError::StoragePermissions)?;
+        }
     }
 
     let (mut write, mut read) = connect_ws(url).await?;
