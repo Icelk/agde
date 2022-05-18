@@ -436,12 +436,13 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
     if state.as_deref() != Some(b"y") {
         error!("State isn't clean.");
 
+        let changes = (options.rough_resource_diff)()
+            .await
+            .map_err(|_| ApplicationError::StoragePermissions)?;
         if options.force_pull {
-            error!("Overriding local changes since no state file was found.");
-
-            let changes = (options.rough_resource_diff)()
-                .await
-                .map_err(|_| ApplicationError::StoragePermissions)?;
+            if !changes.is_empty() {
+                error!("Overriding local changes since no state file was found.");
+            }
 
             for change in changes {
                 let resource = match change {
@@ -462,6 +463,15 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 }
             }
 
+            (options.write)(
+                "clean".to_owned(),
+                Storage::Meta,
+                "y".into(),
+                WriteMtime::No,
+            )
+            .await
+            .map_err(|_| ApplicationError::StoragePermissions)?;
+        } else if changes.is_empty() {
             (options.write)(
                 "clean".to_owned(),
                 Storage::Meta,
