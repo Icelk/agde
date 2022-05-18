@@ -296,10 +296,6 @@ impl<S: ExtendVec + 'static> Event<S> {
         self.latest_event
     }
 }
-/// A [`Event`] with internal data.
-///
-/// This is the type that is sent between clients.
-pub type Dataful = Event;
 
 /// Error during [`Unwinder`] operations.
 #[derive(Debug)]
