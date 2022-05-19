@@ -651,7 +651,12 @@ impl Manager {
         }
 
         self.event_log.insert(event.clone(), message_uuid);
-        Ok(self.event_log.event_applier(event, message_uuid))
+        let applier = self.event_log.event_applier(event, message_uuid);
+        if self.fast_forward == fast_forward::State::NotRunning {
+            Ok(applier)
+        } else {
+            Err(log::Error::FastForwardInProgress)
+        }
     }
     /// Handles a [`MessageKind::EventUuidLogCheck`].
     /// This will return an [`UuidCheckAction`] which tells you what to do.

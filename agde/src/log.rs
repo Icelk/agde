@@ -81,6 +81,9 @@ impl Ord for ReceivedEvent {
 pub enum Error {
     /// The given [`Event`] has occurred in the future!
     EventInFuture,
+    /// You are currently fast forwarding.
+    /// Please just ignore this and continue on your marry way.
+    FastForwardInProgress,
 }
 
 /// An error during [`den::Difference::apply`] and [`crate::log::EventApplier::apply`].

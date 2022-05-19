@@ -204,4 +204,14 @@ impl Response {
             current_event_uuid,
         }
     }
+
+    /// Get the metadata of the remote. Use [`Metadata::changes`] to list which you need to add to
+    /// the [`crate::sync::RequestBuilder`].
+    ///
+    /// Use like this: `local_public_metadata.changes(ff_response.metadata())`.
+    /// Remove the files the changes says needs to be removed and add the rest to the
+    /// [`crate::sync::RequestBuilder::insert`].
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
 }

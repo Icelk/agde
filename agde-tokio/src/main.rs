@@ -516,13 +516,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
         }
     }
 
-    // `TODO`: catch up
-    {
-        if options.force_pull {
-            // copy all files from public to current (check diff)
-        }
-    }
-
     let write = Arc::new(Mutex::new(write));
     let read = Arc::new(Mutex::new(read));
     let manager = Arc::new(Mutex::new(manager));
@@ -782,8 +775,16 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     }
                                 };
                             }
-                            agde::MessageKind::FastForward(_) => todo!(),
-                            agde::MessageKind::FastForwardReply(_) => todo!(),
+                            // `TODO`: handle cancelled fast forwards
+                            agde::MessageKind::FastForward(ff) => {
+                                // `TODO`: get metadata from options (field which is both used by
+                                // the fs functions and to get this?)
+                                let msg = manager.process_fast_forward_response(, message.sender());
+                            },
+                            agde::MessageKind::FastForwardReply(ff) => {
+                                // `TODO`: handle error when pier doesn't match!
+                                let sync_request = manager.apply_fast_forward_reply(ff, message.sender()).unwrap();
+                            },
                             agde::MessageKind::Sync(_) => todo!(),
                             agde::MessageKind::SyncReply(_) => todo!(),
                             agde::MessageKind::HashCheck(_) => todo!(),
@@ -815,6 +816,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
     let local_watcher: tokio::task::JoinHandle<Result<(), ApplicationError>> = {
         let options = Arc::clone(&options);
+        let manager = Arc::clone(&manager);
+        let write = Arc::clone(&write);
+        let changed = Arc::clone(&changed);
         tokio::spawn(async move {
             let mut last_check = SystemTime::now();
             loop {
@@ -1050,6 +1054,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
             }
         })
     };
+
+    {
+        let mut manager = manager.lock().await;
+        if let Some(msg) = manager.process_fast_forward() {
+            let mut write = write.lock().await;
+            write.send(msg.to_bin().into()).await?;
+        }
+    }
 
     // `TODO`: periodic calls (`clean_event_uuid_log_checks`, periodic (hash, event log) checks)
 
