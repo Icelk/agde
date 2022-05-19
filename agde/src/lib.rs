@@ -884,7 +884,6 @@ impl Manager {
             Some((
                 sync::RequestBuilder::new(
                     sender,
-                    // resource::Matcher::new().set_include(resource::Matches::List(differing_data)),
                     // Get all events in the log, up to `self.event_log.limit()`
                     Duration::ZERO,
                     self.event_log.limit(),

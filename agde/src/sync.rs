@@ -21,7 +21,6 @@ use crate::{log, Uuid};
 #[must_use]
 pub struct Request {
     pier: Uuid,
-    // resources: resource::Matcher,
     signatures: HashMap<String, den::Signature>,
     log_settings: (Duration, u32),
 }
@@ -45,20 +44,17 @@ impl Eq for Request {}
 #[must_use]
 pub struct RequestBuilder {
     pier: Uuid,
-    // resources: resource::Matcher,
     signature: HashMap<String, den::Signature>,
     log_settings: (Duration, u32),
 }
 impl RequestBuilder {
     pub(crate) fn new(
         pier: Uuid,
-        // resources: resource::Matcher,
         log_lifetime: Duration,
         log_limit: u32,
     ) -> Self {
         Self {
             pier,
-            // resources,
             signature: HashMap::new(),
             log_settings: (log_lifetime, log_limit),
         }
@@ -67,9 +63,6 @@ impl RequestBuilder {
     ///
     /// The [`den::Signature`] allows the pier to get the diff for us.
     pub fn insert(&mut self, resource: String, signature: den::Signature) -> &mut Self {
-        // if !self.resources.matches(&resource) {
-        // self.resources.include(resource::Matches::Exact(resource.clone()));
-        // }
         self.signature.insert(resource, signature);
         self
     }
@@ -85,12 +78,6 @@ impl RequestBuilder {
             log_settings: self.log_settings,
         }
     }
-    // /// Test if this `resource` should be part of the `signature` in [`Self::finish`].
-    // #[must_use]
-    // #[inline]
-    // pub fn matches(&self, resource: &str) -> bool {
-    // self.resources.matches(resource)
-    // }
 }
 
 /// The diffs to make the pier's data the same as ours.
@@ -100,7 +87,6 @@ pub struct Response {
     pier: Uuid,
     log: Vec<log::ReceivedEvent>,
     diff: Vec<(String, den::Difference)>,
-    // create: Vec<(String, Vec<u8>)>,
     delete: Vec<String>,
 }
 impl Response {
@@ -117,12 +103,6 @@ impl Response {
     pub fn diff(&self) -> &[(impl AsRef<str>, den::Difference)] {
         &self.diff
     }
-    // /// Returns a list with `(resource, data)`,
-    // /// where you should set the contents of `resource` to `data`.
-    // #[must_use]
-    // pub fn create(&self) -> &[(impl AsRef<str>, impl AsRef<[u8]>)] {
-    // &self.create
-    // }
     /// Returns a list with `resource`,
     /// where you should delete `resource`.
     #[must_use]
@@ -132,7 +112,7 @@ impl Response {
 }
 /// Builder for a [`Response`].
 ///
-/// Follow the instructions from how you got this builder and (insert)[Self::diff] the appropriate
+/// Follow the instructions from how you got this builder and (insert)[`Self::diff`] the appropriate
 /// resources.
 /// Execute the action returned by the aforementioned function.
 #[derive(Debug)]
@@ -142,8 +122,6 @@ pub struct ResponseBuilder<'a> {
     pier: Uuid,
     /// Binary sorted by String
     diff: Vec<(String, den::Difference)>,
-    // /// Binary sorted by String
-    // create: Vec<(String, Vec<u8>)>,
 }
 impl<'a> ResponseBuilder<'a> {
     pub(crate) fn new(request: &'a Request, pier: Uuid) -> Self {
@@ -152,22 +130,8 @@ impl<'a> ResponseBuilder<'a> {
             signature_iter: request.signatures.iter(),
             pier,
             diff: Vec::new(),
-            // create: Vec::new(),
         }
     }
-    // /// Get the action for `resource`.
-    // ///
-    // /// See the variants of [`ResponseBuilderAction`] for how to proceed.
-    // pub fn matches(&self, resource: &str) -> ResponseBuilderAction {
-    // if self.request.resources.matches(resource) {
-    // match self.request.signatures.get(resource) {
-    // Some(_) => ResponseBuilderAction::Difference,
-    // None => ResponseBuilderAction::Create,
-    // }
-    // } else {
-    // ResponseBuilderAction::Ignore
-    // }
-    // }
     /// Use this in a `while let Some((resource, signature)) = response_builder.next_signature()`
     /// loop to add all the returned values to [`Self::diff`].
     pub fn next_signature(&mut self) -> Option<(&str, &den::Signature)> {
@@ -178,11 +142,6 @@ impl<'a> ResponseBuilder<'a> {
         self.diff.push((resource, diff));
         self
     }
-    // /// Tell the requester they don't have `resource`, with it's `content`.
-    // pub fn create(&mut self, resource: String, content: Vec<u8>) -> &mut Self {
-    // self.create.push((resource, content));
-    // self
-    // }
     pub(crate) fn finish(self, log: &log::Log) -> Response {
         let mut delete = Vec::new();
         for resource in self.request.signatures.keys() {
@@ -190,10 +149,6 @@ impl<'a> ResponseBuilder<'a> {
                 .diff
                 .binary_search_by(|item| item.0.cmp(resource))
                 .is_err()
-            // && self
-            // .create
-            // .binary_search_by(|item| item.0.cmp(resource))
-            // .is_err()
             {
                 delete.push(resource.clone());
             }
@@ -208,19 +163,7 @@ impl<'a> ResponseBuilder<'a> {
             pier: self.pier,
             log,
             diff: self.diff,
-            // create: self.create,
             delete,
         }
     }
 }
-// /// An action to take for a local resource, dictated by the [`Request`].
-// #[derive(Debug, Clone, Copy)]
-// #[must_use]
-// pub enum ResponseBuilderAction {
-// /// Ignore this resource
-// Ignore,
-// /// Call [`ResponseBuilder::diff`]
-// Difference,
-// /// Call [`ResponseBuilder::create`]
-// Create,
-// }
