@@ -48,11 +48,7 @@ pub struct RequestBuilder {
     log_settings: (Duration, u32),
 }
 impl RequestBuilder {
-    pub(crate) fn new(
-        pier: Uuid,
-        log_lifetime: Duration,
-        log_limit: u32,
-    ) -> Self {
+    pub(crate) fn new(pier: Uuid, log_lifetime: Duration, log_limit: u32) -> Self {
         Self {
             pier,
             signature: HashMap::new(),
