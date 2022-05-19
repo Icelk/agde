@@ -190,7 +190,7 @@ impl Display for Uuid {
 ///
 /// On direct messages, send a conversation UUID which can be [`Self::Cancelled`].
 // `TODO`: implement the rest of these.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum MessageKind {
     /// The client sending this is connecting to the network.
@@ -236,9 +236,9 @@ pub enum MessageKind {
     /// That contains which resources you should sync.
     ///
     /// Then, send a [`Self::Sync`] request and handle the actual data transmission.
-    FastForward,
+    FastForward(fast_forward::Request),
     /// A reply to a [`Self::FastForward`] request.
-    FastForwardReply,
+    FastForwardReply(fast_forward::Response),
     /// A request to get the diffs and sync the specified resources.
     Sync(sync::Request),
     /// The response with hashes of the specified resources.
@@ -285,7 +285,7 @@ pub enum MessageKind {
 /// A message to be communicated between clients.
 ///
 /// Contains a [`MessageKind`], sender UUID, and message UUID.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Message {
     kind: MessageKind,
@@ -443,6 +443,8 @@ pub struct Manager {
 
     event_log: log::Log,
     event_uuid_conversation_piers: log::UuidReplies,
+
+    fast_forward: fast_forward::State,
 }
 impl Manager {
     /// Creates a empty manager.
@@ -468,6 +470,8 @@ impl Manager {
 
             event_log: log::Log::new(log_lifetime, event_log_limit),
             event_uuid_conversation_piers: log::UuidReplies::new(),
+
+            fast_forward: fast_forward::State::NotRunning,
         }
     }
     /// Get the UUID of this client.
@@ -483,7 +487,7 @@ impl Manager {
     pub fn process_hello(&mut self) -> Message {
         self.process(MessageKind::Hello(self.capabilities.clone()))
     }
-    /// Takes a [`DatafulEvent`] and returns a [`Message`].
+    /// Takes a [`Event`] and returns a [`Message`].
     ///
     /// `last_event_send` is the timestamp of when you last sent messages. It's used as the
     /// creation date for the changes, as all our changes are diffed to that point in time.
@@ -580,6 +584,28 @@ impl Manager {
     /// This should be sent back to the pier which requested the sync.
     pub fn process_sync_reply(&mut self, response: sync::ResponseBuilder) -> Message {
         self.process(MessageKind::SyncReply(response.finish(&self.event_log)))
+    }
+    /// Returns [`None`] if we haven't registered any piers.
+    pub fn process_fast_forward(&mut self) -> Option<Message> {
+        let pier = self.choose_pier(|_, _| true)?;
+        self.fast_forward = fast_forward::State::WaitingForMeta { pier: pier.uuid() };
+        Some(
+            self.process(MessageKind::FastForward(fast_forward::Request::new(
+                pier.uuid(),
+            ))),
+        )
+    }
+    /// The `public_metadata` is the metadata of the public storage.
+    pub fn process_fast_forward_response(
+        &mut self,
+        public_metadata: fast_forward::Metadata,
+        pier: Uuid,
+    ) -> Message {
+        self.process(MessageKind::FastForwardReply(fast_forward::Response::new(
+            pier,
+            public_metadata,
+            self.event_log.list.last().map(|ev| ev.message_uuid),
+        )))
     }
 
     /// Handles an incoming [`MessageKind::Hello`].
@@ -798,8 +824,8 @@ impl Manager {
             unwinder,
         )
     }
-    /// If the returned [`sync::RequestBuilder`] is [`Some`], loop over each resource,
-    /// call [`sync::RequestBuilder::matches`] to check if the resource should be included.
+    /// If the returned [`sync::RequestBuilder`] is [`Some`], loop over each resource
+    /// in the [`Vec`] next to the `RequestBuilder`. Add all the [`den::Signature`]s for the resources.
     /// Run [`sync::RequestBuilder::finish`] once every [`den::Signature`] has been added.
     /// Then, execute [`Self::process_sync`] with the [`sync::RequestBuilder`].
     /// If it's [`None`], the data matches.
@@ -812,27 +838,17 @@ impl Manager {
         response: &hash_check::Response,
         sender: Uuid,
         our_hashes: &hash_check::Response,
-    ) -> (Option<sync::RequestBuilder>, Vec<String>) {
+    ) -> (Option<(sync::RequestBuilder, Vec<String>)>, Vec<String>) {
         fn btreemap_difference(
-            matches: &mut Vec<resource::Matches>,
+            matches: &mut Vec<String>,
             mut to_delete: Option<&mut Vec<String>>,
             source: &BTreeMap<String, hash_check::ResponseHash>,
             other: &BTreeMap<String, hash_check::ResponseHash>,
         ) {
-            fn has_exact(matches: &[resource::Matches], resource: &str) -> bool {
-                for item in matches {
-                    if let resource::Matches::Exact(item_exact) = item {
-                        if item_exact == resource {
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
             for (resource, hash) in source.iter() {
                 if let Some(other_hash) = other.get(resource) {
-                    if hash != other_hash && !has_exact(matches, resource) {
-                        matches.push(resource::Matches::Exact(resource.clone()));
+                    if hash != other_hash && !matches.contains(resource) {
+                        matches.push(resource.clone());
                     }
                     // else, we have the same hash. Good.
                 } else {
@@ -840,7 +856,7 @@ impl Manager {
                     if let Some(delete) = &mut to_delete {
                         delete.push(resource.clone());
                     } else {
-                        matches.push(resource::Matches::Exact(resource.clone()));
+                        matches.push(resource.clone());
                     }
                 }
             }
@@ -865,12 +881,15 @@ impl Manager {
         let request = if differing_data.is_empty() {
             None
         } else {
-            Some(sync::RequestBuilder::new(
-                sender,
-                resource::Matcher::new().set_include(resource::Matches::List(differing_data)),
-                // Get all events in the log, up to `self.event_log.limit()`
-                Duration::ZERO,
-                self.event_log.limit(),
+            Some((
+                sync::RequestBuilder::new(
+                    sender,
+                    // resource::Matcher::new().set_include(resource::Matches::List(differing_data)),
+                    // Get all events in the log, up to `self.event_log.limit()`
+                    Duration::ZERO,
+                    self.event_log.limit(),
+                ),
+                differing_data,
             ))
         };
         (request, delete)
@@ -887,9 +906,42 @@ impl Manager {
     /// Applies the event log of the sync reply.
     ///
     /// You **MUST** also call the methods on [`sync::Response`] to actually make changes to the
-    /// resources returned.
+    /// resources returned. This only handles the [`sync.:Response::take_event_log`].
     pub fn apply_sync_reply(&mut self, response: &mut sync::Response) {
         self.event_log.replace(response.take_event_log());
+        self.event_log.required_event_timestamp = Some(utils::dur_now());
+    }
+    /// Applies the fast forward reply by modifying the inner state.
+    ///
+    /// You need to call [`fast_forward::Metadata::changes`] on `reply`
+    /// and remove the removed files.
+    /// You also need to pass the new and modified files to [`sync::RequestBuilder::insert`].
+    ///
+    /// # Errors
+    ///
+    /// `sender` should match with the one provided by [`Manager::process_fast_forward`].
+    /// If the internal state doesn't expect this to happen, it will also throw an error.
+    pub fn apply_fast_forward_reply(
+        &mut self,
+        reply: &fast_forward::Response,
+        sender: Uuid,
+    ) -> Result<sync::RequestBuilder, fast_forward::Error> {
+        if let fast_forward::State::WaitingForMeta { pier } = self.fast_forward {
+            if pier != sender {
+                return Err(fast_forward::Error::UnexpectedPier);
+            }
+        } else {
+            return Err(fast_forward::Error::ExpectedNotRunning);
+        };
+        self.fast_forward = fast_forward::State::WaitingForDiffs {
+            pier: reply.pier,
+            latest_event: reply.current_event_uuid,
+        };
+        Ok(sync::RequestBuilder::new(
+            sender,
+            self.event_log.lifetime(),
+            self.event_log.limit(),
+        ))
     }
 }
 impl Manager {
@@ -1029,6 +1081,7 @@ impl SelectedPier {
         Self { uuid }
     }
     /// Get the UUID of the pier.
+    #[inline]
     pub fn uuid(&self) -> Uuid {
         self.uuid
     }

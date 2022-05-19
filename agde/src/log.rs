@@ -120,7 +120,7 @@ impl Log {
             required_event_timestamp: None,
         }
     }
-    /// Get a reference to the event log's lifetime.
+    /// Get the event log's lifetime.
     #[inline]
     pub(crate) fn lifetime(&self) -> Duration {
         self.lifetime

@@ -3,12 +3,12 @@
 //! This occurs when the hashes don't line up or when fast forwarding on a new connection.
 
 use std::cmp;
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{log, resource, Uuid};
+use crate::{log, Uuid};
 
 /// Request to sync selected resources.
 ///
@@ -21,8 +21,8 @@ use crate::{log, resource, Uuid};
 #[must_use]
 pub struct Request {
     pier: Uuid,
-    resources: resource::Matcher,
-    signature: HashMap<String, den::Signature>,
+    // resources: resource::Matcher,
+    signatures: HashMap<String, den::Signature>,
     log_settings: (Duration, u32),
 }
 impl Request {
@@ -33,7 +33,7 @@ impl Request {
 impl PartialEq for Request {
     fn eq(&self, other: &Self) -> bool {
         self.pier == other.pier
-            && self.signature == other.signature
+            && self.signatures == other.signatures
             && self.log_settings == other.log_settings
     }
 }
@@ -45,50 +45,52 @@ impl Eq for Request {}
 #[must_use]
 pub struct RequestBuilder {
     pier: Uuid,
-    resources: resource::Matcher,
+    // resources: resource::Matcher,
     signature: HashMap<String, den::Signature>,
     log_settings: (Duration, u32),
 }
 impl RequestBuilder {
     pub(crate) fn new(
         pier: Uuid,
-        resources: resource::Matcher,
-        log_cutoff: Duration,
+        // resources: resource::Matcher,
+        log_lifetime: Duration,
         log_limit: u32,
     ) -> Self {
         Self {
             pier,
-            resources,
+            // resources,
             signature: HashMap::new(),
-            log_settings: (log_cutoff, log_limit),
+            log_settings: (log_lifetime, log_limit),
         }
     }
     /// Insert the `resource`'s `signature` to this response.
     ///
     /// The [`den::Signature`] allows the pier to get the diff for us.
     pub fn insert(&mut self, resource: String, signature: den::Signature) -> &mut Self {
+        // if !self.resources.matches(&resource) {
+        // self.resources.include(resource::Matches::Exact(resource.clone()));
+        // }
         self.signature.insert(resource, signature);
         self
     }
-    /// Make a [`Request`] from this builder and a signature of all the resources matched using
-    /// [`Self::matches`].
+    /// Make a [`Request`] from this builder and a signature of all the resources inserted.
     ///
     /// Call [`crate::Manager::process_sync_reply`] to get a [`crate::Message`].
     #[inline]
     pub fn finish(self) -> Request {
         Request {
             pier: self.pier,
-            resources: self.resources,
-            signature: self.signature,
+            // resources: self.resources,
+            signatures: self.signature,
             log_settings: self.log_settings,
         }
     }
-    /// Test if this `resource` should be part of the `signature` in [`Self::finish`].
-    #[must_use]
-    #[inline]
-    pub fn matches(&self, resource: &str) -> bool {
-        self.resources.matches(resource)
-    }
+    // /// Test if this `resource` should be part of the `signature` in [`Self::finish`].
+    // #[must_use]
+    // #[inline]
+    // pub fn matches(&self, resource: &str) -> bool {
+    // self.resources.matches(resource)
+    // }
 }
 
 /// The diffs to make the pier's data the same as ours.
@@ -98,7 +100,7 @@ pub struct Response {
     pier: Uuid,
     log: Vec<log::ReceivedEvent>,
     diff: Vec<(String, den::Difference)>,
-    create: Vec<(String, Vec<u8>)>,
+    // create: Vec<(String, Vec<u8>)>,
     delete: Vec<String>,
 }
 impl Response {
@@ -115,12 +117,12 @@ impl Response {
     pub fn diff(&self) -> &[(impl AsRef<str>, den::Difference)] {
         &self.diff
     }
-    /// Returns a list with `(resource, data)`,
-    /// where you should set the contents of `resource` to `data`.
-    #[must_use]
-    pub fn create(&self) -> &[(impl AsRef<str>, impl AsRef<[u8]>)] {
-        &self.create
-    }
+    // /// Returns a list with `(resource, data)`,
+    // /// where you should set the contents of `resource` to `data`.
+    // #[must_use]
+    // pub fn create(&self) -> &[(impl AsRef<str>, impl AsRef<[u8]>)] {
+    // &self.create
+    // }
     /// Returns a list with `resource`,
     /// where you should delete `resource`.
     #[must_use]
@@ -130,60 +132,68 @@ impl Response {
 }
 /// Builder for a [`Response`].
 ///
-/// Loop over each resource and call [`Self::matches`].
+/// Follow the instructions from how you got this builder and (insert)[Self::diff] the appropriate
+/// resources.
 /// Execute the action returned by the aforementioned function.
 #[derive(Debug)]
 pub struct ResponseBuilder<'a> {
     request: &'a Request,
+    signature_iter: hash_map::Iter<'a, String, den::Signature>,
     pier: Uuid,
     /// Binary sorted by String
     diff: Vec<(String, den::Difference)>,
-    /// Binary sorted by String
-    create: Vec<(String, Vec<u8>)>,
+    // /// Binary sorted by String
+    // create: Vec<(String, Vec<u8>)>,
 }
 impl<'a> ResponseBuilder<'a> {
     pub(crate) fn new(request: &'a Request, pier: Uuid) -> Self {
         Self {
             request,
+            signature_iter: request.signatures.iter(),
             pier,
             diff: Vec::new(),
-            create: Vec::new(),
+            // create: Vec::new(),
         }
     }
-    /// Get the action for `resource`.
-    ///
-    /// See the variants of [`ResponseBuilderAction`] for how to proceed.
-    pub fn matches(&self, resource: &str) -> ResponseBuilderAction {
-        if self.request.resources.matches(resource) {
-            match self.request.signature.get(resource) {
-                Some(_) => ResponseBuilderAction::Difference,
-                None => ResponseBuilderAction::Create,
-            }
-        } else {
-            ResponseBuilderAction::Ignore
-        }
+    // /// Get the action for `resource`.
+    // ///
+    // /// See the variants of [`ResponseBuilderAction`] for how to proceed.
+    // pub fn matches(&self, resource: &str) -> ResponseBuilderAction {
+    // if self.request.resources.matches(resource) {
+    // match self.request.signatures.get(resource) {
+    // Some(_) => ResponseBuilderAction::Difference,
+    // None => ResponseBuilderAction::Create,
+    // }
+    // } else {
+    // ResponseBuilderAction::Ignore
+    // }
+    // }
+    /// Use this in a `while let Some((resource, signature)) = response_builder.next_signature()`
+    /// loop to add all the returned values to [`Self::diff`].
+    pub fn next_signature(&mut self) -> Option<(&str, &den::Signature)> {
+        self.signature_iter.next().map(|(k, v)| (&**k, v))
     }
     /// Tell the requester their `resource` needs to apply `diff` to get our data.
     pub fn diff(&mut self, resource: String, diff: den::Difference) -> &mut Self {
         self.diff.push((resource, diff));
         self
     }
-    /// Tell the requester they don't have `resource`, with it's `content`.
-    pub fn create(&mut self, resource: String, content: Vec<u8>) -> &mut Self {
-        self.create.push((resource, content));
-        self
-    }
+    // /// Tell the requester they don't have `resource`, with it's `content`.
+    // pub fn create(&mut self, resource: String, content: Vec<u8>) -> &mut Self {
+    // self.create.push((resource, content));
+    // self
+    // }
     pub(crate) fn finish(self, log: &log::Log) -> Response {
         let mut delete = Vec::new();
-        for resource in self.request.signature.keys() {
-            if !(self
+        for resource in self.request.signatures.keys() {
+            if self
                 .diff
                 .binary_search_by(|item| item.0.cmp(resource))
-                .is_ok()
-                || self
-                    .create
-                    .binary_search_by(|item| item.0.cmp(resource))
-                    .is_ok())
+                .is_err()
+            // && self
+            // .create
+            // .binary_search_by(|item| item.0.cmp(resource))
+            // .is_err()
             {
                 delete.push(resource.clone());
             }
@@ -198,19 +208,19 @@ impl<'a> ResponseBuilder<'a> {
             pier: self.pier,
             log,
             diff: self.diff,
-            create: self.create,
+            // create: self.create,
             delete,
         }
     }
 }
-/// An action to take for a local resource, dictated by the [`Request`].
-#[derive(Debug, Clone, Copy)]
-#[must_use]
-pub enum ResponseBuilderAction {
-    /// Ignore this resource
-    Ignore,
-    /// Call [`ResponseBuilder::diff`]
-    Difference,
-    /// Call [`ResponseBuilder::create`]
-    Create,
-}
+// /// An action to take for a local resource, dictated by the [`Request`].
+// #[derive(Debug, Clone, Copy)]
+// #[must_use]
+// pub enum ResponseBuilderAction {
+// /// Ignore this resource
+// Ignore,
+// /// Call [`ResponseBuilder::diff`]
+// Difference,
+// /// Call [`ResponseBuilder::create`]
+// Create,
+// }

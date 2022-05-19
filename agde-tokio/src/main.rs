@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{io, process};
 
-use agde::fast_forward::{Metadata, ResourceMeta};
+use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
 use agde::Manager;
 use futures::{Future, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
@@ -102,21 +102,6 @@ async fn metadata_sync(metadata: &Metadata, name: &str) -> Result<(), io::Error>
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum Change {
-    /// True if the resource was just created.
-    Modify(String, bool),
-    Delete(String),
-}
-impl Change {
-    pub fn resource(&self) -> &str {
-        match self {
-            Self::Modify(r, _) => r,
-            Self::Delete(r) => r,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Storage {
     /// The copy of data which is maintained to be equal to the others' public storages.
@@ -135,7 +120,7 @@ pub type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type ReadFuture = BoxFut<Result<Option<Vec<u8>>, ()>>;
 pub type WriteFuture = BoxFut<Result<(), ()>>;
 pub type DeleteFuture = WriteFuture;
-pub type DiffFuture = BoxFut<Result<Vec<Change>, ()>>;
+pub type DiffFuture = BoxFut<Result<Vec<MetadataChange>, ()>>;
 pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
 /// The [`SystemTime`] is the time of modification.
 /// When [`Storage::Current`], this should be the time of last change.
@@ -307,37 +292,16 @@ impl Options {
                 let offline_metadata = Arc::clone(&offline_metadata);
                 Box::pin(async move {
                     debug!("Getting diff");
-                    let mut changed = Vec::new();
                     let mut offline_metadata = offline_metadata.lock().await;
                     let current_metadata = metadata_new(Storage::Current).await.map_err(|_| ())?;
-                    for (resource, meta) in offline_metadata.iter() {
-                        match current_metadata.get(resource) {
-                            Some(current_data) => {
-                                if meta.mtime_in_current().map_or(true, |mtime| {
-                                    mtime
-                                        != current_data
-                                            .mtime_in_current()
-                                            .expect("we just created this from local metadata")
-                                }) || current_data.size() != meta.size()
-                                {
-                                    changed.push(Change::Modify(resource.to_owned(), false));
-                                }
-                            }
-                            None => changed.push(Change::Delete(resource.to_owned())),
-                        }
-                    }
-                    for resource in current_metadata.iter().map(|(k, _v)| k) {
-                        if !offline_metadata.contains(resource) {
-                            changed.push(Change::Modify(resource.to_owned(), true))
-                        }
-                    }
+                    let changed = offline_metadata.changes(&current_metadata);
                     let mut metadata = metadata.lock().await;
                     for change in &changed {
                         match change {
-                            Change::Modify(res, _) => {
+                            MetadataChange::Modify(res, _) => {
                                 metadata.insert(res.clone(), current_metadata.get(res).unwrap());
                             }
-                            Change::Delete(res) => {
+                            MetadataChange::Delete(res) => {
                                 metadata.remove(res);
                             }
                         }
@@ -420,7 +384,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
             for change in changes {
                 let resource = match change {
-                    Change::Modify(resource, _) | Change::Delete(resource) => resource,
+                    MetadataChange::Modify(resource, _) | MetadataChange::Delete(resource) => {
+                        resource
+                    }
                 };
                 let actual = (options.read)(resource.to_owned(), Storage::Public)
                     .await
@@ -598,8 +564,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         );
                         if modern.is_some() {
                             match diff {
-                                Change::Delete(_) => {}
-                                Change::Modify(resource, created) => {
+                                MetadataChange::Delete(_) => {}
+                                MetadataChange::Modify(resource, created) => {
                                     let mut current =
                                         (options.read)(resource.clone(), Storage::Current)
                                             .await
@@ -816,8 +782,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     }
                                 };
                             }
-                            agde::MessageKind::FastForward => todo!(),
-                            agde::MessageKind::FastForwardReply => todo!(),
+                            agde::MessageKind::FastForward(_) => todo!(),
+                            agde::MessageKind::FastForwardReply(_) => todo!(),
                             agde::MessageKind::Sync(_) => todo!(),
                             agde::MessageKind::SyncReply(_) => todo!(),
                             agde::MessageKind::HashCheck(_) => todo!(),
@@ -869,11 +835,11 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         if modern.is_some() {
                             let event = match diff {
                                 // `TODO`: Give successor
-                                Change::Delete(res) => agde::Event::new(
+                                MetadataChange::Delete(res) => agde::Event::new(
                                     agde::event::Kind::Delete(agde::event::Delete::new(res, None)),
                                     &*manager,
                                 ),
-                                Change::Modify(resource, created) => {
+                                MetadataChange::Modify(resource, created) => {
                                     let create_ev = if created {
                                         let event = agde::Event::new(
                                             agde::event::Kind::Create(agde::event::Create::new(
