@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{io, process};
 
+use agde::fast_forward::{Metadata, ResourceMeta};
 use agde::Manager;
 use futures::{Future, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite;
@@ -44,83 +44,64 @@ impl Display for ApplicationError {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Metadata {
-    /// Associate resource to metadata
-    map: HashMap<String, ResourceMeta>,
-}
-impl Metadata {
-    async fn new(storage: Storage) -> Result<Self, io::Error> {
-        let map: Result<HashMap<String, ResourceMeta>, io::Error> =
-            tokio::task::spawn_blocking(move || {
-                let mut map = HashMap::new();
+async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
+    let map: Result<HashMap<String, ResourceMeta>, io::Error> =
+        tokio::task::spawn_blocking(move || {
+            let mut map = HashMap::new();
 
-                let path = match storage {
-                    Storage::Public | Storage::Meta => ".agde/",
-                    Storage::Current => "./",
-                };
+            let path = match storage {
+                Storage::Public | Storage::Meta => ".agde/",
+                Storage::Current => "./",
+            };
 
-                for entry in walkdir::WalkDir::new(path)
-                    .follow_links(false)
-                    .into_iter()
-                    .filter_entry(|e| {
-                        !(e.path().starts_with(".agde")
-                            || e.path().starts_with("./.agde")
-                            || e.path().starts_with("./node_modules"))
-                    })
-                    .filter_map(|e| e.ok())
-                {
-                    if let Some(path) = entry.path().to_str() {
-                        let metadata = entry.metadata()?;
-                        if !metadata.is_file() {
-                            continue;
-                        }
-                        let modified = metadata.modified()?;
-
-                        map.insert(
-                            path.to_owned(),
-                            ResourceMeta {
-                                size: metadata.len(),
-                                current_mtime: Some(modified),
-                            },
-                        );
-                    } else {
-                        error!(
-                            "Directory contains non-UTF8 filename. Skipping {:?}",
-                            entry.path().to_string_lossy()
-                        );
+            for entry in walkdir::WalkDir::new(path)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    !(e.path().starts_with(".agde")
+                        || e.path().starts_with("./.agde")
+                        || e.path().starts_with("./node_modules"))
+                })
+                .filter_map(|e| e.ok())
+            {
+                if let Some(path) = entry.path().to_str() {
+                    let metadata = entry.metadata()?;
+                    if !metadata.is_file() {
+                        continue;
                     }
+                    let modified = metadata.modified()?;
+
+                    map.insert(
+                        path.to_owned(),
+                        ResourceMeta::new(Some(modified), metadata.len()),
+                    );
+                } else {
+                    error!(
+                        "Directory contains non-UTF8 filename. Skipping {:?}",
+                        entry.path().to_string_lossy()
+                    );
                 }
+            }
 
-                Ok(map)
-            })
-            .await
-            .expect("walkdir thread panicked");
+            Ok(map)
+        })
+        .await
+        .expect("walkdir thread panicked");
 
-        let map = map?;
+    let map = map?;
 
-        Ok(Self { map })
-    }
-    async fn sync(&self, name: &str) -> Result<(), io::Error> {
-        let data = bincode::serde::encode_to_vec(
-            self,
-            bincode::config::standard().write_fixed_array_length(),
-        )
-        .expect("serialization of metadata should be infallible");
-        tokio::fs::write(format!(".agde/{name}"), data).await?;
-        Ok(())
-    }
+    Ok(Metadata::new(map))
 }
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub struct ResourceMeta {
-    /// mtime of the [`Storage::Current`].
-    ///
-    /// Is [`None`] if this resource has not yet been written to the current storage.
-    /// In that case, there's always a change. This can occur when data has been written to the
-    /// public storage, and the current storage hasn't gotten that data yet.
-    pub current_mtime: Option<SystemTime>,
-    pub size: u64,
+async fn metadata_sync(metadata: &Metadata, name: &str) -> Result<(), io::Error> {
+    let data = bincode::serde::encode_to_vec(
+        metadata,
+        bincode::config::standard().write_fixed_array_length(),
+    )
+    .expect("serialization of metadata should be infallible");
+    tokio::fs::write(format!(".agde/{name}"), data).await?;
+    Ok(())
 }
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Change {
     /// True if the resource was just created.
@@ -180,7 +161,7 @@ pub struct Options {
 impl Options {
     pub async fn fs(force_pull: bool) -> Result<Self, io::Error> {
         let metadata =
-            initial_metadata("metadata", || Metadata::new(Storage::Public), force_pull).await?;
+            initial_metadata("metadata", || metadata_new(Storage::Public), force_pull).await?;
         // A metadata cache that is held constant between diff calls.
         let offline_metadata = initial_metadata(
             "metadata-offline",
@@ -253,11 +234,8 @@ impl Options {
                                     Some(mtime)
                                 }
                             };
-                            let meta = ResourceMeta {
-                                current_mtime: mtime,
-                                size: data.len() as u64,
-                            };
-                            metadata.map.insert(resource, meta);
+                            let meta = ResourceMeta::new(mtime, data.len() as u64);
+                            metadata.insert(resource, meta);
                         }
                         Storage::Current => {
                             let file_metadata = tokio::fs::metadata(&path).await.map_err(|_| ())?;
@@ -265,25 +243,21 @@ impl Options {
                             {
                                 let mut metadata = offline_metadata.lock().await;
 
-                                metadata.map.insert(
+                                metadata.insert(
                                     resource.clone(),
-                                    ResourceMeta {
-                                        current_mtime: Some(mtime),
-                                        size: data.len() as u64,
-                                    },
+                                    ResourceMeta::new(Some(mtime), data.len() as u64),
                                 );
                             }
                             {
                                 let mut metadata = metadata.lock().await;
 
-                                metadata.map.insert(
+                                metadata.insert(
                                     resource,
-                                    ResourceMeta {
-                                        current_mtime: Some(mtime),
-                                        size: data.len() as u64,
-                                    },
+                                    ResourceMeta::new(Some(mtime), data.len() as u64),
                                 );
-                                metadata.sync("metadata").await.map_err(|_| ())?;
+                                metadata_sync(&*metadata, "metadata")
+                                    .await
+                                    .map_err(|_| ())?;
                             }
                         }
                     }
@@ -302,13 +276,15 @@ impl Options {
                     if storage == Storage::Current {
                         let mut metadata = offline_metadata.lock().await;
                         debug!("Removing {resource} from metdata cache.");
-                        metadata.map.remove(&resource);
+                        metadata.remove(&resource);
                     }
                     {
                         let mut metadata = metadata.lock().await;
                         debug!("Removing {resource} from metdata cache.");
-                        metadata.map.remove(&resource);
-                        metadata.sync("metadata").await.map_err(|_| ())?;
+                        metadata.remove(&resource);
+                        metadata_sync(&*metadata, "metadata")
+                            .await
+                            .map_err(|_| ())?;
                     }
                     let file_metadata = match tokio::fs::metadata(&path).await {
                         Ok(d) => d,
@@ -333,38 +309,36 @@ impl Options {
                     debug!("Getting diff");
                     let mut changed = Vec::new();
                     let mut offline_metadata = offline_metadata.lock().await;
-                    let current_metadata = Metadata::new(Storage::Current).await.map_err(|_| ())?;
-                    for (resource, meta) in &offline_metadata.map {
-                        match current_metadata.map.get(resource) {
+                    let current_metadata = metadata_new(Storage::Current).await.map_err(|_| ())?;
+                    for (resource, meta) in offline_metadata.iter() {
+                        match current_metadata.get(resource) {
                             Some(current_data) => {
-                                if meta.current_mtime.map_or(true, |mtime| {
+                                if meta.mtime_in_current().map_or(true, |mtime| {
                                     mtime
                                         != current_data
-                                            .current_mtime
+                                            .mtime_in_current()
                                             .expect("we just created this from local metadata")
-                                }) || current_data.size != meta.size
+                                }) || current_data.size() != meta.size()
                                 {
-                                    changed.push(Change::Modify(resource.clone(), false));
+                                    changed.push(Change::Modify(resource.to_owned(), false));
                                 }
                             }
-                            None => changed.push(Change::Delete(resource.clone())),
+                            None => changed.push(Change::Delete(resource.to_owned())),
                         }
                     }
-                    for resource in current_metadata.map.keys() {
-                        if !offline_metadata.map.contains_key(resource) {
-                            changed.push(Change::Modify(resource.clone(), true))
+                    for resource in current_metadata.iter().map(|(k, _v)| k) {
+                        if !offline_metadata.contains(resource) {
+                            changed.push(Change::Modify(resource.to_owned(), true))
                         }
                     }
                     let mut metadata = metadata.lock().await;
                     for change in &changed {
                         match change {
                             Change::Modify(res, _) => {
-                                metadata
-                                    .map
-                                    .insert(res.clone(), *current_metadata.map.get(res).unwrap());
+                                metadata.insert(res.clone(), current_metadata.get(res).unwrap());
                             }
                             Change::Delete(res) => {
-                                metadata.map.remove(res);
+                                metadata.remove(res);
                             }
                         }
                     }
@@ -372,8 +346,8 @@ impl Options {
                         // `TODO`: Optimize this
                         *offline_metadata = metadata.clone();
                         futures::future::try_join(
-                            Box::pin(metadata.sync("metadata")),
-                            Box::pin(offline_metadata.sync("metadata-offline")),
+                            Box::pin(metadata_sync(&metadata, "metadata")),
+                            Box::pin(metadata_sync(&offline_metadata, "metadata-offline")),
                         )
                         .await
                         .map_err(|_| ())?;
@@ -1200,18 +1174,18 @@ async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
         Ok((metadata, _)) => {
             let mut metadata: Metadata = metadata;
             let mut differing = Vec::new();
-            for (resource, metadata) in &metadata.map {
+            for (resource, metadata) in metadata.iter() {
                 let meta = tokio::fs::metadata(format!(".agde/files/{resource}")).await;
                 match meta {
                     Ok(meta) => {
-                        if meta.len() != metadata.size {
-                            differing.push(resource.clone());
+                        if meta.len() != metadata.size() {
+                            differing.push(resource.to_owned());
                             error!("File {resource} has different length in cached metadata and on disk.");
                         }
                     }
                     Err(err) => match err.kind() {
                         io::ErrorKind::NotFound => {
-                            differing.push(resource.clone());
+                            differing.push(resource.to_owned());
                             error!("File {resource} is not found on disk.");
                         }
                         _ => return Err(err),
@@ -1220,7 +1194,7 @@ async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
             }
 
             for resource in differing {
-                metadata.map.remove(&resource);
+                metadata.remove(&resource);
             }
 
             Ok(metadata)
@@ -1245,7 +1219,7 @@ async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
 
             if !populated || force_pull {
                 let metadata = new().await?;
-                if let Err(err) = metadata.sync(name).await {
+                if let Err(err) = metadata_sync(&metadata, name).await {
                     error!("Failed to write newly created metadata: {err:?}");
                 }
                 Ok(metadata)

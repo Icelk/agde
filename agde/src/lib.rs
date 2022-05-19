@@ -28,6 +28,7 @@
 )]
 
 pub mod event;
+pub mod fast_forward;
 pub mod hash_check;
 pub mod log;
 pub mod resource;
