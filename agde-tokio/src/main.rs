@@ -352,6 +352,41 @@ impl Options {
     pub fn metadata_offline(&self) -> &Mutex<Metadata> {
         &self.offline_metadata
     }
+    pub async fn read(
+        &self,
+        resource: impl Into<String>,
+        storage: Storage,
+    ) -> Result<Option<Vec<u8>>, ApplicationError> {
+        (self.read)(resource.into(), storage)
+            .await
+            .map_err(|_| ApplicationError::StoragePermissions)
+    }
+    pub async fn write(
+        &self,
+        resource: impl Into<String>,
+        storage: Storage,
+        data: impl Into<Vec<u8>>,
+        write_mtime: WriteMtime,
+    ) -> Result<(), ApplicationError> {
+        (self.write)(resource.into(), storage, data.into(), write_mtime)
+            .await
+            .map_err(|_| ApplicationError::StoragePermissions)
+    }
+    pub async fn delete(
+        &self,
+        resource: impl Into<String>,
+        storage: Storage,
+    ) -> Result<(), ApplicationError> {
+        (self.delete)(resource.into(), storage)
+            .await
+            .map_err(|_| ApplicationError::StoragePermissions)
+    }
+    /// The rough diff calculated by the difference between the metadata collections.
+    pub async fn diff(&self) -> Result<Vec<MetadataChange>, ApplicationError> {
+        (self.rough_resource_diff)()
+            .await
+            .map_err(|_| ApplicationError::StoragePermissions)
+    }
 }
 
 #[tokio::main]
@@ -1230,4 +1265,13 @@ async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
             }
         }
     }
+}
+
+async fn send(stream: &Mutex<WriteHalf>, message: agde::Message) -> Result<(), ApplicationError> {
+    stream
+        .lock()
+        .await
+        .send(message.to_bin().into())
+        .await
+        .map_err(|_| ApplicationError::UnexpectedServerClose)
 }
