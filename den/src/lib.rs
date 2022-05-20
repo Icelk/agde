@@ -1865,6 +1865,19 @@ impl<S: ExtendVec> Difference<S> {
         target.truncate(self.original_data_len);
         Ok(())
     }
+
+    /// Returns true if this diff is a no-op.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        if self.segments().len() != 1 {
+            return false;
+        };
+        if let Segment::Ref(seg) = self.segments()[0] {
+            seg.start() == 0 && seg.end(self.block_size) >= self.original_data_len()
+        } else {
+            false
+        }
+    }
 }
 
 /// An error during [`Difference::minify`].
