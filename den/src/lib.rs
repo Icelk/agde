@@ -796,9 +796,13 @@ impl Signature {
         // Special case: Signature contains no hashes.
         // Just send the whole input.
         if self.blocks().is_empty() {
-            let segment = Segment::unknown(data);
+            let segments = if data.is_empty() {
+                vec![]
+            } else {
+                vec![Segment::unknown(data)]
+            };
             return Difference {
-                segments: vec![segment],
+                segments,
                 block_size,
                 original_data_len: data.len(),
             };

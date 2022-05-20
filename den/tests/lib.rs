@@ -87,6 +87,8 @@ fn empty() {
     signature.write(local_data.as_bytes());
     let signature = signature.finish();
 
+    println!("Signature: {signature:?}");
+
     let diff = signature.diff(remote_data.as_bytes());
     assert_eq!(diff.segments(), []);
 }
