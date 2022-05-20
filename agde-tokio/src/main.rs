@@ -709,7 +709,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                     }
                     tungstenite::Message::Binary(data) => {
                         let message = agde::Message::from_bin(&data);
-                        let message = if let Ok(m) = message {
+                        let mut message = if let Ok(m) = message {
                             m
                         } else {
                             warn!(
@@ -720,7 +720,17 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         };
 
                         let mut manager = manager.lock().await;
-                        match message.inner() {
+                        match message.recipient() {
+                            agde::Recipient::All => {}
+                            agde::Recipient::Selected(recipient) => {
+                                if recipient.uuid() != manager.uuid() {
+                                    continue;
+                                }
+                            }
+                        }
+                        let sender = message.sender();
+                        let message_uuid = message.uuid();
+                        match message.inner_mut() {
                             agde::MessageKind::Hello(hello) => {
                                 info!("Pier {} joined the network.", hello.uuid());
                                 let msg = manager.apply_hello(hello);
@@ -740,14 +750,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             agde::MessageKind::Event(event) => {
                                 info!(
                                     "Got event from pier {}: {:?} {event:?}",
-                                    message.sender(),
+                                    sender,
                                     SystemTime::now()
                                 );
                                 {
                                     changed.lock().await.insert(event.resource().to_owned());
                                 }
 
-                                match manager.apply_event(event, message.uuid()) {
+                                match manager.apply_event(event, message_uuid) {
                                     Ok(mut applier) => {
                                         let resource = applier.resource();
 
@@ -831,17 +841,124 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 };
                             }
                             // `TODO`: handle cancelled fast forwards
-                            agde::MessageKind::FastForward(ff) => {
-                                // `TODO`: get metadata from options (field which is both used by
-                                // the fs functions and to get this?)
-                                let msg = manager.process_fast_forward_response(, message.sender());
-                            },
+                            agde::MessageKind::FastForward(_ff) => {
+                                let meta = options.metadata().lock().await;
+                                let msg = manager
+                                    .process_fast_forward_response(meta.clone(), message.sender());
+                                send(&write, msg).await?;
+                            }
                             agde::MessageKind::FastForwardReply(ff) => {
-                                // `TODO`: handle error when pier doesn't match!
-                                let sync_request = manager.apply_fast_forward_reply(ff, message.sender()).unwrap();
-                            },
-                            agde::MessageKind::Sync(_) => todo!(),
-                            agde::MessageKind::SyncReply(_) => todo!(),
+                                let mut sync_request =
+                                    match manager.apply_fast_forward_reply(ff, sender) {
+                                        Ok(v) => v,
+                                        Err(agde::fast_forward::Error::UnexpectedPier) => continue,
+                                        e => e.unwrap(),
+                                    };
+                                let mut changed = changed.lock().await;
+                                let changes =
+                                    { options.metadata().lock().await.changes(ff.metadata()) };
+                                for change in changes {
+                                    changed.insert(change.resource().to_owned());
+                                    match change {
+                                        MetadataChange::Modify(res, _created) => {
+                                            let data = options
+                                                .read(&res, Storage::Public)
+                                                .await?
+                                                .unwrap_or_default();
+                                            let mut sig = agde::den::Signature::with_algorithm(
+                                                agde::den::HashAlgorithm::XXH3_64,
+                                                128,
+                                            );
+                                            sig.write(&data);
+                                            let sig = sig.finish();
+                                            sync_request.insert(res, sig);
+                                        }
+                                        MetadataChange::Delete(res) => {
+                                            options.delete(res, Storage::Public).await?;
+                                        }
+                                    }
+                                }
+                                drop(changed);
+
+                                let sync_request = sync_request.finish();
+                                let msg = manager.process_sync(sync_request);
+                                send(&write, msg).await?;
+                            }
+                            agde::MessageKind::Sync(sync) => {
+                                let mut builder = manager.apply_sync(sync, sender);
+                                while let Some((resource, signature)) = builder.next_signature() {
+                                    let data = options.read(resource, Storage::Public).await?;
+                                    let data = if let Some(d) = data {
+                                        d
+                                    } else {
+                                        continue;
+                                    };
+                                    let diff = signature.diff(&data);
+                                    // so we don't call builder ↓, as that would be multiple
+                                    // mutable borrows.
+                                    let resource = resource.to_owned();
+                                    builder.add_diff(resource, diff);
+                                }
+                                let msg = manager.process_sync_reply(builder);
+                                send(&write, msg).await?;
+                            }
+                            agde::MessageKind::SyncReply(sync) => {
+                                let mut changed = changed.lock().await;
+
+                                let mut rewinder = manager.apply_sync_reply(sync).unwrap();
+
+                                for resource in sync.delete() {
+                                    let resource = resource.as_ref();
+                                    {
+                                        changed.insert(resource.to_owned());
+                                    }
+                                    options.delete(resource, Storage::Public).await?;
+                                }
+                                for (resource, diff) in sync.diff() {
+                                    let resource = resource.as_ref();
+                                    {
+                                        changed.insert(resource.to_owned());
+                                    }
+                                    let public = async {
+                                        let mut data = options
+                                            .read(resource, Storage::Public)
+                                            .await?
+                                            .unwrap_or_default();
+
+                                        if diff.apply_overlaps(data.len()) {
+                                            let mut other = Vec::with_capacity(data.len() + 64);
+                                            diff.apply(&data, &mut other).unwrap();
+                                            data = other;
+                                        } else {
+                                            diff.apply_in_place(&mut data).unwrap();
+                                        }
+                                        data = rewinder.rewind(resource, data).unwrap();
+                                        options
+                                            .write(resource, Storage::Public, data, WriteMtime::No)
+                                            .await?;
+                                        Ok(())
+                                    };
+                                    let current = async {
+                                        let mut data = options
+                                            .read(resource, Storage::Current)
+                                            .await?
+                                            .unwrap_or_default();
+
+                                        if diff.apply_overlaps_adaptive_end(data.len()) {
+                                            let mut other = Vec::with_capacity(data.len() + 64);
+                                            diff.apply_adaptive_end(&data, &mut other).unwrap();
+                                            data = other;
+                                        } else {
+                                            diff.apply_in_place_adaptive_end(&mut data).unwrap();
+                                        }
+                                        options
+                                            .write(resource, Storage::Current, data, WriteMtime::No)
+                                            .await?;
+                                        Ok(())
+                                    };
+                                    futures::future::try_join(public, current).await?;
+                                }
+                            }
                             agde::MessageKind::HashCheck(_) => todo!(),
                             agde::MessageKind::HashCheckReply(_) => todo!(),
                             agde::MessageKind::EventUuidLogCheck { uuid: _, check: _ } => todo!(),
@@ -875,236 +992,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
         let write = Arc::clone(&write);
         let changed = Arc::clone(&changed);
         tokio::spawn(async move {
-            let mut last_check = SystemTime::now();
             loop {
-                let diff = (options.rough_resource_diff)()
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
-
-                info!("Got diffs {diff:?}");
-
-                let mut messages = Vec::with_capacity(diff.len());
-
-                {
-                    let mut manager = manager.lock().await;
-
-                    for diff in diff {
-                        let modern = manager.modern_resource_name(diff.resource(), last_check);
-                        // It's just not worth sending updates when the resource has been deleted.
-                        if modern.is_some() {
-                            let event = match diff {
-                                // `TODO`: Give successor
-                                MetadataChange::Delete(res) => agde::Event::new(
-                                    agde::event::Kind::Delete(agde::event::Delete::new(res, None)),
-                                    &*manager,
-                                ),
-                                MetadataChange::Modify(resource, created) => {
-                                    let create_ev = if created {
-                                        let event = agde::Event::new(
-                                            agde::event::Kind::Create(agde::event::Create::new(
-                                                resource.clone(),
-                                            )),
-                                            &*manager,
-                                        )
-                                        // schedule create event a bit before modify.
-                                        .with_timestamp(
-                                            SystemTime::now() - Duration::from_micros(10),
-                                        );
-                                        Some(event)
-                                    } else {
-                                        None
-                                    };
-
-                                    let mut current = (options.read)(resource.clone(), Storage::Current)
-                                        .await
-                                        .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
-
-                                    let public = (options.read)(resource.clone(), Storage::Public)
-                                        .await
-                                        .map_err(|_| ApplicationError::StoragePermissions)?
-                                        .unwrap_or_default();
-
-                                    info!(
-                                        "Read {:?} from public",
-                                        String::from_utf8_lossy(&public)
-                                    );
-                                    info!(
-                                        "Last check: {last_check:?}, now {:?}",
-                                        SystemTime::now()
-                                    );
-
-                                    current = if let Some(current) = rewind_current(
-                                        &mut *manager,
-                                        created,
-                                        &resource,
-                                        &public,
-                                        &current,
-                                    )
-                                    .await
-                                    {
-                                        current
-                                    } else {
-                                        // since we keep track of the incoming events and
-                                        // which resources have been changed, this will get
-                                        // copied below.
-                                        println!("Resource destroyed");
-                                        continue;
-                                    };
-
-                                    warn!(
-                                        "Unwould public data, now resource at: '''\n{:?}\n'''",
-                                        std::str::from_utf8(&public)
-                                    );
-
-                                    let event =
-                                        agde::event::Modify::new(resource, &current, &public);
-                                    let event = agde::Event::new(
-                                        agde::event::Kind::Modify(event),
-                                        &*manager,
-                                    );
-
-                                    println!("Diff: {:#?}", event.diff().unwrap());
-
-                                    if let Some(ev) = create_ev {
-                                        messages.push(manager.process_event(ev));
-                                    }
-                                    event
-                                }
-                            };
-
-                            messages.push(manager.process_event(event))
-                        } else {
-                            // edited resource has been removed.
-                        }
-                    }
-
-                    manager.update_last_commit();
-                }
-
-                // Execute `apply` and `send` at the same time!
-                let apply = async {
-                    let mut manager = manager.lock().await;
-
-                    for message in &messages {
-                        let event = if let agde::MessageKind::Event(ev) = message.inner() {
-                            ev
-                        } else {
-                            unreachable!("we only added messages through `process_event`, which always gives events.");
-                        };
-
-                        debug!("Processing sent message: {event:?}");
-
-                        let mut applier = manager
-                            .apply_event(event, message.uuid())
-                            .expect("manager failed to accept our own event");
-
-                        let resource = applier
-                            .resource()
-                            .expect("our own messages are too old")
-                            .to_owned();
-
-                        match applier.event().inner() {
-                            agde::EventKind::Modify(_ev) => {
-                                let mut resource_data =
-                                    (options.read)(resource.clone(), Storage::Public)
-                                        .await
-                                        .map_err(|()| ApplicationError::StoragePermissions)?
-                                        // don't expect, just make a new file.
-                                        .expect(
-                                            "we trust our own data - there must \
-                                            have been a create event before modify",
-                                        );
-
-                                resource_data = applier.apply(&resource_data).unwrap();
-
-                                (options.write)(
-                                    resource,
-                                    Storage::Public,
-                                    resource_data,
-                                    WriteMtime::LookUpCurrent,
-                                )
-                                .await
-                                .map_err(|_| ApplicationError::StoragePermissions)?;
-                            }
-                            agde::EventKind::Create(_) => {
-                                (options.write)(
-                                    resource,
-                                    Storage::Public,
-                                    Vec::new(),
-                                    WriteMtime::LookUpCurrent,
-                                )
-                                .await
-                                .map_err(|()| ApplicationError::StoragePermissions)?;
-                            }
-                            agde::EventKind::Delete(_) => {
-                                info!("Processing local delete message.");
-                                (options.delete)(resource, Storage::Public)
-                                    .await
-                                    .map_err(|()| ApplicationError::StoragePermissions)?;
-                            }
-                        }
-                    }
-
-                    debug!("Processed messages. Moving from public to current.");
-                    {
-                        let mut changes = changed.lock().await;
-                        for resource in &*changes {
-                            warn!("Resource {resource} changed, from **remote**");
-                            let actual = (options.read)(resource.to_owned(), Storage::Public)
-                                .await
-                                .map_err(|_| ApplicationError::StoragePermissions)?;
-                            if let Some(actual) = actual {
-                                (options.write)(
-                                    resource.to_owned(),
-                                    Storage::Current,
-                                    actual,
-                                    WriteMtime::LookUpCurrent,
-                                )
-                                .await
-                                .map_err(|_| ApplicationError::StoragePermissions)?;
-                            } else {
-                                (options.delete)(resource.to_owned(), Storage::Current)
-                                    .await
-                                    .map_err(|_| ApplicationError::StoragePermissions)?;
-                            }
-                        }
-                        changes.clear();
-                    }
-                    debug!("Successfully applied diffs.");
-                    Ok(())
-                };
-                // Execute `apply` and `send` at the same time!
-                let send = async {
-                    let mut write = write.lock().await;
-                    for message in &messages {
-                        let message = message.to_bin().into();
-
-                        write
-                            .feed(message)
-                            .await
-                            .map_err(|_| ApplicationError::UnexpectedServerClose)?;
-                    }
-                    write
-                        .flush()
-                        .await
-                        .map_err(|_| ApplicationError::UnexpectedServerClose)?;
-                    debug!("Successfully sent diffs.");
-                    Ok(())
-                };
-                futures::future::try_join(apply, send).await?;
-                {
-                    // `TODO`: don't call this every time we diff!
-                    (options.write)(
-                        "clean".to_owned(),
-                        Storage::Meta,
-                        "y".into(),
-                        WriteMtime::No,
-                    )
-                    .await
-                    .map_err(|()| ApplicationError::StoragePermissions)?;
-                }
-
-                last_check = SystemTime::now();
+                commit_and_send(&manager, &options, &write, &changed).await?;
                 tokio::time::sleep(options.sync_interval).await;
             }
         })
@@ -1138,7 +1027,7 @@ async fn rewind_current(
     public: &[u8],
     current: &[u8],
 ) -> Option<Vec<u8>> {
-    let last_commit = manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH);
+    let last_commit = manager.last_commit_or_epoch();
     let offsets = if !created {
         let mut unwinder = manager.unwinder_to(last_commit);
 
@@ -1180,6 +1069,234 @@ async fn rewind_current(
         }
         Ok(vec) => Some(vec),
     }
+}
+async fn commit_and_send(
+    manager: &Mutex<Manager>,
+    options: &Options,
+    write: &Mutex<WriteHalf>,
+    changed: &Mutex<HashSet<String>>,
+) -> Result<(), ApplicationError> {
+    {
+        let ff = { manager.lock().await.is_fast_forwarding() };
+        if ff {
+            return Ok(());
+        }
+    }
+
+    let diff = options.diff().await?;
+
+    info!("Got diffs {diff:?}");
+
+    let mut messages = Vec::with_capacity(diff.len());
+
+    {
+        let mut manager = manager.lock().await;
+
+        for diff in diff {
+            let modern =
+                manager.modern_resource_name(diff.resource(), manager.last_commit_or_epoch());
+            // It's not worth sending updates when the resource has been deleted.
+            if modern.is_some() {
+                let event = match diff {
+                    // `TODO`: Give successor
+                    MetadataChange::Delete(res) => agde::Event::new(
+                        agde::event::Kind::Delete(agde::event::Delete::new(res, None)),
+                        &*manager,
+                    ),
+                    MetadataChange::Modify(resource, created) => {
+                        let create_ev = if created {
+                            let event = agde::Event::new(
+                                agde::event::Kind::Create(agde::event::Create::new(
+                                    resource.clone(),
+                                )),
+                                &manager,
+                            )
+                            // schedule create event a bit before modify.
+                            .with_timestamp(SystemTime::now() - Duration::from_micros(10));
+                            Some(event)
+                        } else {
+                            None
+                        };
+
+                        let mut current = (options.read)(resource.clone(), Storage::Current)
+                                        .await
+                                        .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
+
+                        let public = (options.read)(resource.clone(), Storage::Public)
+                            .await
+                            .map_err(|_| ApplicationError::StoragePermissions)?
+                            .unwrap_or_default();
+
+                        info!("Read {:?} from public", String::from_utf8_lossy(&public));
+                        info!(
+                            "Last check: {:?}, now {:?}",
+                            manager.last_commit_or_epoch(),
+                            SystemTime::now()
+                        );
+
+                        current = if let Some(current) =
+                            rewind_current(&mut manager, created, &resource, &public, &current)
+                                .await
+                        {
+                            current
+                        } else {
+                            // since we keep track of the incoming events and
+                            // which resources have been changed, this will get
+                            // copied below.
+                            println!("Resource destroyed");
+                            continue;
+                        };
+
+                        warn!(
+                            "Unwould public data, now resource at: '''\n{:?}\n'''",
+                            std::str::from_utf8(&public)
+                        );
+
+                        let event = agde::event::Modify::new(resource, &current, &public);
+                        let event = agde::Event::new(agde::event::Kind::Modify(event), &manager);
+
+                        println!("Diff: {:#?}", event.diff().unwrap());
+
+                        if let Some(ev) = create_ev {
+                            messages.push(manager.process_event(ev).unwrap());
+                        }
+                        event
+                    }
+                };
+
+                messages.push(manager.process_event(event).unwrap())
+            } else {
+                // edited resource has been removed.
+            }
+        }
+
+        manager.update_last_commit();
+    }
+
+    // Execute `apply` and `send` at the same time!
+    let apply = async {
+        let mut manager = manager.lock().await;
+
+        for message in &messages {
+            let event = if let agde::MessageKind::Event(ev) = message.inner() {
+                ev
+            } else {
+                unreachable!(
+                    "we only added messages through `process_event`, which always gives events."
+                );
+            };
+
+            debug!("Processing sent message: {event:?}");
+
+            let mut applier = manager
+                .apply_event(event, message.uuid())
+                .expect("manager failed to accept our own event");
+
+            let resource = applier
+                .resource()
+                .expect("our own messages are too old")
+                .to_owned();
+
+            match applier.event().inner() {
+                agde::EventKind::Modify(_ev) => {
+                    let mut resource_data = (options.read)(resource.clone(), Storage::Public)
+                        .await
+                        .map_err(|()| ApplicationError::StoragePermissions)?
+                        // don't expect, just make a new file.
+                        .expect(
+                            "we trust our own data - there must \
+                                            have been a create event before modify",
+                        );
+
+                    resource_data = applier.apply(&resource_data).unwrap();
+
+                    (options.write)(
+                        resource,
+                        Storage::Public,
+                        resource_data,
+                        WriteMtime::LookUpCurrent,
+                    )
+                    .await
+                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                }
+                agde::EventKind::Create(_) => {
+                    (options.write)(
+                        resource,
+                        Storage::Public,
+                        Vec::new(),
+                        WriteMtime::LookUpCurrent,
+                    )
+                    .await
+                    .map_err(|()| ApplicationError::StoragePermissions)?;
+                }
+                agde::EventKind::Delete(_) => {
+                    info!("Processing local delete message.");
+                    (options.delete)(resource, Storage::Public)
+                        .await
+                        .map_err(|()| ApplicationError::StoragePermissions)?;
+                }
+            }
+        }
+
+        debug!("Processed messages. Moving from public to current.");
+        {
+            let mut changes = changed.lock().await;
+            for resource in &*changes {
+                warn!("Resource {resource} changed, from **remote**");
+                let actual = (options.read)(resource.to_owned(), Storage::Public)
+                    .await
+                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                if let Some(actual) = actual {
+                    (options.write)(
+                        resource.to_owned(),
+                        Storage::Current,
+                        actual,
+                        WriteMtime::LookUpCurrent,
+                    )
+                    .await
+                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                } else {
+                    (options.delete)(resource.to_owned(), Storage::Current)
+                        .await
+                        .map_err(|_| ApplicationError::StoragePermissions)?;
+                }
+            }
+            changes.clear();
+        }
+        debug!("Successfully applied diffs.");
+        Ok(())
+    };
+    // Execute `apply` and `send` at the same time!
+    let send = async {
+        let mut write = write.lock().await;
+        for message in &messages {
+            let message = message.to_bin().into();
+
+            write
+                .feed(message)
+                .await
+                .map_err(|_| ApplicationError::UnexpectedServerClose)?;
+        }
+        write
+            .flush()
+            .await
+            .map_err(|_| ApplicationError::UnexpectedServerClose)?;
+        debug!("Successfully sent diffs.");
+        Ok(())
+    };
+    futures::future::try_join(apply, send).await?;
+    {
+        // `TODO`: don't call this every time we diff!
+        (options.write)(
+            "clean".to_owned(),
+            Storage::Meta,
+            "y".into(),
+            WriteMtime::No,
+        )
+        .await
+        .map_err(|()| ApplicationError::StoragePermissions)?;
+    }
+    Ok(())
 }
 
 async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {

@@ -1,6 +1,6 @@
 //! Logs for [`crate::Manager`].
 
-use std::cmp;
+use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hasher;
@@ -162,43 +162,37 @@ impl Log {
         drop(self.list.drain(..to_drop));
     }
     fn _insert(&mut self, ev: ReceivedEvent) {
-        // .rev to search from latest, as that's probably where the new event is at.
-        if self.list.iter().rev().any(|item| *item == ev) {
-            return;
-        }
         match self.list.binary_search(&ev) {
-            // Also insert duplicate when idx is found
-            Ok(idx) | Err(idx) => self.list.insert(idx, ev),
+            Err(idx) => self.list.insert(idx, ev),
+            Ok(idx) => {
+                let elem = &self.list[idx];
+                match elem.event.sender().cmp(&ev.event.sender()) {
+                    Ordering::Less => self.list.insert(idx, ev),
+                    Ordering::Greater => self.list.insert(idx + 1, ev),
+                    Ordering::Equal => {}
+                }
+            }
         }
-        self.trim();
     }
     /// `timestamp` should be the one in [`Event::timestamp`]
     #[inline]
     pub(crate) fn insert(&mut self, ev: Event, message_uuid: Uuid) {
-        // let uuid = ev.sender();
-        // let timestamp = utils::dur_to_systime(ev.timestamp());
-        // let new = match ev.into_inner() {
-        // EventKind::Modify(ev) => {
-        // let event::Modify { diff, resource } = ev;
-        // let mut diff = diff.map(|seg, _| ZeroFiller { len: seg.len() });
-        // diff.with_block_size(1).unwrap();
-        // EventKind::Modify(event::Modify { resource, diff })
-        // }
-        // EventKind::Create(ev) => EventKind::Create(ev),
-        // EventKind::Delete(ev) => EventKind::Delete(ev),
-        // };
-        // let ev = Event::with_timestamp(new, uuid, timestamp);
         let received = ReceivedEvent {
             event: ev,
             message_uuid,
         };
         self._insert(received);
-    }
-    pub(crate) fn replace(&mut self, new_log: Vec<ReceivedEvent>) -> Vec<ReceivedEvent> {
-        let old_log = std::mem::replace(&mut self.list, new_log);
-        self.list.sort();
         self.trim();
-        old_log
+    }
+    pub(crate) fn merge(&mut self, mut new_log: Vec<ReceivedEvent>) {
+        self.list.append(&mut new_log);
+        self.list.sort_unstable_by(|a, b| match a.cmp(b) {
+            Ordering::Equal => a.event.sender().cmp(&b.event.sender()),
+            o => o,
+        });
+        self.list
+            .dedup_by(|a, b| a == b && a.event.sender() == b.event.sender());
+        self.trim();
     }
     #[inline]
     pub(crate) fn len(&self) -> usize {

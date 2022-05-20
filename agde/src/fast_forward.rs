@@ -182,10 +182,14 @@ impl MetadataChange {
 pub struct Request {
     pub(crate) pier: Uuid,
 }
-
 impl Request {
     pub(crate) fn new(pier: Uuid) -> Self {
         Self { pier }
+    }
+
+    /// Get the pier this is targeted to.
+    pub fn recipient(&self) -> Uuid {
+        self.pier
     }
 }
 /// A fast forward response. This contains the data to bring us up and running again.
@@ -194,6 +198,7 @@ pub struct Response {
     pub(crate) pier: Uuid,
     pub(crate) metadata: Metadata,
     /// [`None`] if our event log is empty.
+    /// The UUID of the latest event message stored in the log.
     pub(crate) current_event_uuid: Option<Uuid>,
 }
 impl Response {
@@ -213,5 +218,10 @@ impl Response {
     /// [`crate::sync::RequestBuilder::insert`].
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    /// Get the recipient of this response.
+    pub fn recipient(&self) -> Uuid {
+        self.pier
     }
 }

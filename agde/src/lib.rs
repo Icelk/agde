@@ -45,6 +45,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
+pub use den;
 pub use event::{Event, IntoEvent, Kind as EventKind};
 pub use log::{UuidCheck, UuidCheckAction};
 
@@ -319,6 +320,13 @@ impl Message {
     pub fn inner(&self) -> &MessageKind {
         &self.kind
     }
+    /// Get a mutable reference to the inner [`MessageKind`].
+    ///
+    /// This contains all the data of the message.
+    #[inline]
+    pub fn inner_mut(&mut self) -> &mut MessageKind {
+        &mut self.kind
+    }
 
     /// Get the specific recipient if the [`MessageKind`] is targeted.
     ///
@@ -335,6 +343,8 @@ impl Message {
             MessageKind::HashCheck(request) => request.recipient(),
             MessageKind::HashCheckReply(response) => response.recipient(),
             MessageKind::Cancelled(uuid) => *uuid,
+            MessageKind::FastForward(ff) => ff.recipient(),
+            MessageKind::FastForwardReply(ff) => ff.recipient(),
             _ => return Recipient::All,
         }))
     }
@@ -494,15 +504,23 @@ impl Manager {
     ///
     /// Be careful with [`EventKind::Modify`] as you NEED to have a
     /// [`EventKind::Create`] before it on the same resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fast_forward::Error::ExpectedNotRunning`] if [`Manager::is_fast_forwarding`] is
+    /// true.
     #[inline]
-    pub fn process_event(&mut self, event: impl IntoEvent) -> Message {
+    pub fn process_event(&mut self, event: impl IntoEvent) -> Result<Message, fast_forward::Error> {
+        if self.fast_forward != fast_forward::State::NotRunning {
+            return Err(fast_forward::Error::ExpectedNotRunning);
+        }
         let event = event.into_ev(self);
 
         let uuid = self.generate_uuid();
 
         self.event_log.insert(event.clone(), uuid);
 
-        Message::new(MessageKind::Event(event), self.uuid(), uuid)
+        Ok(Message::new(MessageKind::Event(event), self.uuid(), uuid))
     }
     /// May return a message with it's `count` set lower than this.
     ///
@@ -553,7 +571,7 @@ impl Manager {
     /// This is between event log check and sync to make sure our data is valid.
     /// Then, we don't need to sync.
     ///
-    /// `TODO`: Consider if this is neccesary, or if we should simply check the sync.
+    /// `TODO`: Consider if this is necessary, or if we should simply check the sync.
     pub fn process_hash_check(&mut self, pier: SelectedPier) -> Message {
         self.process(MessageKind::HashCheck(hash_check::Request::new(
             pier,
@@ -683,6 +701,10 @@ impl Manager {
                     unreachable!("we got the cutoff above, this must exist in the log.")
                 }
             }
+        }
+
+        if self.is_fast_forwarding() {
+            return UuidCheckAction::Nothing;
         }
 
         let cutoff = if let Some(cutoff) = self.event_log.cutoff_from_uuid(check.cutoff()) {
@@ -837,13 +859,20 @@ impl Manager {
     ///
     /// Delete all the resources in the returned [`Vec`] of [`String`].
     /// Even if this doesn't return a [`sync::RequestBuilder`].
-    #[allow(clippy::unused_self)] // method consistency
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fast_forward::Error::ExpectedNotRunning`] if [`Manager::is_fast_forwarding`] is
+    /// true.
+    #[allow(clippy::type_complexity, clippy::unused_self)] // method consistency
     pub fn apply_hash_check_reply(
         &mut self,
         response: &hash_check::Response,
         sender: Uuid,
         our_hashes: &hash_check::Response,
-    ) -> (Option<(sync::RequestBuilder, Vec<String>)>, Vec<String>) {
+    ) -> Result<(Option<(sync::RequestBuilder, Vec<String>)>, Vec<String>), fast_forward::Error>
+    {
+        /// this could be made faster (using sorted iterators as in elipdotter)
         fn btreemap_difference(
             matches: &mut Vec<String>,
             mut to_delete: Option<&mut Vec<String>>,
@@ -865,6 +894,9 @@ impl Manager {
                     }
                 }
             }
+        }
+        if self.is_fast_forwarding() {
+            return Err(fast_forward::Error::ExpectedNotRunning);
         }
         let mut differing_data = vec![];
         let mut delete = vec![];
@@ -892,11 +924,12 @@ impl Manager {
                     // Get all events in the log, up to `self.event_log.limit()`
                     Duration::ZERO,
                     self.event_log.limit(),
+                    sync::RevertTo::Latest,
                 ),
                 differing_data,
             ))
         };
-        (request, delete)
+        Ok((request, delete))
     }
     /// Creates a [builder](sync::ResponseBuilder) used to construct a sync response.
     #[allow(clippy::unused_self)] // method consistency
@@ -910,10 +943,48 @@ impl Manager {
     /// Applies the event log of the sync reply.
     ///
     /// You **MUST** also call the methods on [`sync::Response`] to actually make changes to the
-    /// resources returned. This only handles the [`sync.:Response::take_event_log`].
-    pub fn apply_sync_reply(&mut self, response: &mut sync::Response) {
-        self.event_log.replace(response.take_event_log());
+    /// resources returned. This only handles the event log.
+    ///
+    /// The [`event::Rewinder`] returned should be called for all [modified
+    /// resources](sync::Response::diff).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fast_forward::Error::ExpectedWaitingForDiffs`] if we're syncing non-fast forward
+    /// data in a fast forward. Since [`Self::apply_event_uuid_log_check`] returns
+    /// [`UuidCheckAction::Nothing`] when trying to execute it when fast forwarding,
+    /// this is an issue with you accepting a bad message.
+    pub fn apply_sync_reply<'a>(
+        &'a mut self,
+        response: &mut sync::Response,
+    ) -> Result<event::Rewinder<'a>, fast_forward::Error> {
+        self.event_log.merge(response.take_event_log());
         self.event_log.required_event_timestamp = Some(utils::dur_now());
+        match self.fast_forward {
+            fast_forward::State::NotRunning => {}
+            fast_forward::State::WaitingForMeta { pier: _ } => {
+                return Err(fast_forward::Error::ExpectedWaitingForDiffs)
+            }
+            fast_forward::State::WaitingForDiffs {
+                pier: _,
+                latest_event,
+            } => {
+                let idx = latest_event
+                    .and_then(|latest_event| self.event_log.cutoff_from_uuid(latest_event))
+                    .unwrap_or(0);
+                let timestamp = self.event_log.list[idx].event.timestamp();
+                self.event_log.required_event_timestamp = Some(timestamp);
+            }
+        }
+        self.fast_forward = fast_forward::State::NotRunning;
+        let cutoff = match response.revert() {
+            sync::RevertTo::Latest => self.event_log.list.len(),
+            sync::RevertTo::Origin => 0,
+            sync::RevertTo::To(uuid) => self.event_log.cutoff_from_uuid(uuid).unwrap_or(0),
+        };
+        let slice = &self.event_log.list[cutoff..];
+        println!("apply sync reply cutoff: {cutoff}, slice: {slice:#?}");
+        Ok(event::Rewinder::new(slice))
     }
     /// Applies the fast forward reply by modifying the inner state.
     ///
@@ -935,7 +1006,7 @@ impl Manager {
                 return Err(fast_forward::Error::UnexpectedPier);
             }
         } else {
-            return Err(fast_forward::Error::ExpectedNotRunning);
+            return Err(fast_forward::Error::ExpectedWaitingForMeta);
         };
         self.fast_forward = fast_forward::State::WaitingForDiffs {
             pier: reply.pier,
@@ -945,6 +1016,9 @@ impl Manager {
             sender,
             self.event_log.lifetime(),
             self.event_log.limit(),
+            reply
+                .current_event_uuid
+                .map_or(sync::RevertTo::Origin, sync::RevertTo::To),
         ))
     }
 }
@@ -1001,6 +1075,7 @@ impl Manager {
     /// Use [`event::Rewinder::rewind`] on all the modified resources.
     ///
     /// The [`event::Rewinder`] can be reused for several resources.
+    // `TODO`: use a list of the events that we haven't yet integrated with the public storage.
     pub fn rewind_from_last_commit(&self) -> event::Rewinder {
         let cutoff = self
             .event_log
@@ -1014,17 +1089,32 @@ impl Manager {
         println!("cutoff: {cutoff}, slice: {slice:#?}");
         event::Rewinder::new(slice)
     }
-    /// Get the time of the last call to [`Self::rewind_from_last_commit`].
+    /// Get the time of the last call to [`Self::update_last_commit`].
     pub fn last_commit(&self) -> Option<SystemTime> {
         self.event_log
             .required_event_timestamp
             .map(utils::dur_to_systime)
+    }
+    /// The [last commit](Self::last_commit) or [`SystemTime::UNIX_EPOCH`].
+    pub fn last_commit_or_epoch(&self) -> SystemTime {
+        self.last_commit().unwrap_or(SystemTime::UNIX_EPOCH)
     }
     /// Update the inner timestamp of the last commit.
     ///
     /// See [`Self::rewind_from_last_commit`] for more details.
     pub fn update_last_commit(&mut self) {
         self.event_log.required_event_timestamp = Some(utils::dur_now());
+    }
+    /// Set the time of the last commit. Should be used with care in rare circumstances
+    /// (e.g. when fast forwarding).
+    pub fn set_last_commit(&mut self, timestamp: SystemTime) {
+        self.event_log.required_event_timestamp = Some(utils::systime_to_dur(timestamp));
+    }
+
+    /// Returns true if we are in a fast forward. You shouldn't commit under these circumstances.
+    #[must_use]
+    pub fn is_fast_forwarding(&self) -> bool {
+        self.fast_forward != fast_forward::State::NotRunning
     }
 
     /// Get an iterator of the piers filtered by `filter`.

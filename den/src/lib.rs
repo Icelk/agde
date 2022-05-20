@@ -769,7 +769,6 @@ impl Signature {
     }
 
     /// Get the [`Difference`] between the data the [`Signature`] represents and the local `data`.
-    /// `data` MUST have the same content as what you feed to [`SignatureBuilder::write`].
     ///
     /// This will return a struct which when serialized (using e.g. `bincode`) is much smaller than
     /// `data`.
