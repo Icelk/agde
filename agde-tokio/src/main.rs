@@ -135,6 +135,9 @@ pub struct Options {
     /// Returns a list of the resources which might have changed.
     pub rough_resource_diff: DiffFn,
 
+    offline_metadata: Arc<Mutex<Metadata>>,
+    metadata: Arc<Mutex<Metadata>>,
+
     /// For how long to wait for welcomes.
     pub startup_timeout: Duration,
     pub sync_interval: Duration,
@@ -164,6 +167,8 @@ impl Options {
         let write_offline_metadata = Arc::clone(&offline_metadata);
         let delete_metadata = Arc::clone(&metadata);
         let delete_offline_metadata = Arc::clone(&offline_metadata);
+        let diff_metadata = Arc::clone(&metadata);
+        let diff_offline_metadata = Arc::clone(&offline_metadata);
         Ok(Options {
             read: Box::new(|resource, storage| {
                 Box::pin(async move {
@@ -212,11 +217,14 @@ impl Options {
                             let mtime = match mtime {
                                 WriteMtime::No => None,
                                 WriteMtime::LookUpCurrent => {
-                                    let metadata = tokio::fs::metadata(format!("./{resource}"))
-                                        .await
-                                        .map_err(|_| ())?;
-                                    let mtime = metadata.modified().map_err(|_| ())?;
-                                    Some(mtime)
+                                    if let Ok(metadata) =
+                                        tokio::fs::metadata(format!("./{resource}")).await
+                                    {
+                                        let mtime = metadata.modified().map_err(|_| ())?;
+                                        Some(mtime)
+                                    } else {
+                                        None
+                                    }
                                 }
                             };
                             let meta = ResourceMeta::new(mtime, data.len() as u64);
@@ -288,8 +296,8 @@ impl Options {
                 }) as DeleteFuture
             }),
             rough_resource_diff: Box::new(move || {
-                let metadata = Arc::clone(&metadata);
-                let offline_metadata = Arc::clone(&offline_metadata);
+                let metadata = Arc::clone(&diff_metadata);
+                let offline_metadata = Arc::clone(&diff_offline_metadata);
                 Box::pin(async move {
                     debug!("Getting diff");
                     let mut offline_metadata = offline_metadata.lock().await;
@@ -320,6 +328,8 @@ impl Options {
                     Ok(changed)
                 }) as DiffFuture
             }),
+            metadata,
+            offline_metadata,
             startup_timeout: Duration::from_secs(7),
             sync_interval: Duration::from_secs(5),
             force_pull,
@@ -331,6 +341,16 @@ impl Options {
     pub fn with_startup_duration(mut self, startup_timeout: Duration) -> Self {
         self.startup_timeout = startup_timeout;
         self
+    }
+    /// The metadata of both the public and current storage.
+    /// Calling [`Metadata::changes`] on `this.changes(offline_metadata)`
+    /// gets you the changes to get current storage the same as the public.
+    pub fn metadata(&self) -> &Mutex<Metadata> {
+        &self.metadata
+    }
+    /// The metadata of the [`Storage::Current`].
+    pub fn metadata_offline(&self) -> &Mutex<Metadata> {
+        &self.offline_metadata
     }
 }
 
