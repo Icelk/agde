@@ -150,7 +150,7 @@ impl<'a> ResponseBuilder<'a> {
     ///
     /// Panics if you've called this with the same `resource` before.
     pub fn add_diff(&mut self, resource: String, diff: den::Difference) -> &mut Self {
-        if let Ok(idx) = self.diff.binary_search_by(|item| item.0.cmp(&resource)) {
+        if let Err(idx) = self.diff.binary_search_by(|item| item.0.cmp(&resource)) {
             self.diff.insert(idx, (resource, diff));
         } else {
             panic!("you cannot add two diffs with the same resource name");

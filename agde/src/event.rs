@@ -229,7 +229,8 @@ impl<S: ExtendVec + 'static> Event<S> {
     /// Create an `Event` with the [`Self::timestamp`] set to the current time.
     pub fn new(kind: Kind<S>, sender: &Manager) -> Self {
         let latest_event = sender.event_log.latest_event(kind.resource());
-        let latest_event = latest_event.map_or_else(|| Duration::ZERO, |ev| ev.event.timestamp());
+        let latest_event =
+            latest_event.map_or_else(|| Duration::ZERO, |ev| ev.event.timestamp_dur());
         Self {
             kind,
             timestamp: utils::systime_to_dur(SystemTime::now()),
@@ -263,14 +264,14 @@ impl<S: ExtendVec + 'static> Event<S> {
     pub(crate) fn inner_mut(&mut self) -> &mut Kind<S> {
         &mut self.kind
     }
+    pub(crate) fn timestamp_dur(&self) -> Duration {
+        self.timestamp
+    }
     /// Get the timestamp of this event.
-    ///
-    /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
-    /// Consider using [`crate::utils::dur_to_systime`] to convert it to a [`SystemTime`].
     #[inline]
     #[must_use]
-    pub fn timestamp(&self) -> Duration {
-        self.timestamp
+    pub fn timestamp(&self) -> SystemTime {
+        utils::dur_to_systime(self.timestamp)
     }
     /// Returns the UUID of the sender of this event.
     #[inline]
@@ -287,13 +288,10 @@ impl<S: ExtendVec + 'static> Event<S> {
         }
     }
     /// Get the timestamp of the last event observed by the issuer of this event.
-    ///
-    /// The returned [`Duration`] is the time since [`SystemTime::UNIX_EPOCH`].
-    /// Consider using [`crate::utils::dur_to_systime`] to convert it to a [`SystemTime`].
     #[inline]
     #[must_use]
-    pub fn latest_event_timestamp(&self) -> Duration {
-        self.latest_event
+    pub fn latest_event_timestamp(&self) -> SystemTime {
+        utils::dur_to_systime(self.latest_event)
     }
 }
 
@@ -390,7 +388,7 @@ impl<'a> Unwinder<'a> {
     ///     println!("Resource {} changed in some way.", event.resource());
     /// }
     /// ```
-    pub fn events(&self) -> impl Iterator<Item = &Event> + '_ {
+    pub fn events(&self) -> impl Iterator<Item = &Event> + DoubleEndedIterator + '_ {
         self.events.iter().map(|received_ev| &received_ev.event)
     }
     /// Reverts the `resource` with `modern_resource_name` to the bottom of the internal list.
@@ -500,12 +498,14 @@ pub struct Rewinder<'a> {
     /// Ordered from last (temporally).
     events: &'a [log::ReceivedEvent],
     buf: Vec<u8>,
+    manager: &'a Manager,
 }
 impl<'a> Rewinder<'a> {
-    pub(crate) fn new(slice: &'a [log::ReceivedEvent]) -> Self {
+    pub(crate) fn new(slice: &'a [log::ReceivedEvent], manager: &'a Manager) -> Self {
         Self {
             events: slice,
             buf: Vec::new(),
+            manager,
         }
     }
     /// Rewinds the `resource` back up to the most recent version.
@@ -568,5 +568,17 @@ impl<'a> Rewinder<'a> {
         data: impl Into<Vec<u8>>,
     ) -> Result<Vec<u8>, RewindError> {
         self.rewind_with_modify_diff(resource, data, |d| Cow::Borrowed(d))
+    }
+
+    /// Get an iterator over the events stored in this rewinder.
+    /// The first item is the oldest one. The last is the most recent.
+    pub fn events(&self) -> impl Iterator<Item = &Event> + DoubleEndedIterator + '_ {
+        self.events.iter().map(|received_ev| &received_ev.event)
+    }
+
+    /// See [`Manager::last_change_to_resource`].
+    #[must_use]
+    pub fn last_change_to_resource(&self, resource: &str) -> SystemTime {
+        self.manager.last_change_to_resource(resource)
     }
 }

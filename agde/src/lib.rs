@@ -664,7 +664,7 @@ impl Manager {
     ) -> Result<log::EventApplier<'a>, log::Error> {
         let now = utils::dur_now();
         // The timestamp is after now!
-        if event.timestamp().saturating_sub(Duration::new(10, 0)) >= now {
+        if event.timestamp_dur().saturating_sub(Duration::new(10, 0)) >= now {
             return Err(log::Error::EventInFuture);
         }
 
@@ -976,7 +976,7 @@ impl Manager {
                     .event_log
                     .list
                     .get(idx)
-                    .map_or(Duration::ZERO, |ev| ev.event.timestamp());
+                    .map_or(Duration::ZERO, |ev| ev.event.timestamp_dur());
                 self.event_log.required_event_timestamp = Some(timestamp);
             }
         }
@@ -991,7 +991,7 @@ impl Manager {
         };
         let slice = &self.event_log.list[cutoff..];
         println!("apply sync reply cutoff: {cutoff}, slice: {slice:#?}");
-        Ok(event::Rewinder::new(slice))
+        Ok(event::Rewinder::new(slice, self))
     }
     /// Applies the fast forward reply by modifying the inner state.
     ///
@@ -1094,7 +1094,7 @@ impl Manager {
             .unwrap_or(0);
         let slice = &self.event_log.list[cutoff..];
         println!("cutoff: {cutoff}, slice: {slice:#?}");
-        event::Rewinder::new(slice)
+        event::Rewinder::new(slice, self)
     }
     /// Get the time of the last call to [`Self::update_last_commit`].
     pub fn last_commit(&self) -> Option<SystemTime> {
@@ -1122,6 +1122,18 @@ impl Manager {
     #[must_use]
     pub fn is_fast_forwarding(&self) -> bool {
         self.fast_forward != fast_forward::State::NotRunning
+    }
+    /// The timestamp of the latest change to `resource`.
+    ///
+    /// Returns [`SystemTime::UNIX_EPOCH`] if no changes to `resource` are in the log, or if the resource
+    /// doesn't exist.
+    pub fn last_change_to_resource(&self, resource: &str) -> SystemTime {
+        self.event_log
+            .list
+            .iter()
+            .rev()
+            .find(|ev| ev.event.resource() == resource)
+            .map_or(SystemTime::UNIX_EPOCH, |ev| ev.event.timestamp())
     }
 
     /// Get an iterator of the piers filtered by `filter`.

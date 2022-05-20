@@ -147,10 +147,10 @@ impl Log {
             }
             let last = self.list.get(to_drop);
             if let Some(last) = last {
-                if last.event.timestamp() < limit
+                if last.event.timestamp_dur() < limit
                     && self
                         .required_event_timestamp
-                        .map_or(true, |required| last.event.timestamp() < required)
+                        .map_or(true, |required| last.event.timestamp_dur() < required)
                 {
                     to_drop += 1;
                     continue;
@@ -212,7 +212,7 @@ impl Log {
     pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
         for (pos, ev) in self.list.iter().enumerate().rev() {
             println!("Iter ev @{pos} {ev:?}");
-            if ev.event.timestamp() <= cutoff {
+            if ev.event.timestamp_dur() <= cutoff {
                 return Some(pos + 1);
             }
         }
@@ -305,7 +305,7 @@ impl Log {
     pub(crate) fn unwind_to(&self, timestamp: Duration) -> event::Unwinder {
         let mut cutoff = 0;
         for (pos, received_ev) in self.list.iter().enumerate().rev() {
-            if received_ev.event.timestamp() <= timestamp {
+            if received_ev.event.timestamp_dur() <= timestamp {
                 cutoff = pos + 1;
             }
         }

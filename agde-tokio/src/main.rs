@@ -50,7 +50,8 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
             let mut map = HashMap::new();
 
             let path = match storage {
-                Storage::Public | Storage::Meta => ".agde/",
+                Storage::Public => ".agde/files/",
+                Storage::Meta => ".agde/",
                 Storage::Current => "./",
             };
 
@@ -58,9 +59,7 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
                 .follow_links(false)
                 .into_iter()
                 .filter_entry(|e| {
-                    !(e.path().starts_with(".agde")
-                        || e.path().starts_with("./.agde")
-                        || e.path().starts_with("./node_modules"))
+                    !(e.path().starts_with(".agde") || e.path().starts_with("./.agde"))
                 })
                 .filter_map(|e| e.ok())
             {
@@ -111,6 +110,18 @@ pub enum Storage {
     /// Storage of metadata objects.
     Meta,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteStorage {
+    /// The copy of data which is maintained to be equal to the others' public storages.
+    ///
+    /// See [`WriteFn`] and [`Options::write`] for more details on the data.
+    Public(WriteMtime, SystemTime),
+    /// The copy of data the user writes to.
+    Current,
+    /// Storage of metadata objects.
+    Meta,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMtime {
     LookUpCurrent,
     No,
@@ -122,9 +133,10 @@ pub type WriteFuture = BoxFut<Result<(), ()>>;
 pub type DeleteFuture = WriteFuture;
 pub type DiffFuture = BoxFut<Result<Vec<MetadataChange>, ()>>;
 pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
-/// The [`SystemTime`] is the time of modification.
-/// When [`Storage::Current`], this should be the time of last change.
-pub type WriteFn = Box<dyn Fn(String, Storage, Vec<u8>, WriteMtime) -> WriteFuture + Send + Sync>;
+/// The [`SystemTime`] is the timestamp of the event that caused this, or (if an event didn't cause
+/// it) [`SystemTime::UNIX_EPOCH`].
+/// Both the [`WriteMtime`] and [`SystemTime`] are useless unless [`Storage`] is [`Storage::Public`].
+pub type WriteFn = Box<dyn Fn(String, WriteStorage, Vec<u8>) -> WriteFuture + Send + Sync>;
 pub type DeleteFn = Box<dyn Fn(String, Storage) -> DeleteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
 #[must_use]
@@ -190,14 +202,14 @@ impl Options {
                     Ok(Some(buf))
                 }) as ReadFuture
             }),
-            write: Box::new(move |resource, storage, data, mtime| {
+            write: Box::new(move |resource, storage, data| {
                 let metadata = Arc::clone(&write_metadata);
                 let offline_metadata = Arc::clone(&write_offline_metadata);
                 Box::pin(async move {
                     let path = match storage {
-                        Storage::Public => format!(".agde/files/{resource}",),
-                        Storage::Current => format!("./{resource}"),
-                        Storage::Meta => format!(".agde/{resource}"),
+                        WriteStorage::Public(_, _) => format!(".agde/files/{resource}",),
+                        WriteStorage::Current => format!("./{resource}"),
+                        WriteStorage::Meta => format!(".agde/{resource}"),
                     };
 
                     if let Some(path) = Path::new(&path).parent() {
@@ -210,11 +222,11 @@ impl Options {
                     file.flush().await.map_err(|_| ())?;
                     match storage {
                         // meta storage obviously doesn't affect the files' metadata.
-                        Storage::Meta => {}
-                        Storage::Public => {
+                        WriteStorage::Meta => {}
+                        WriteStorage::Public(write_mtime, event_mtime) => {
                             let mut metadata = metadata.lock().await;
 
-                            let mtime = match mtime {
+                            let mtime = match write_mtime {
                                 WriteMtime::No => None,
                                 WriteMtime::LookUpCurrent => {
                                     if let Ok(metadata) =
@@ -227,10 +239,11 @@ impl Options {
                                     }
                                 }
                             };
-                            let meta = ResourceMeta::new(mtime, data.len() as u64);
+                            let meta =
+                                ResourceMeta::new_from_event(mtime, event_mtime, data.len() as u64);
                             metadata.insert(resource, meta);
                         }
-                        Storage::Current => {
+                        WriteStorage::Current => {
                             let file_metadata = tokio::fs::metadata(&path).await.map_err(|_| ())?;
                             let mtime = file_metadata.modified().map_err(|_| ())?;
                             {
@@ -361,14 +374,15 @@ impl Options {
             .await
             .map_err(|_| ApplicationError::StoragePermissions)
     }
+    /// `write_mtime` and `event_mtime` only need to be actual values if `storage` is
+    /// [`Storage::Public`].
     pub async fn write(
         &self,
         resource: impl Into<String>,
-        storage: Storage,
+        storage: WriteStorage,
         data: impl Into<Vec<u8>>,
-        write_mtime: WriteMtime,
     ) -> Result<(), ApplicationError> {
-        (self.write)(resource.into(), storage, data.into(), write_mtime)
+        (self.write)(resource.into(), storage, data.into())
             .await
             .map_err(|_| ApplicationError::StoragePermissions)
     }
@@ -386,6 +400,12 @@ impl Options {
         (self.rough_resource_diff)()
             .await
             .map_err(|_| ApplicationError::StoragePermissions)
+    }
+    pub async fn read_clean(&self) -> Result<Option<Vec<u8>>, ApplicationError> {
+        self.read("clean", Storage::Meta).await
+    }
+    pub async fn write_clean(&self, data: impl Into<Vec<u8>>) -> Result<(), ApplicationError> {
+        self.write("clean", WriteStorage::Meta, data).await
     }
 }
 
@@ -422,7 +442,7 @@ async fn main() {
 }
 
 async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(), DynError> {
-    let state = options.read("clean", Storage::Meta).await?;
+    let state = options.read_clean().await?;
 
     if state.as_deref() != Some(b"y") {
         error!("State isn't clean.");
@@ -442,23 +462,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 let actual = options.read(&resource, Storage::Public).await?;
                 if let Some(actual) = actual {
                     options
-                        .write(
-                            resource,
-                            Storage::Current,
-                            actual,
-                            WriteMtime::LookUpCurrent,
-                        )
+                        .write(resource, WriteStorage::Current, actual)
                         .await?;
                 }
             }
 
-            options
-                .write("clean", Storage::Meta, "y", WriteMtime::No)
-                .await?;
+            options.write_clean("y").await?;
         } else if changes.is_empty() {
-            options
-                .write("clean", Storage::Meta, "y", WriteMtime::No)
-                .await?;
+            options.write_clean("y").await?;
         }
     }
 
@@ -573,7 +584,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 .build()
                 .expect("failed to start tokio when handling ctrlc");
             let returned = runtime.block_on(async move {
-                let clean = options.read("clean", Storage::Meta).await?;
+                let clean = options.read_clean().await?;
                 if clean.as_deref() == Some(b"y") {
                     info!("State clean. Exiting.");
                     return Ok(());
@@ -623,7 +634,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     };
 
                                     options
-                                        .write(resource, Storage::Current, current, WriteMtime::No)
+                                        .write(resource, WriteStorage::Current, current)
                                         .await?;
                                 }
                             }
@@ -632,9 +643,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 }
 
                 // we are clean again!
-                options
-                    .write("clean", Storage::Meta, "y", WriteMtime::No)
-                    .await?;
+                options.write_clean("y").await?;
 
                 Ok::<(), ApplicationError>(())
             });
@@ -730,9 +739,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         if let Some(resource) = resource {
                                             // write to `.agde/clean` that we aren't clean (we have
                                             // public diffs not applied to `current`)
-                                            options
-                                                .write("clean", Storage::Meta, "n", WriteMtime::No)
-                                                .await?;
+                                            options.write_clean("n").await?;
 
                                             match applier.event().inner() {
                                                 agde::EventKind::Modify(_) => {
@@ -751,9 +758,11 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                         options
                                                             .write(
                                                                 resource,
-                                                                Storage::Public,
+                                                                WriteStorage::Public(
+                                                                    WriteMtime::No,
+                                                                    event.timestamp(),
+                                                                ),
                                                                 data,
-                                                                WriteMtime::No,
                                                             )
                                                             .await?;
                                                     } else {
@@ -765,9 +774,11 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                     options
                                                         .write(
                                                             resource,
-                                                            Storage::Public,
+                                                            WriteStorage::Public(
+                                                                WriteMtime::No,
+                                                                event.timestamp(),
+                                                            ),
                                                             Vec::new(),
-                                                            WriteMtime::No,
                                                         )
                                                         .await?;
                                                 }
@@ -832,6 +843,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             agde::MessageKind::Sync(sync) => {
                                 let mut builder = manager.apply_sync(sync, sender);
                                 while let Some((resource, signature)) = builder.next_signature() {
+                                    println!("Signature from {resource}: {signature:?}");
                                     let data = options.read(resource, Storage::Public).await?;
                                     let data = if let Some(d) = data {
                                         d
@@ -883,7 +895,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         data = rewinder.rewind(resource, data).unwrap();
                                         println!("rewound {:?}", std::str::from_utf8(&data));
                                         options
-                                            .write(resource, Storage::Public, data, WriteMtime::No)
+                                            .write(
+                                                resource,
+                                                WriteStorage::Public(
+                                                    WriteMtime::No,
+                                                    rewinder.last_change_to_resource(resource),
+                                                ),
+                                                data,
+                                            )
                                             .await?;
                                         Ok(())
                                     };
@@ -901,7 +920,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                             diff.apply_in_place_adaptive_end(&mut data).unwrap();
                                         }
                                         options
-                                            .write(resource, Storage::Current, data, WriteMtime::No)
+                                            .write(resource, WriteStorage::Current, data)
                                             .await?;
                                         Ok(())
                                     };
@@ -1167,15 +1186,18 @@ async fn commit_and_send(
                     options
                         .write(
                             resource,
-                            Storage::Public,
+                            WriteStorage::Public(WriteMtime::LookUpCurrent, event.timestamp()),
                             resource_data,
-                            WriteMtime::LookUpCurrent,
                         )
                         .await?;
                 }
                 agde::EventKind::Create(_) => {
                     options
-                        .write(resource, Storage::Public, "", WriteMtime::LookUpCurrent)
+                        .write(
+                            resource,
+                            WriteStorage::Public(WriteMtime::LookUpCurrent, event.timestamp()),
+                            "",
+                        )
                         .await?;
                 }
                 agde::EventKind::Delete(_) => {
@@ -1193,12 +1215,7 @@ async fn commit_and_send(
                 let actual = options.read(resource, Storage::Public).await?;
                 if let Some(actual) = actual {
                     options
-                        .write(
-                            resource,
-                            Storage::Current,
-                            actual,
-                            WriteMtime::LookUpCurrent,
-                        )
+                        .write(resource, WriteStorage::Current, actual)
                         .await?;
                 } else {
                     options.delete(resource, Storage::Current).await?;
@@ -1229,9 +1246,7 @@ async fn commit_and_send(
     };
     futures::future::try_join(apply, send).await?;
     {
-        options
-            .write("clean", Storage::Meta, "y", WriteMtime::No)
-            .await?;
+        options.write_clean("y").await?;
     }
     Ok(())
 }

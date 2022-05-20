@@ -51,6 +51,8 @@ pub struct ResourceMeta {
     /// In that case, there's always a change. This can occur when data has been written to the
     /// public storage, and the current storage hasn't gotten that data yet.
     mtime_in_current: Option<Duration>,
+    /// The timestamp of the event that last modified this.
+    event_mtime: Duration,
     size: u64,
 }
 
@@ -65,9 +67,18 @@ impl ResourceMeta {
     /// In that case, there's always a change. This can occur when data has been written to the
     /// public storage, and the current storage hasn't gotten that data yet.
     #[must_use]
-    pub fn new(mtime_in_current: Option<SystemTime>, size: u64) -> Self {
+    pub fn new(mtime_in_current: Option<SystemTime>,  size: u64) -> Self {
+        Self::new_from_event(mtime_in_current, SystemTime::UNIX_EPOCH, size)
+    }
+    /// Same as [`Self::new`] but with an additional argument - `event_mtime`.
+    ///
+    /// It represents the time of the latest event which acted upon the resource.
+    /// Only use this function for the public storage, as it's useless elsewhere.
+    #[must_use]
+    pub fn new_from_event(mtime_in_current: Option<SystemTime>, event_mtime: SystemTime, size: u64) -> Self {
         Self {
             mtime_in_current: mtime_in_current.map(utils::systime_to_dur),
+            event_mtime: utils::systime_to_dur(event_mtime),
             size,
         }
     }
