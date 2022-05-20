@@ -67,7 +67,7 @@ impl ResourceMeta {
     /// In that case, there's always a change. This can occur when data has been written to the
     /// public storage, and the current storage hasn't gotten that data yet.
     #[must_use]
-    pub fn new(mtime_in_current: Option<SystemTime>,  size: u64) -> Self {
+    pub fn new(mtime_in_current: Option<SystemTime>, size: u64) -> Self {
         Self::new_from_event(mtime_in_current, SystemTime::UNIX_EPOCH, size)
     }
     /// Same as [`Self::new`] but with an additional argument - `event_mtime`.
@@ -75,7 +75,11 @@ impl ResourceMeta {
     /// It represents the time of the latest event which acted upon the resource.
     /// Only use this function for the public storage, as it's useless elsewhere.
     #[must_use]
-    pub fn new_from_event(mtime_in_current: Option<SystemTime>, event_mtime: SystemTime, size: u64) -> Self {
+    pub fn new_from_event(
+        mtime_in_current: Option<SystemTime>,
+        event_mtime: SystemTime,
+        size: u64,
+    ) -> Self {
         Self {
             mtime_in_current: mtime_in_current.map(utils::systime_to_dur),
             event_mtime: utils::systime_to_dur(event_mtime),
@@ -92,6 +96,13 @@ impl ResourceMeta {
     #[must_use]
     pub fn mtime_in_current(&self) -> Option<SystemTime> {
         self.mtime_in_current.map(utils::dur_to_systime)
+    }
+    /// The timestamp of the last modification to this resource by an event.
+    /// Only applicable to the public storage.
+    /// [`None`] if this hasn't been written to the curren storage.
+    #[must_use]
+    pub fn mtime_of_last_event(&self) -> SystemTime {
+        utils::dur_to_systime(self.event_mtime)
     }
 
     /// Update the metadata.
@@ -148,12 +159,14 @@ impl Metadata {
         for (resource, meta) in self.iter() {
             match other.get(resource) {
                 Some(current_data) => {
-                    if meta.mtime_in_current().map_or(true, |mtime| {
-                        mtime
-                            != current_data
-                                .mtime_in_current()
-                                .expect("we just created this from local metadata")
-                    }) || current_data.size() != meta.size()
+                    if current_data.size() != meta.size()
+                        || (meta.mtime_of_last_event() != current_data.mtime_of_last_event()
+                            && meta.mtime_in_current().map_or(true, |mtime| {
+                                mtime
+                                    != current_data
+                                        .mtime_in_current()
+                                        .expect("we just created this from local metadata")
+                            }))
                     {
                         changed.push(MetadataChange::Modify(resource.to_owned(), false));
                     }
