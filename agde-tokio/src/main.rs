@@ -422,16 +422,12 @@ async fn main() {
 }
 
 async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(), DynError> {
-    let state = (options.read)("clean".to_owned(), Storage::Meta)
-        .await
-        .map_err(|_| ApplicationError::StoragePermissions)?;
+    let state = options.read("clean", Storage::Meta).await?;
 
     if state.as_deref() != Some(b"y") {
         error!("State isn't clean.");
 
-        let changes = (options.rough_resource_diff)()
-            .await
-            .map_err(|_| ApplicationError::StoragePermissions)?;
+        let changes = options.diff().await?;
         if options.force_pull {
             if !changes.is_empty() {
                 error!("Overriding local changes since no state file was found.");
@@ -443,38 +439,26 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         resource
                     }
                 };
-                let actual = (options.read)(resource.to_owned(), Storage::Public)
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                let actual = options.read(&resource, Storage::Public).await?;
                 if let Some(actual) = actual {
-                    (options.write)(
-                        resource,
-                        Storage::Current,
-                        actual,
-                        WriteMtime::LookUpCurrent,
-                    )
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                    options
+                        .write(
+                            resource,
+                            Storage::Current,
+                            actual,
+                            WriteMtime::LookUpCurrent,
+                        )
+                        .await?;
                 }
             }
 
-            (options.write)(
-                "clean".to_owned(),
-                Storage::Meta,
-                "y".into(),
-                WriteMtime::No,
-            )
-            .await
-            .map_err(|_| ApplicationError::StoragePermissions)?;
+            options
+                .write("clean", Storage::Meta, "y", WriteMtime::No)
+                .await?;
         } else if changes.is_empty() {
-            (options.write)(
-                "clean".to_owned(),
-                Storage::Meta,
-                "y".into(),
-                WriteMtime::No,
-            )
-            .await
-            .map_err(|_| ApplicationError::StoragePermissions)?;
+            options
+                .write("clean", Storage::Meta, "y", WriteMtime::No)
+                .await?;
         }
     }
 
@@ -589,9 +573,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 .build()
                 .expect("failed to start tokio when handling ctrlc");
             let returned = runtime.block_on(async move {
-                let clean = (options.read)("clean".to_owned(), Storage::Meta)
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                let clean = options.read("clean", Storage::Meta).await?;
                 if clean.as_deref() == Some(b"y") {
                     info!("State clean. Exiting.");
                     return Ok(());
@@ -600,9 +582,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
                 let mut manager = manager.lock().await;
 
-                let diff = (options.rough_resource_diff)()
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                let diff = options.diff().await?;
 
                 {
                     for diff in diff {
@@ -615,18 +595,14 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 MetadataChange::Delete(_) => {}
                                 MetadataChange::Modify(resource, created) => {
                                     let mut current =
-                                        (options.read)(resource.clone(), Storage::Current)
-                                            .await
-                                            .map_err(|_| ApplicationError::StoragePermissions)?
-                                            .expect(
-                                                "configuration should not return \
-                                                    Modified if the Current storage \
-                                                    version doesn't exist.",
-                                            );
+                                        options.read(&resource, Storage::Current).await?.expect(
+                                            "configuration should not return Modified \
+                                            if the Current storage version doesn't exist.",
+                                        );
 
-                                    let public = (options.read)(resource.clone(), Storage::Public)
-                                        .await
-                                        .map_err(|_| ApplicationError::StoragePermissions)?
+                                    let public = options
+                                        .read(&resource, Storage::Public)
+                                        .await?
                                         .unwrap_or_default();
 
                                     current = if let Some(current) = rewind_current(
@@ -646,14 +622,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         continue;
                                     };
 
-                                    (options.write)(
-                                        resource,
-                                        Storage::Current,
-                                        current,
-                                        WriteMtime::No,
-                                    )
-                                    .await
-                                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                                    options
+                                        .write(resource, Storage::Current, current, WriteMtime::No)
+                                        .await?;
                                 }
                             }
                         }
@@ -661,14 +632,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 }
 
                 // we are clean again!
-                (options.write)(
-                    "clean".to_owned(),
-                    Storage::Meta,
-                    "y".into(),
-                    WriteMtime::No,
-                )
-                .await
-                .map_err(|_| ApplicationError::StoragePermissions)?;
+                options
+                    .write("clean", Storage::Meta, "y", WriteMtime::No)
+                    .await?;
 
                 Ok::<(), ApplicationError>(())
             });
@@ -764,25 +730,15 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         if let Some(resource) = resource {
                                             // write to `.agde/clean` that we aren't clean (we have
                                             // public diffs not applied to `current`)
-                                            (options.write)(
-                                                "clean".to_owned(),
-                                                Storage::Meta,
-                                                "n".into(),
-                                                WriteMtime::No,
-                                            )
-                                            .await
-                                            .map_err(|()| ApplicationError::StoragePermissions)?;
+                                            options
+                                                .write("clean", Storage::Meta, "n", WriteMtime::No)
+                                                .await?;
 
                                             match applier.event().inner() {
                                                 agde::EventKind::Modify(_) => {
-                                                    let resource_data = (options.read)(
-                                                        resource.to_owned(),
-                                                        Storage::Public,
-                                                    )
-                                                    .await
-                                                    .map_err(|()| {
-                                                        ApplicationError::StoragePermissions
-                                                    })?;
+                                                    let resource_data = options
+                                                        .read(resource, Storage::Public)
+                                                        .await?;
 
                                                     if let Some(mut data) = resource_data {
                                                         info!(
@@ -792,42 +748,33 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
                                                         let resource = resource.to_owned();
                                                         data = applier.apply(&data).unwrap();
-                                                        (options.write)(
-                                                            resource,
-                                                            Storage::Public,
-                                                            data,
-                                                            WriteMtime::No,
-                                                        )
-                                                        .await
-                                                        .map_err(|_| {
-                                                            ApplicationError::StoragePermissions
-                                                        })?;
+                                                        options
+                                                            .write(
+                                                                resource,
+                                                                Storage::Public,
+                                                                data,
+                                                                WriteMtime::No,
+                                                            )
+                                                            .await?;
                                                     } else {
                                                         // `TODO`: log check
                                                         warn!("Got Modify event, but resource doesn't exist. Reconnecting might help, but this could be an extortion to attempt to make you disconnect.");
                                                     };
                                                 }
                                                 agde::EventKind::Create(_) => {
-                                                    (options.write)(
-                                                        resource.to_owned(),
-                                                        Storage::Public,
-                                                        Vec::new(),
-                                                        WriteMtime::No,
-                                                    )
-                                                    .await
-                                                    .map_err(|()| {
-                                                        ApplicationError::StoragePermissions
-                                                    })?;
+                                                    options
+                                                        .write(
+                                                            resource,
+                                                            Storage::Public,
+                                                            Vec::new(),
+                                                            WriteMtime::No,
+                                                        )
+                                                        .await?;
                                                 }
                                                 agde::EventKind::Delete(_) => {
-                                                    (options.delete)(
-                                                        resource.to_owned(),
-                                                        Storage::Public,
-                                                    )
-                                                    .await
-                                                    .map_err(|()| {
-                                                        ApplicationError::StoragePermissions
-                                                    })?;
+                                                    options
+                                                        .delete(resource, Storage::Public)
+                                                        .await?;
                                                 }
                                             }
                                         } else {
@@ -1118,13 +1065,14 @@ async fn commit_and_send(
                             None
                         };
 
-                        let mut current = (options.read)(resource.clone(), Storage::Current)
-                                        .await
-                                        .map_err(|_| ApplicationError::StoragePermissions)?.expect("configuration should not return Modified if the Current storage version doesn't exist.");
+                        let mut current = options.read(&resource, Storage::Current).await?.expect(
+                            "configuration should not return Modified \
+                                if the Current storage version doesn't exist.",
+                        );
 
-                        let public = (options.read)(resource.clone(), Storage::Public)
-                            .await
-                            .map_err(|_| ApplicationError::StoragePermissions)?
+                        let public = options
+                            .read(&resource, Storage::Public)
+                            .await?
                             .unwrap_or_default();
 
                         info!("Read {:?} from public", String::from_utf8_lossy(&public));
@@ -1199,41 +1147,30 @@ async fn commit_and_send(
 
             match applier.event().inner() {
                 agde::EventKind::Modify(_ev) => {
-                    let mut resource_data = (options.read)(resource.clone(), Storage::Public)
-                        .await
-                        .map_err(|()| ApplicationError::StoragePermissions)?
-                        // don't expect, just make a new file.
-                        .expect(
-                            "we trust our own data - there must \
-                                            have been a create event before modify",
-                        );
+                    let mut resource_data = options.read(&resource, Storage::Public).await?.expect(
+                        "we trust our own data - there must \
+                            have been a create event before modify",
+                    );
 
                     resource_data = applier.apply(&resource_data).unwrap();
 
-                    (options.write)(
-                        resource,
-                        Storage::Public,
-                        resource_data,
-                        WriteMtime::LookUpCurrent,
-                    )
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                    options
+                        .write(
+                            resource,
+                            Storage::Public,
+                            resource_data,
+                            WriteMtime::LookUpCurrent,
+                        )
+                        .await?;
                 }
                 agde::EventKind::Create(_) => {
-                    (options.write)(
-                        resource,
-                        Storage::Public,
-                        Vec::new(),
-                        WriteMtime::LookUpCurrent,
-                    )
-                    .await
-                    .map_err(|()| ApplicationError::StoragePermissions)?;
+                    options
+                        .write(resource, Storage::Public, "", WriteMtime::LookUpCurrent)
+                        .await?;
                 }
                 agde::EventKind::Delete(_) => {
                     info!("Processing local delete message.");
-                    (options.delete)(resource, Storage::Public)
-                        .await
-                        .map_err(|()| ApplicationError::StoragePermissions)?;
+                    options.delete(resource, Storage::Public).await?;
                 }
             }
         }
@@ -1243,22 +1180,18 @@ async fn commit_and_send(
             let mut changes = changed.lock().await;
             for resource in &*changes {
                 warn!("Resource {resource} changed, from **remote**");
-                let actual = (options.read)(resource.to_owned(), Storage::Public)
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                let actual = options.read(resource, Storage::Public).await?;
                 if let Some(actual) = actual {
-                    (options.write)(
-                        resource.to_owned(),
-                        Storage::Current,
-                        actual,
-                        WriteMtime::LookUpCurrent,
-                    )
-                    .await
-                    .map_err(|_| ApplicationError::StoragePermissions)?;
+                    options
+                        .write(
+                            resource,
+                            Storage::Current,
+                            actual,
+                            WriteMtime::LookUpCurrent,
+                        )
+                        .await?;
                 } else {
-                    (options.delete)(resource.to_owned(), Storage::Current)
-                        .await
-                        .map_err(|_| ApplicationError::StoragePermissions)?;
+                    options.delete(resource, Storage::Current).await?;
                 }
             }
             changes.clear();
@@ -1286,15 +1219,9 @@ async fn commit_and_send(
     };
     futures::future::try_join(apply, send).await?;
     {
-        // `TODO`: don't call this every time we diff!
-        (options.write)(
-            "clean".to_owned(),
-            Storage::Meta,
-            "y".into(),
-            WriteMtime::No,
-        )
-        .await
-        .map_err(|()| ApplicationError::StoragePermissions)?;
+        options
+            .write("clean", Storage::Meta, "y", WriteMtime::No)
+            .await?;
     }
     Ok(())
 }
