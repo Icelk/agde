@@ -160,7 +160,9 @@ impl Metadata {
             match other.get(resource) {
                 Some(current_data) => {
                     if current_data.size() != meta.size()
-                        || (meta.mtime_of_last_event() != current_data.mtime_of_last_event()
+                        || ((meta.mtime_of_last_event() != current_data.mtime_of_last_event()
+                            || meta.mtime_of_last_event() == SystemTime::UNIX_EPOCH
+                            || current_data.mtime_of_last_event() == SystemTime::UNIX_EPOCH)
                             && meta.mtime_in_current().map_or(true, |mtime| {
                                 mtime
                                     != current_data
@@ -180,6 +182,26 @@ impl Metadata {
             }
         }
         changed
+    }
+    /// Apply the changes gathered from [`Self::changes`] to `self`, while fetching data from
+    /// `target`.
+    ///
+    /// This means you can apply the changes between two metadata sets on a third set.
+    pub fn apply_changes(&mut self, changes: &[MetadataChange], target: &Self) {
+        for change in changes {
+            match change {
+                MetadataChange::Modify(res, _) => {
+                    if let Some(meta) = target.get(res) {
+                        self.insert(res.clone(), meta);
+                    } else {
+                        self.remove(res);
+                    }
+                }
+                MetadataChange::Delete(res) => {
+                    self.remove(res);
+                }
+            }
+        }
     }
 }
 

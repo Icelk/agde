@@ -117,9 +117,19 @@ pub enum WriteStorage {
     /// See [`WriteFn`] and [`Options::write`] for more details on the data.
     Public(WriteMtime, SystemTime),
     /// The copy of data the user writes to.
-    Current,
+    ///
+    /// The [`WriteMtime`] signals if we should update the mtime.
+    Current(WriteMtime),
     /// Storage of metadata objects.
     Meta,
+}
+impl WriteStorage {
+    pub fn current() -> Self {
+        Self::Current(WriteMtime::LookUpCurrent)
+    }
+    pub fn current_without_update() -> Self {
+        Self::Current(WriteMtime::No)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMtime {
@@ -132,6 +142,7 @@ pub type ReadFuture = BoxFut<Result<Option<Vec<u8>>, ()>>;
 pub type WriteFuture = BoxFut<Result<(), ()>>;
 pub type DeleteFuture = WriteFuture;
 pub type DiffFuture = BoxFut<Result<Vec<MetadataChange>, ()>>;
+pub type SyncFuture = WriteFuture;
 pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
 /// The [`SystemTime`] is the timestamp of the event that caused this, or (if an event didn't cause
 /// it) [`SystemTime::UNIX_EPOCH`].
@@ -139,6 +150,7 @@ pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
 pub type WriteFn = Box<dyn Fn(String, WriteStorage, Vec<u8>) -> WriteFuture + Send + Sync>;
 pub type DeleteFn = Box<dyn Fn(String, Storage) -> DeleteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
+pub type SyncFn = Box<dyn Fn(Storage) -> SyncFuture + Send + Sync>;
 #[must_use]
 pub struct Options {
     pub read: ReadFn,
@@ -146,6 +158,7 @@ pub struct Options {
     pub delete: DeleteFn,
     /// Returns a list of the resources which might have changed.
     pub rough_resource_diff: DiffFn,
+    pub sync_metadata: SyncFn,
 
     offline_metadata: Arc<Mutex<Metadata>>,
     metadata: Arc<Mutex<Metadata>>,
@@ -181,6 +194,8 @@ impl Options {
         let delete_offline_metadata = Arc::clone(&offline_metadata);
         let diff_metadata = Arc::clone(&metadata);
         let diff_offline_metadata = Arc::clone(&offline_metadata);
+        let sync_metadata = Arc::clone(&metadata);
+        let sync_offline_metadata = Arc::clone(&offline_metadata);
         Ok(Options {
             read: Box::new(|resource, storage| {
                 Box::pin(async move {
@@ -208,7 +223,7 @@ impl Options {
                 Box::pin(async move {
                     let path = match storage {
                         WriteStorage::Public(_, _) => format!(".agde/files/{resource}",),
-                        WriteStorage::Current => format!("./{resource}"),
+                        WriteStorage::Current(_) => format!("./{resource}"),
                         WriteStorage::Meta => format!(".agde/{resource}"),
                     };
 
@@ -243,29 +258,33 @@ impl Options {
                                 ResourceMeta::new_from_event(mtime, event_mtime, data.len() as u64);
                             metadata.insert(resource, meta);
                         }
-                        WriteStorage::Current => {
-                            let file_metadata = tokio::fs::metadata(&path).await.map_err(|_| ())?;
-                            let mtime = file_metadata.modified().map_err(|_| ())?;
-                            {
-                                let mut metadata = offline_metadata.lock().await;
+                        WriteStorage::Current(write_mtime) => match write_mtime {
+                            WriteMtime::No => {}
+                            WriteMtime::LookUpCurrent => {
+                                let file_metadata =
+                                    tokio::fs::metadata(&path).await.map_err(|_| ())?;
+                                let mtime = file_metadata.modified().map_err(|_| ())?;
+                                {
+                                    let mut metadata = offline_metadata.lock().await;
 
-                                metadata.insert(
-                                    resource.clone(),
-                                    ResourceMeta::new(Some(mtime), data.len() as u64),
-                                );
-                            }
-                            {
-                                let mut metadata = metadata.lock().await;
+                                    metadata.insert(
+                                        resource.clone(),
+                                        ResourceMeta::new(Some(mtime), data.len() as u64),
+                                    );
+                                }
+                                {
+                                    let mut metadata = metadata.lock().await;
 
-                                metadata.insert(
-                                    resource,
-                                    ResourceMeta::new(Some(mtime), data.len() as u64),
-                                );
-                                metadata_sync(&*metadata, "metadata")
-                                    .await
-                                    .map_err(|_| ())?;
+                                    metadata.insert(
+                                        resource,
+                                        ResourceMeta::new(Some(mtime), data.len() as u64),
+                                    );
+                                    metadata_sync(&*metadata, "metadata")
+                                        .await
+                                        .map_err(|_| ())?;
+                                }
                             }
-                        }
+                        },
                     }
                     Ok(())
                 }) as WriteFuture
@@ -313,20 +332,11 @@ impl Options {
                 let offline_metadata = Arc::clone(&diff_offline_metadata);
                 Box::pin(async move {
                     debug!("Getting diff");
-                    let mut offline_metadata = offline_metadata.lock().await;
                     let current_metadata = metadata_new(Storage::Current).await.map_err(|_| ())?;
+                    let mut offline_metadata = offline_metadata.lock().await;
                     let changed = offline_metadata.changes(&current_metadata);
                     let mut metadata = metadata.lock().await;
-                    for change in &changed {
-                        match change {
-                            MetadataChange::Modify(res, _) => {
-                                metadata.insert(res.clone(), current_metadata.get(res).unwrap());
-                            }
-                            MetadataChange::Delete(res) => {
-                                metadata.remove(res);
-                            }
-                        }
-                    }
+                    metadata.apply_changes(&changed, &current_metadata);
                     {
                         // `TODO`: Optimize this
                         *offline_metadata = metadata.clone();
@@ -340,6 +350,22 @@ impl Options {
                     debug!("Changed: {:?}", changed);
                     Ok(changed)
                 }) as DiffFuture
+            }),
+            sync_metadata: Box::new(move |storage| {
+                let metadata = match storage {
+                    Storage::Current => Some((Arc::clone(&sync_offline_metadata), "metadata")),
+                    Storage::Public => Some((Arc::clone(&sync_metadata), "metadata-offline")),
+                    Storage::Meta => None,
+                };
+                Box::pin(async move {
+                    if let Some((meta, name)) = metadata {
+                        metadata_sync(&*meta.lock().await, name)
+                            .await
+                            .map_err(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                })
             }),
             metadata,
             offline_metadata,
@@ -401,6 +427,18 @@ impl Options {
             .await
             .map_err(|_| ApplicationError::StoragePermissions)
     }
+    /// Sync the metadata to the disk.
+    ///
+    /// Mappings:
+    /// - [`Storage::Public`] syncs [`Self::metadata`]
+    /// - [`Storage::Current`] syncs [`Self::offline_metadata`]
+    /// - [`Storage::Meta`] returns `Ok(())` without doing anything.
+    pub async fn sync_metadata(&self, storage: Storage) -> Result<(), ApplicationError> {
+        (self.sync_metadata)(storage)
+            .await
+            .map_err(|()| ApplicationError::StoragePermissions)
+    }
+
     pub async fn read_clean(&self) -> Result<Option<Vec<u8>>, ApplicationError> {
         self.read("clean", Storage::Meta).await
     }
@@ -462,7 +500,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                 let actual = options.read(&resource, Storage::Public).await?;
                 if let Some(actual) = actual {
                     options
-                        .write(resource, WriteStorage::Current, actual)
+                        .write(resource, WriteStorage::current(), actual)
                         .await?;
                 }
             }
@@ -634,7 +672,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     };
 
                                     options
-                                        .write(resource, WriteStorage::Current, current)
+                                        .write(resource, WriteStorage::current(), current)
                                         .await?;
                                 }
                             }
@@ -812,8 +850,27 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         Err(agde::fast_forward::Error::UnexpectedPier) => continue,
                                         e => e.unwrap(),
                                     };
-                                let changes =
-                                    { options.metadata().lock().await.changes(ff.metadata()) };
+                                println!("Fast forward changes");
+                                let changes = {
+                                    let mut metadata = options.metadata().lock().await;
+                                    let changes = metadata.changes(ff.metadata());
+                                    // apply the remote changes (as we will be syncing them)
+                                    //
+                                    // this has the benefit of saving the metadata even if our data
+                                    // is the same. If the data is the same, the pier will see that
+                                    // the diff is empty and not send it back. Our public buffer
+                                    // doesn't get modified, and next time we connect, we create a
+                                    // signature again. That's bad. So by adjusting our metadata
+                                    // here, we assue this is the first and only time we want to
+                                    // get this version of the resource.
+                                    //
+                                    // `TODO`: send a touch array back with the sync response
+                                    // instead, with the event_mtimes of the pier.
+                                    // Then, we can remove `sync_metadata`.
+                                    metadata.apply_changes(&changes, ff.metadata());
+                                    changes
+                                };
+                                options.sync_metadata(Storage::Public).await?;
                                 println!("Changes: {changes:?}");
                                 for change in changes {
                                     match change {
@@ -920,7 +977,11 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                             diff.apply_in_place_adaptive_end(&mut data).unwrap();
                                         }
                                         options
-                                            .write(resource, WriteStorage::Current, data)
+                                            .write(
+                                                resource,
+                                                WriteStorage::current_without_update(),
+                                                data,
+                                            )
                                             .await?;
                                         Ok(())
                                     };
@@ -1215,7 +1276,7 @@ async fn commit_and_send(
                 let actual = options.read(resource, Storage::Public).await?;
                 if let Some(actual) = actual {
                     options
-                        .write(resource, WriteStorage::Current, actual)
+                        .write(resource, WriteStorage::current(), actual)
                         .await?;
                 } else {
                     options.delete(resource, Storage::Current).await?;
