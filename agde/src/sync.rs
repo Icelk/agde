@@ -145,11 +145,19 @@ impl<'a> ResponseBuilder<'a> {
         self.signature_iter.next().map(|(k, v)| (&**k, v))
     }
     /// Tell the requester their `resource` needs to apply `diff` to get our data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if you've called this with the same `resource` before.
     pub fn add_diff(&mut self, resource: String, diff: den::Difference) -> &mut Self {
-        self.diff.push((resource, diff));
+        if let Ok(idx) = self.diff.binary_search_by(|item| item.0.cmp(&resource)) {
+            self.diff.insert(idx, (resource, diff));
+        } else {
+            panic!("you cannot add two diffs with the same resource name");
+        }
         self
     }
-    pub(crate) fn finish(self, log: &log::Log) -> Response {
+    pub(crate) fn finish(mut self, log: &log::Log) -> Response {
         let mut delete = Vec::new();
         for resource in self.request.signatures.keys() {
             if self
@@ -167,6 +175,7 @@ impl<'a> ResponseBuilder<'a> {
         );
         let event_log = log.get_max(Some(max)).to_vec();
         let last = event_log.last().map(|ev| ev.message_uuid);
+        self.diff.retain(|diff| !diff.1.is_empty());
         Response {
             pier: self.pier,
             log: event_log,

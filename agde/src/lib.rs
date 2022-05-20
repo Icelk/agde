@@ -972,7 +972,11 @@ impl Manager {
                 let idx = latest_event
                     .and_then(|latest_event| self.event_log.cutoff_from_uuid(latest_event))
                     .unwrap_or(0);
-                let timestamp = self.event_log.list[idx].event.timestamp();
+                let timestamp = self
+                    .event_log
+                    .list
+                    .get(idx)
+                    .map_or(Duration::ZERO, |ev| ev.event.timestamp());
                 self.event_log.required_event_timestamp = Some(timestamp);
             }
         }
@@ -980,7 +984,10 @@ impl Manager {
         let cutoff = match response.revert() {
             sync::RevertTo::Latest => self.event_log.list.len(),
             sync::RevertTo::Origin => 0,
-            sync::RevertTo::To(uuid) => self.event_log.cutoff_from_uuid(uuid).unwrap_or(0),
+            sync::RevertTo::To(uuid) => self
+                .event_log
+                .cutoff_from_uuid(uuid)
+                .map_or(0, |idx| (idx + 1).min(self.event_log.list.len())),
         };
         let slice = &self.event_log.list[cutoff..];
         println!("apply sync reply cutoff: {cutoff}, slice: {slice:#?}");

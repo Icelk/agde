@@ -801,11 +801,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         Err(agde::fast_forward::Error::UnexpectedPier) => continue,
                                         e => e.unwrap(),
                                     };
-                                let mut changed = changed.lock().await;
                                 let changes =
                                     { options.metadata().lock().await.changes(ff.metadata()) };
+                                println!("Changes: {changes:?}");
                                 for change in changes {
-                                    changed.insert(change.resource().to_owned());
                                     match change {
                                         MetadataChange::Modify(res, _created) => {
                                             let data = options
@@ -825,7 +824,6 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         }
                                     }
                                 }
-                                drop(changed);
 
                                 let sync_request = sync_request.finish();
                                 let msg = manager.process_sync(sync_request);
@@ -850,6 +848,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 send(&write, msg).await?;
                             }
                             agde::MessageKind::SyncReply(sync) => {
+                                println!("Sync reply: {:?}", sync);
                                 let mut changed = changed.lock().await;
 
                                 let mut rewinder = manager.apply_sync_reply(sync).unwrap();
@@ -871,6 +870,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                             .read(resource, Storage::Public)
                                             .await?
                                             .unwrap_or_default();
+                                        println!("Read {:?}", std::str::from_utf8(&data));
 
                                         if diff.apply_overlaps(data.len()) {
                                             let mut other = Vec::with_capacity(data.len() + 64);
@@ -879,7 +879,9 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                         } else {
                                             diff.apply_in_place(&mut data).unwrap();
                                         }
+                                        println!("applied {:?}", std::str::from_utf8(&data));
                                         data = rewinder.rewind(resource, data).unwrap();
+                                        println!("rewound {:?}", std::str::from_utf8(&data));
                                         options
                                             .write(resource, Storage::Public, data, WriteMtime::No)
                                             .await?;
@@ -1030,16 +1032,16 @@ async fn commit_and_send(
         }
     }
 
-    let diff = options.diff().await?;
+    let changes = options.diff().await?;
 
-    info!("Got diffs {diff:?}");
+    info!("Got diffs {changes:?}");
 
-    let mut messages = Vec::with_capacity(diff.len());
+    let mut messages = Vec::with_capacity(changes.len());
 
     {
         let mut manager = manager.lock().await;
 
-        for diff in diff {
+        for diff in changes {
             let modern =
                 manager.modern_resource_name(diff.resource(), manager.last_commit_or_epoch());
             // It's not worth sending updates when the resource has been deleted.
@@ -1101,14 +1103,22 @@ async fn commit_and_send(
                         );
 
                         let event = agde::event::Modify::new(resource, &current, &public);
-                        let event = agde::Event::new(agde::event::Kind::Modify(event), &manager);
+                        if !event.diff().is_empty() {
+                            let event =
+                                agde::Event::new(agde::event::Kind::Modify(event), &manager);
 
-                        println!("Diff: {:#?}", event.diff().unwrap());
+                            println!("Diff: {:#?}", event.diff().unwrap());
 
-                        if let Some(ev) = create_ev {
-                            messages.push(manager.process_event(ev).unwrap());
+                            if let Some(ev) = create_ev {
+                                messages.push(manager.process_event(ev).unwrap());
+                            }
+                            event
+                        } else {
+                            if let Some(ev) = create_ev {
+                                messages.push(manager.process_event(ev).unwrap());
+                            }
+                            continue;
                         }
-                        event
                     }
                 };
 
