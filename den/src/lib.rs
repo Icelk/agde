@@ -652,8 +652,10 @@ impl SignatureBuilder {
         self.block_size - self.len
     }
     fn finish_hash(&mut self) {
-        let result = self.current.finish_reset();
-        self.blocks.push(result);
+        if self.len != 0 {
+            let result = self.current.finish_reset();
+            self.blocks.push(result);
+        }
         self.len = 0;
     }
     /// Appends data to the hasher.
