@@ -433,9 +433,12 @@ impl Options {
     }
     /// Sync the metadata to the disk.
     ///
+    /// Please take care and not keep the locks of [`Self::metadata`] or [`Self::metadata_offline`]
+    /// when calling this.
+    ///
     /// Mappings:
     /// - [`Storage::Public`] syncs [`Self::metadata`]
-    /// - [`Storage::Current`] syncs [`Self::offline_metadata`]
+    /// - [`Storage::Current`] syncs [`Self::metadata_offline`]
     /// - [`Storage::Meta`] returns `Ok(())` without doing anything.
     pub async fn sync_metadata(&self, storage: Storage) -> Result<(), ApplicationError> {
         (self.sync_metadata)(storage)
@@ -497,7 +500,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
 
             for change in changes {
                 let resource = match change {
-                    MetadataChange::Modify(resource, _) | MetadataChange::Delete(resource) => {
+                    MetadataChange::Modify(resource, _, _) | MetadataChange::Delete(resource) => {
                         resource
                     }
                 };
@@ -651,7 +654,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                         if modern.is_some() {
                             match diff {
                                 MetadataChange::Delete(_) => {}
-                                MetadataChange::Modify(resource, created) => {
+                                MetadataChange::Modify(resource, created, _) => {
                                     let mut current =
                                         options.read(&resource, Storage::Current).await?.expect(
                                             "configuration should not return Modified \
@@ -709,7 +712,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
     }
 
     let accept_handle = {
-        let manager = Arc::clone(&manager);
+        let mgr = Arc::clone(&manager);
         let write = Arc::clone(&write);
         let options = Arc::clone(&options);
         let changed = Arc::clone(&changed);
@@ -742,7 +745,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             continue;
                         };
 
-                        let mut manager = manager.lock().await;
+                        let mut manager = mgr.lock().await;
                         match message.recipient() {
                             agde::Recipient::All => {}
                             agde::Recipient::Selected(recipient) => {
@@ -881,6 +884,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     // `TODO`: send a touch array back with the sync response
                                     // instead, with the event_mtimes of the pier.
                                     // Then, we can remove `sync_metadata`.
+                                    println!("Metadata pre applied: {metadata:?}");
                                     metadata.apply_changes(&changes, ff.metadata());
                                     println!("Metadata after applied: {metadata:?}");
                                     println!("ff: {ff:?}");
@@ -890,7 +894,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 println!("Changes: {changes:?}");
                                 for change in changes {
                                     match change {
-                                        MetadataChange::Modify(res, _created) => {
+                                        MetadataChange::Modify(res, _created, _) => {
                                             let data = options
                                                 .read(&res, Storage::Public)
                                                 .await?
@@ -934,21 +938,21 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             }
                             agde::MessageKind::SyncReply(sync) => {
                                 println!("Sync reply: {:?}", sync);
-                                let mut changed = changed.lock().await;
+                                let mut changes = changed.lock().await;
 
                                 let mut rewinder = manager.apply_sync_reply(sync).unwrap();
 
                                 for resource in sync.delete() {
                                     let resource = resource.as_ref();
                                     {
-                                        changed.insert(resource.to_owned());
+                                        changes.insert(resource.to_owned());
                                     }
                                     options.delete(resource, Storage::Public).await?;
                                 }
                                 for (resource, diff) in sync.diff() {
                                     let resource = resource.as_ref();
                                     {
-                                        changed.insert(resource.to_owned());
+                                        changes.insert(resource.to_owned());
                                     }
                                     let public = async {
                                         let mut data = options
@@ -1145,7 +1149,7 @@ async fn commit_and_send(
     {
         let mut manager = manager.lock().await;
 
-        for diff in changes {
+        for diff in &changes {
             let modern =
                 manager.modern_resource_name(diff.resource(), manager.last_commit_or_epoch());
             // It's not worth sending updates when the resource has been deleted.
@@ -1153,11 +1157,11 @@ async fn commit_and_send(
                 let event = match diff {
                     // `TODO`: Give successor
                     MetadataChange::Delete(res) => agde::Event::new(
-                        agde::event::Kind::Delete(agde::event::Delete::new(res, None)),
+                        agde::event::Kind::Delete(agde::event::Delete::new(res.to_owned(), None)),
                         &*manager,
                     ),
-                    MetadataChange::Modify(resource, created) => {
-                        let create_ev = if created {
+                    MetadataChange::Modify(resource, created, _) => {
+                        let create_ev = if *created {
                             let event = agde::Event::new(
                                 agde::event::Kind::Create(agde::event::Create::new(
                                     resource.clone(),
@@ -1171,13 +1175,13 @@ async fn commit_and_send(
                             None
                         };
 
-                        let mut current = options.read(&resource, Storage::Current).await?.expect(
+                        let mut current = options.read(resource, Storage::Current).await?.expect(
                             "configuration should not return Modified \
                                 if the Current storage version doesn't exist.",
                         );
 
                         let public = options
-                            .read(&resource, Storage::Public)
+                            .read(resource, Storage::Public)
                             .await?
                             .unwrap_or_default();
 
@@ -1189,7 +1193,7 @@ async fn commit_and_send(
                         );
 
                         current = if let Some(current) =
-                            rewind_current(&mut manager, created, &resource, &public, &current)
+                            rewind_current(&mut manager, *created, resource, &public, &current)
                                 .await
                         {
                             current
@@ -1206,8 +1210,11 @@ async fn commit_and_send(
                             std::str::from_utf8(&public)
                         );
 
-                        let event =
-                            agde::event::Modify::new_with_verification(resource, &current, &public);
+                        let event = agde::event::Modify::new_with_verification(
+                            resource.to_owned(),
+                            &current,
+                            &public,
+                        );
                         if !event.diff().is_empty() {
                             let event =
                                 agde::Event::new(agde::event::Kind::Modify(event), &manager);
@@ -1234,6 +1241,25 @@ async fn commit_and_send(
         }
 
         manager.update_last_commit();
+    }
+
+    {
+        {
+            // this needed to be used as sometimes when a file has changed mtime but not been
+            // modified, the diff doesn't get sent and we don't write to the file again.
+            // This is here to make sure the metadata is updated with the latest mtimes.
+            let mut offline_metadata = options.metadata_offline().lock().await;
+            let mut metadata = options.metadata().lock().await;
+            offline_metadata.apply_current_mtime_changes(&changes);
+            // we also update metadata, as `offline_metadata` is set to `metadata` after each
+            // commit.
+            metadata.apply_current_mtime_changes(&changes);
+        }
+        futures::future::try_join(
+            options.sync_metadata(Storage::Public),
+            options.sync_metadata(Storage::Current),
+        )
+        .await?;
     }
 
     // Execute `apply` and `send` at the same time!

@@ -172,15 +172,23 @@ impl Metadata {
                                         .expect("we just created this from local metadata")
                             }))
                     {
-                        changed.push(MetadataChange::Modify(resource.to_owned(), false));
+                        changed.push(MetadataChange::Modify(
+                            resource.to_owned(),
+                            false,
+                            other_data.mtime_in_current(),
+                        ));
                     }
                 }
                 None => changed.push(MetadataChange::Delete(resource.to_owned())),
             }
         }
-        for resource in other.iter().map(|(k, _v)| k) {
+        for (resource, meta) in other.iter() {
             if !self.contains(resource) {
-                changed.push(MetadataChange::Modify(resource.to_owned(), true));
+                changed.push(MetadataChange::Modify(
+                    resource.to_owned(),
+                    true,
+                    meta.mtime_in_current(),
+                ));
             }
         }
         changed
@@ -189,12 +197,42 @@ impl Metadata {
     /// `target`.
     ///
     /// This means you can apply the changes between two metadata sets on a third set.
+    ///
+    /// Also see [`Self::apply_current_mtime_changes`]
     pub fn apply_changes(&mut self, changes: &[MetadataChange], target: &Self) {
         for change in changes {
             match change {
-                MetadataChange::Modify(res, _) => {
+                MetadataChange::Modify(res, _, _) => {
                     if let Some(meta) = target.get(res) {
-                        self.insert(res.clone(), meta);
+                        if let Some(mut old) = self.get(res) {
+                            // don't reset mtime_in_current.
+                            old.size = meta.size;
+                            old.event_mtime = meta.event_mtime;
+                            self.insert(res.clone(), old);
+                        } else {
+                            self.insert(res.clone(), meta);
+                        }
+                    } else {
+                        self.remove(res);
+                    }
+                }
+                MetadataChange::Delete(res) => {
+                    self.remove(res);
+                }
+            }
+        }
+    }
+    /// Same as [`Self::apply_changes`] but also
+    /// apply the [`ResourceMeta::mtime_in_current`] to get `self` to `target`.
+    ///
+    /// This is here to update the mtime of resources which did not get their mtime updated due to
+    /// the diff being [empty](crate::den::Difference::is_empty).
+    pub fn apply_current_mtime_changes(&mut self, changes: &[MetadataChange]) {
+        for change in changes {
+            match change {
+                MetadataChange::Modify(res, _, mtime) => {
+                    if let Some(meta) = self.map.get_mut(res) {
+                        meta.mtime_in_current = mtime.map(utils::systime_to_dur);
                     } else {
                         self.remove(res);
                     }
@@ -211,7 +249,13 @@ impl Metadata {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum MetadataChange {
     /// True if the resource was just created.
-    Modify(String, bool),
+    ///
+    /// The [`SystemTime`] is the modify time of the target of the difference.
+    /// It represents the [`ResourceMeta::mtime_in_current`].
+    ///
+    /// The [`SystemTime`] is here to update the mtime of resources which did not get their mtime updated due to
+    /// the diff being [empty](crate::den::Difference::is_empty).
+    Modify(String, bool, Option<SystemTime>),
     /// The resource was destroyed.
     Delete(String),
 }
@@ -220,7 +264,7 @@ impl MetadataChange {
     #[must_use]
     pub fn resource(&self) -> &str {
         match self {
-            Self::Modify(r, _) | Self::Delete(r) => r,
+            Self::Modify(r, _, _) | Self::Delete(r) => r,
         }
     }
 }
