@@ -37,6 +37,9 @@ impl ExtendVec for ZeroFiller {
         let slice = &mut vec[position..position + self.len];
         slice.fill(0);
     }
+    fn equals(&self, bytes: &[u8]) -> bool {
+        bytes.iter().copied().all(|b| b == b'\0')
+    }
     #[inline]
     fn len(&self) -> usize {
         self.len

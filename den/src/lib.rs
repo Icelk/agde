@@ -581,14 +581,19 @@ pub trait ExtendVec: Debug {
     /// Copy the bytes of this struct to `position` in `vec`, overriding any data there.
     /// This must replace [`ExtendVec::len`] bytes.
     fn replace(&self, vec: &mut Vec<u8>, position: usize);
+    /// If our data equals `bytes`.
+    #[must_use]
+    fn equals(&self, bytes: &[u8]) -> bool;
     /// The length of the data of this struct.
     fn len(&self) -> usize;
     /// If no data is available.
+    #[inline]
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 impl<T: AsRef<[u8]> + Debug> ExtendVec for T {
+    #[inline]
     fn extend(&self, vec: &mut Vec<u8>) {
         let slice = self.as_ref();
         // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
@@ -602,6 +607,7 @@ impl<T: AsRef<[u8]> + Debug> ExtendVec for T {
         unsafe { vec.set_len(vec.len() + slice.len()) };
     }
     #[allow(clippy::uninit_vec)] // we know what we're doing
+    #[inline]
     fn replace(&self, vec: &mut Vec<u8>, position: usize) {
         let slice = self.as_ref();
         let new_len = (position + slice.len()).max(vec.len());
@@ -613,6 +619,12 @@ impl<T: AsRef<[u8]> + Debug> ExtendVec for T {
         destination.copy_from_slice(slice);
     }
 
+    #[inline]
+    fn equals(&self, bytes: &[u8]) -> bool {
+        self.as_ref() == bytes
+    }
+
+    #[inline]
     fn len(&self) -> usize {
         self.as_ref().len()
     }
@@ -1883,6 +1895,46 @@ impl<S: ExtendVec> Difference<S> {
         } else {
             false
         }
+    }
+
+    /// Checks `self` if it gets `base` to `target`, without any allocations.
+    ///
+    /// Returns `true` if that's the case.
+    #[must_use]
+    pub fn verify(&self, base: &[u8], target: &[u8]) -> bool {
+        let block_size = self.block_size();
+
+        let mut cursor = 0;
+        for segment in self.segments() {
+            match segment {
+                Segment::Ref(ref_segment) => {
+                    let start = ref_segment.start;
+                    let seg_end = ref_segment.end(block_size);
+                    let end = seg_end.min(base.len());
+
+                    let data = if let Some(data) = base.get(start..end) {
+                        data
+                    } else {
+                        return false;
+                    };
+                    if target.get(cursor..cursor + data.len()) != Some(data) {
+                        return false;
+                    }
+                    cursor += data.len();
+                }
+                Segment::Unknown(unknown_segment) => {
+                    let data = &unknown_segment.source;
+                    if target
+                        .get(cursor..cursor + data.len())
+                        .map_or(true, |target_data| !data.equals(target_data))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
     }
 }
 

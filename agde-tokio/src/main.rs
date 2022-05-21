@@ -168,6 +168,9 @@ pub struct Options {
     pub sync_interval: Duration,
 
     pub force_pull: bool,
+    /// Verifies outgoing Modify events to be correct.
+    /// A bit of a performance hit, but generally recommended.
+    pub verify_diffs: bool,
 }
 // `TODO`: Add option to write new resource changes to `Current` if that resource hasn't been
 // changed in current.
@@ -372,6 +375,7 @@ impl Options {
             startup_timeout: Duration::from_secs(7),
             sync_interval: Duration::from_secs(5),
             force_pull,
+            verify_diffs: true,
         })
     }
     pub fn arc(self) -> Arc<Self> {
@@ -1182,7 +1186,7 @@ async fn commit_and_send(
                             std::str::from_utf8(&public)
                         );
 
-                        let event = agde::event::Modify::new(resource, &current, &public);
+                        let event = agde::event::Modify::new_with_verification(resource, &current, &public);
                         if !event.diff().is_empty() {
                             let event =
                                 agde::Event::new(agde::event::Kind::Modify(event), &manager);

@@ -39,6 +39,28 @@ impl Modify {
 
         Self { resource, diff }
     }
+    /// Get the difference needed to get from `base` to `target`, as a modify event.
+    ///
+    /// This also verifies that the [`Modify::diff`] gives `target`.
+    /// Using this over [`Self::new`] is only recommended when you have data that
+    /// MUST be transmitted correctly.
+    ///
+    /// Most errors will however resolve once the client reconnects to the network or
+    /// if a server, performs a hash check.
+    ///
+    /// This does not trigger an allocation.
+    ///
+    /// If the verification failed, we send the whole resource.
+    pub fn new_with_verification(resource: String, target: &[u8], base: &[u8]) -> Self {
+        let mut difference = diff(base, target);
+
+        if !difference.verify(base, target) {
+            difference = diff(b"", target);
+            difference.set_original_data_len(base.len());
+        }
+
+        Self { resource, diff: difference }
+    }
 }
 impl<S: ExtendVec + 'static> Modify<S> {
     /// Get a reference to the sections of data this event modifies.
