@@ -153,19 +153,21 @@ impl Metadata {
     }
 
     /// Calculate the changes to get the metadata from `self` to `other`.
+    ///
+    /// `ignore_mtime_of_last_event` is used when diffing locally, as we don't care about the
+    /// unrelated `mtime_of_last_event` in the current storage.
     #[must_use]
-    pub fn changes(&self, other: &Self) -> Vec<MetadataChange> {
+    pub fn changes(&self, other: &Self, ignore_mtime_of_last_event: bool) -> Vec<MetadataChange> {
         let mut changed = Vec::new();
         for (resource, meta) in self.iter() {
             match other.get(resource) {
-                Some(current_data) => {
-                    if current_data.size() != meta.size()
-                        || ((meta.mtime_of_last_event() != current_data.mtime_of_last_event()
-                            || meta.mtime_of_last_event() == SystemTime::UNIX_EPOCH
-                            || current_data.mtime_of_last_event() == SystemTime::UNIX_EPOCH)
+                Some(other_data) => {
+                    if other_data.size() != meta.size()
+                        || ((meta.mtime_of_last_event() != other_data.mtime_of_last_event()
+                            || ignore_mtime_of_last_event)
                             && meta.mtime_in_current().map_or(true, |mtime| {
                                 mtime
-                                    != current_data
+                                    != other_data
                                         .mtime_in_current()
                                         .expect("we just created this from local metadata")
                             }))

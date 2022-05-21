@@ -337,7 +337,7 @@ impl Options {
                     debug!("Getting diff");
                     let current_metadata = metadata_new(Storage::Current).await.map_err(|_| ())?;
                     let mut offline_metadata = offline_metadata.lock().await;
-                    let changed = offline_metadata.changes(&current_metadata);
+                    let changed = offline_metadata.changes(&current_metadata, true);
                     let mut metadata = metadata.lock().await;
                     metadata.apply_changes(&changed, &current_metadata);
                     {
@@ -861,7 +861,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                 println!("Fast forward changes");
                                 let changes = {
                                     let mut metadata = options.metadata().lock().await;
-                                    let changes = metadata.changes(ff.metadata());
+                                    let changes = metadata.changes(ff.metadata(), false);
                                     // apply the remote changes (as we will be syncing them)
                                     //
                                     // this has the benefit of saving the metadata even if our data
