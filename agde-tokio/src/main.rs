@@ -617,23 +617,28 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
     {
         let manager = Arc::clone(&manager);
         let options = Arc::clone(&options);
+        let write = Arc::clone(&write);
         let handler = ctrlc::set_handler(move || {
             info!("Caught ctrlc");
             let manager = Arc::clone(&manager);
             let options = Arc::clone(&options);
+            let write = Arc::clone(&write);
+
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .max_blocking_threads(1)
                 .build()
                 .expect("failed to start tokio when handling ctrlc");
             let returned = runtime.block_on(async move {
+                let mut manager = manager.lock().await;
+
+                let _ = send(&write, manager.process_disconnect()).await;
+
                 let clean = options.read_clean().await?;
                 if clean.as_deref() == Some(b"y") {
                     info!("State clean. Exiting.");
                     return Ok(());
                 }
                 error!("State not clean. Trying to apply diffs to current buffer.");
-
-                let mut manager = manager.lock().await;
 
                 let diff = options.diff().await?;
 
@@ -695,6 +700,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
             }
 
             info!("Successfully cleaned up.");
+
             std::process::exit(0);
         });
         if handler.is_err() {
@@ -876,6 +882,8 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     // instead, with the event_mtimes of the pier.
                                     // Then, we can remove `sync_metadata`.
                                     metadata.apply_changes(&changes, ff.metadata());
+                                    println!("Metadata after applied: {metadata:?}");
+                                    println!("ff: {ff:?}");
                                     changes
                                 };
                                 options.sync_metadata(Storage::Public).await?;
@@ -1007,6 +1015,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                             // the appropriate function to initiate a new one, ignoring all the tried.
                             // If we get no result, give up.
                             agde::MessageKind::Cancelled(_) => todo!(),
+                            agde::MessageKind::Disconnect => {
+                                info!("Pier {sender} disconnected.");
+                                manager.apply_disconnect(sender);
+                            }
                         }
                     }
                     tungstenite::Message::Close(_) => {

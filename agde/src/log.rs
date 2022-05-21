@@ -608,6 +608,11 @@ impl UuidReplies {
         self.conversations
             .retain(|_, conversation| conversation.last_modified > threshold);
     }
+    pub(crate) fn remove_pier(&mut self, pier: Uuid) {
+        for conversation in self.conversations.values_mut() {
+            conversation.messages.remove(&pier);
+        }
+    }
 }
 impl Default for UuidReplies {
     fn default() -> Self {

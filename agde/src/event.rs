@@ -59,7 +59,10 @@ impl Modify {
             difference.set_original_data_len(base.len());
         }
 
-        Self { resource, diff: difference }
+        Self {
+            resource,
+            diff: difference,
+        }
     }
 }
 impl<S: ExtendVec + 'static> Modify<S> {

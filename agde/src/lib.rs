@@ -282,6 +282,8 @@ pub enum MessageKind {
     ///
     /// If a pier requests a check from all and we've reached our limit, don't send this.
     Cancelled(Uuid),
+    /// The sender is disconnecting.
+    Disconnect,
 }
 /// A message to be communicated between clients.
 ///
@@ -624,6 +626,10 @@ impl Manager {
             public_metadata,
             self.event_log.list.last().map(|ev| ev.message_uuid),
         )))
+    }
+    /// Create a disconnect message.
+    pub fn process_disconnect(&mut self) -> Message {
+        self.process(MessageKind::Disconnect)
     }
 
     /// Handles an incoming [`MessageKind::Hello`].
@@ -1030,6 +1036,14 @@ impl Manager {
                 .current_event_uuid
                 .map_or(sync::RevertTo::Origin, sync::RevertTo::To),
         ))
+    }
+    /// Handle a disconnect message.
+    ///
+    /// You should make sure nobody can forge this message, as that could lead to blackmailing of
+    /// piers.
+    pub fn apply_disconnect(&mut self, sender: Uuid) {
+        self.piers.remove(&sender);
+        self.event_uuid_conversation_piers.remove_pier(sender);
     }
 }
 impl Manager {
