@@ -1003,6 +1003,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     };
                                     futures::future::try_join(public, current).await?;
                                 }
+
+                                drop(manager);
+                                drop(changes);
+                                commit_and_send(&mgr, &options, &write, &changed).await?;
                             }
                             agde::MessageKind::HashCheck(_) => todo!(),
                             agde::MessageKind::HashCheckReply(_) => todo!(),
