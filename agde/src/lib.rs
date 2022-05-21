@@ -651,6 +651,9 @@ impl Manager {
     /// Applies `event` to this manager. You get back a [`log::EventApplier`] on which you should
     /// handle the events.
     ///
+    /// Please appropriately sanitize the `event` before calling this, as the event might
+    /// try to modify unrelated files (if that's what "resources" are implemented as).
+    ///
     /// # Errors
     ///
     /// Fails if the `event` is more than 10s from the future.

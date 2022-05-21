@@ -310,7 +310,3 @@ ok",
         std::str::from_utf8(new).unwrap(),
     );
 }
-
-// Test when the underlying data has changed without events; then this library is called again.
-// A special call to the library, which will request all the files, mtime & size to see which
-// have changed.

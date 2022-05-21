@@ -774,6 +774,10 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                     changed.lock().await.insert(event.resource().to_owned());
                                 }
 
+                                if !sanitize(event) {
+                                    warn!("Received malicious event: {event:?}");
+                                    continue;
+                                }
                                 match manager.apply_event(event, message_uuid) {
                                     Ok(mut applier) => {
                                         let resource = applier.resource();
@@ -1186,7 +1190,8 @@ async fn commit_and_send(
                             std::str::from_utf8(&public)
                         );
 
-                        let event = agde::event::Modify::new_with_verification(resource, &current, &public);
+                        let event =
+                            agde::event::Modify::new_with_verification(resource, &current, &public);
                         if !event.diff().is_empty() {
                             let event =
                                 agde::Event::new(agde::event::Kind::Modify(event), &manager);
@@ -1408,4 +1413,11 @@ async fn send(stream: &Mutex<WriteHalf>, message: agde::Message) -> Result<(), A
         .send(message.to_bin().into())
         .await
         .map_err(|_| ApplicationError::UnexpectedServerClose)
+}
+/// Sanitizes `ev`.
+/// Returns `true` if allowed.
+pub fn sanitize<S: agde::den::ExtendVec>(ev: &agde::Event<S>) -> bool {
+    let resource = ev.resource();
+    let path = Path::new(resource);
+    path.is_relative() && !resource.contains("../")
 }
