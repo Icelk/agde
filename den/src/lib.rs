@@ -84,7 +84,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::hash::{BuildHasher, Hasher};
 use std::ops::Range;
-use twox_hash::xxh3::HasherExt;
+use xxhash_rust::xxh3::Xxh3;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum LargeHash<K, V> {
@@ -205,7 +205,6 @@ pub enum HashAlgorithm {
     None4,
     None8,
     None16,
-    Fnv,
     XXH3_64,
     XXH3_128,
     CyclicPoly32,
@@ -219,9 +218,8 @@ impl HashAlgorithm {
             Self::None4 => HashBuilder::None4(StackSlice::default()),
             Self::None8 => HashBuilder::None8(StackSlice::default()),
             Self::None16 => HashBuilder::None16(StackSlice::default()),
-            Self::Fnv => HashBuilder::Fnv(fnv::FnvHasher::default()),
-            Self::XXH3_64 => HashBuilder::XXH3_64(twox_hash::Xxh3Hash64::default()),
-            Self::XXH3_128 => HashBuilder::XXH3_128(twox_hash::Xxh3Hash128::default()),
+            Self::XXH3_64 => HashBuilder::XXH3_64(Xxh3::default()),
+            Self::XXH3_128 => HashBuilder::XXH3_128(Xxh3::default()),
             Self::CyclicPoly32 => HashBuilder::CyclicPoly32(CyclicPoly32::new(block_size)),
             Self::CyclicPoly64 => HashBuilder::CyclicPoly64(CyclicPoly64::new(block_size)),
             Self::Adler32 => HashBuilder::Adler32(Adler32::new(block_size)),
@@ -394,9 +392,8 @@ enum HashBuilder {
     None4(StackSlice<4>),
     None8(StackSlice<8>),
     None16(StackSlice<16>),
-    Fnv(fnv::FnvHasher),
-    XXH3_64(twox_hash::Xxh3Hash64),
-    XXH3_128(twox_hash::Xxh3Hash128),
+    XXH3_64(Xxh3),
+    XXH3_128(Xxh3),
     CyclicPoly32(CyclicPoly32),
     CyclicPoly64(CyclicPoly64),
     Adler32(Adler32),
@@ -420,19 +417,14 @@ impl HashBuilder {
                 *h = StackSlice::default();
                 r
             }
-            Self::Fnv(h) => {
-                let r = HashResult::Fnv(h.finish().to_le_bytes());
-                *h = fnv::FnvHasher::default();
-                r
-            }
             Self::XXH3_64(h) => {
-                let r = HashResult::XXH3_64(h.finish().to_le_bytes());
-                *h = twox_hash::Xxh3Hash64::default();
+                let r = HashResult::XXH3_64(h.digest().to_le_bytes());
+                h.reset();
                 r
             }
             Self::XXH3_128(h) => {
-                let r = HashResult::XXH3_128(h.finish_ext().to_le_bytes());
-                *h = twox_hash::Xxh3Hash128::default();
+                let r = HashResult::XXH3_128(h.digest128().to_le_bytes());
+                h.reset();
                 r
             }
             Self::CyclicPoly32(h) => HashResult::CyclicPoly32(h.finish_reset().to_le_bytes()),
@@ -446,9 +438,7 @@ impl HashBuilder {
             Self::None4(h) => h.write(data),
             Self::None8(h) => h.write(data),
             Self::None16(h) => h.write(data),
-            Self::Fnv(h) => h.write(data),
-            Self::XXH3_64(h) => h.write(data),
-            Self::XXH3_128(h) => h.write(data),
+            Self::XXH3_64(h) | Self::XXH3_128(h) => h.update(data),
             Self::CyclicPoly32(h) => h.write(data, position),
             Self::CyclicPoly64(h) => h.write(data, position),
             Self::Adler32(h) => h.write(data, position),

@@ -899,10 +899,7 @@ async fn run(url: &str, mut manager: Manager, options: Arc<Options>) -> Result<(
                                                 .read(&res, Storage::Public)
                                                 .await?
                                                 .unwrap_or_default();
-                                            let mut sig = agde::den::Signature::with_algorithm(
-                                                agde::den::HashAlgorithm::XXH3_64,
-                                                128,
-                                            );
+                                            let mut sig = agde::den::Signature::new(128);
                                             sig.write(&data);
                                             let sig = sig.finish();
                                             sync_request.insert(res, sig);
