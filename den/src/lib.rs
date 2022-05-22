@@ -310,7 +310,7 @@ impl RollingHasher for Box<cyclic_poly_23::CyclicPoly64> {
 }
 
 /// A generic rolling hash implementation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RollingHash<T: RollingHasher> {
     inner: T,
     data: VecDeque<u8>,
@@ -388,6 +388,7 @@ pub type CyclicPoly64 = RollingHash<Box<cyclic_poly_23::CyclicPoly64>>;
 /// Implements the trait [`RollingHasher`].
 pub type Adler32 = RollingHash<adler32::RollingAdler32>;
 
+#[derive(Clone)]
 enum HashBuilder {
     None4(StackSlice<4>),
     None8(StackSlice<8>),
@@ -489,7 +490,7 @@ impl Debug for HashResult {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StackSlice<const SIZE: usize> {
     data: [u8; SIZE],
     len: u8,
