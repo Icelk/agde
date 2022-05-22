@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::convert::identity;
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::io;
@@ -396,7 +397,7 @@ pub async fn run(
                     }
                     tungstenite::Message::Binary(data) => {
                         let message = agde::Message::from_bin(&data);
-                        let mut message = if let Ok(m) = message {
+                        let message = if let Ok(m) = message {
                             m
                         } else {
                             warn!(
@@ -406,7 +407,7 @@ pub async fn run(
                             continue;
                         };
 
-                        handle_message(&mut message, &mgr, &options, &write, &changed).await?;
+                        handle_message(message, &mgr, &options, &write, &changed).await?;
                     }
                     tungstenite::Message::Close(_) => {
                         return Err(ApplicationError::UnexpectedServerClose);
@@ -469,7 +470,7 @@ pub async fn run(
 }
 
 async fn handle_message(
-    message: &mut agde::Message,
+    message: agde::Message,
     mgr: &Mutex<Manager>,
     options: &Options,
     write: &Mutex<WriteHalf>,
@@ -486,10 +487,10 @@ async fn handle_message(
     }
     let sender = message.sender();
     let message_uuid = message.uuid();
-    match message.inner_mut() {
+    match message.into_inner() {
         agde::MessageKind::Hello(hello) => {
             info!("Pier {} joined the network.", hello.uuid());
-            let msg = manager.apply_hello(hello);
+            let msg = manager.apply_hello(&hello);
             let mut w = write.lock().await;
             if w.send(msg.to_bin().into()).await.is_err() {
                 return Err(ApplicationError::StreamBroken);
@@ -497,7 +498,7 @@ async fn handle_message(
         }
         agde::MessageKind::Welcome { info, recipient } => {
             if recipient.map_or(true, |intended| intended == manager.uuid()) {
-                manager.apply_welcome(info.clone());
+                manager.apply_welcome(info);
             }
         }
         // ignore initial messages once connected.
@@ -512,11 +513,11 @@ async fn handle_message(
                 changed.lock().await.insert(event.resource().to_owned());
             }
 
-            if !sanitize(event) {
+            if !sanitize(&event) {
                 warn!("Received malicious event: {event:?}");
                 return Ok(());
             }
-            match manager.apply_event(event, message_uuid) {
+            match manager.apply_event(&event, message_uuid) {
                 Ok(mut applier) => {
                     let resource = applier.resource();
 
@@ -529,11 +530,12 @@ async fn handle_message(
                             agde::EventKind::Modify(_) => {
                                 let resource_data = options.read(resource, Storage::Public).await?;
 
-                                if let Some(mut data) = resource_data {
+                                if let Some(data) = resource_data {
                                     info!("Read {:?} from public", String::from_utf8_lossy(&data));
 
                                     let resource = resource.to_owned();
-                                    data = applier.apply(&data).unwrap();
+                                    let data =
+                                        applier.apply(data).map_or_else(|(_e, v)| v, identity);
                                     options
                                         .write(
                                             resource,
@@ -572,51 +574,33 @@ async fn handle_message(
         // `TODO`: handle cancelled fast forwards
         agde::MessageKind::FastForward(_ff) => {
             let meta = options.metadata().lock().await;
-            let msg = manager.process_fast_forward_response(meta.clone(), message.sender());
+            let msg = manager.process_fast_forward_response(meta.clone(), sender);
             send(write, msg).await?;
         }
         agde::MessageKind::FastForwardReply(ff) => {
+            println!("Fast forward changes");
+            let changes = {
+                let metadata = options.metadata().lock().await;
+                metadata.changes(ff.metadata(), false)
+            };
+            options.sync_metadata(Storage::Public).await?;
             let mut sync_request = match manager.apply_fast_forward_reply(ff, sender) {
                 Ok(v) => v,
                 Err(agde::fast_forward::Error::UnexpectedPier) => return Ok(()),
-                e => e.unwrap(),
+                e => e.expect("internal state was unexpected. Bug in agde."),
             };
-            println!("Fast forward changes");
-            let changes = {
-                let mut metadata = options.metadata().lock().await;
-                let changes = metadata.changes(ff.metadata(), false);
-                // apply the remote changes (as we will be syncing them)
-                //
-                // this has the benefit of saving the metadata even if our data
-                // is the same. If the data is the same, the pier will see that
-                // the diff is empty and not send it back. Our public buffer
-                // doesn't get modified, and next time we connect, we create a
-                // signature again. That's bad. So by adjusting our metadata
-                // here, we assue this is the first and only time we want to
-                // get this version of the resource.
-                //
-                // `TODO`: send a touch array back with the sync response
-                // instead, with the event_mtimes of the pier.
-                // Then, we can remove `sync_metadata`.
-                println!("Metadata pre applied: {metadata:?}");
-                metadata.apply_changes(&changes, ff.metadata());
-                println!("Metadata after applied: {metadata:?}");
-                println!("ff: {ff:?}");
-                changes
-            };
-            options.sync_metadata(Storage::Public).await?;
             println!("Changes: {changes:?}");
-            for change in changes {
+            for change in &changes {
                 match change {
                     MetadataChange::Modify(res, _created, _) => {
                         let data = options
-                            .read(&res, Storage::Public)
+                            .read(res, Storage::Public)
                             .await?
                             .unwrap_or_default();
                         let mut sig = agde::den::Signature::new(128);
                         sig.write(&data);
                         let sig = sig.finish();
-                        sync_request.insert(res, sig);
+                        sync_request.insert(res.clone(), sig);
                     }
                     MetadataChange::Delete(res) => {
                         options.delete(res, Storage::Public).await?;
@@ -625,11 +609,11 @@ async fn handle_message(
             }
 
             let sync_request = sync_request.finish();
-            let msg = manager.process_sync(sync_request);
+            let msg = manager.process_sync(sync_request, Some(changes));
             send(write, msg).await?;
         }
         agde::MessageKind::Sync(sync) => {
-            let mut builder = manager.apply_sync(sync, sender);
+            let mut builder = manager.apply_sync(&sync, sender);
             while let Some((resource, signature)) = builder.next_signature() {
                 println!("Signature from {resource}: {signature:?}");
                 let data = options.read(resource, Storage::Public).await?;
@@ -647,24 +631,21 @@ async fn handle_message(
             let msg = manager.process_sync_reply(builder);
             send(write, msg).await?;
         }
-        agde::MessageKind::SyncReply(sync) => {
+        agde::MessageKind::SyncReply(mut sync) => {
             println!("Sync reply: {:?}", sync);
             let mut changes = changed.lock().await;
 
-            let mut rewinder = manager.apply_sync_reply(sync).unwrap();
+            let (mut rewinder, metadata_applier) =
+                if let Ok(rewinder) = manager.apply_sync_reply(&mut sync) {
+                    rewinder
+                } else {
+                    warn!("Got erroneous sync message while fast-forwarding: {sync:?}");
+                    return Ok(());
+                };
 
-            for resource in sync.delete() {
-                let resource = resource.as_ref();
-                {
-                    changes.insert(resource.to_owned());
-                }
-                options.delete(resource, Storage::Public).await?;
-            }
+            let mut error = false;
             for (resource, diff) in sync.diff() {
                 let resource = resource.as_ref();
-                {
-                    changes.insert(resource.to_owned());
-                }
                 let public = async {
                     let mut data = options
                         .read(resource, Storage::Public)
@@ -672,15 +653,21 @@ async fn handle_message(
                         .unwrap_or_default();
                     println!("Read {:?}", std::str::from_utf8(&data));
 
-                    if diff.apply_overlaps(data.len()) {
+                    let result = if diff.apply_overlaps(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
-                        diff.apply(&data, &mut other).unwrap();
+                        let r = diff.apply(&data, &mut other);
                         data = other;
+                        r
                     } else {
-                        diff.apply_in_place(&mut data).unwrap();
+                        diff.apply_in_place(&mut data)
+                    };
+                    if result.is_err() {
+                        return Err(ApplicationError::PiersRejected);
                     }
                     println!("applied {:?}", std::str::from_utf8(&data));
-                    data = rewinder.rewind(resource, data).unwrap();
+                    data = rewinder
+                        .rewind(resource, data)
+                        .map_or_else(|e| e.into_data(), identity);
                     println!("rewound {:?}", std::str::from_utf8(&data));
                     options
                         .write(
@@ -700,19 +687,81 @@ async fn handle_message(
                         .await?
                         .unwrap_or_default();
 
-                    if diff.apply_overlaps_adaptive_end(data.len()) {
+                    let result = if diff.apply_overlaps_adaptive_end(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
-                        diff.apply_adaptive_end(&data, &mut other).unwrap();
+                        let r = diff.apply_adaptive_end(&data, &mut other);
                         data = other;
+                        r
                     } else {
-                        diff.apply_in_place_adaptive_end(&mut data).unwrap();
+                        diff.apply_in_place_adaptive_end(&mut data)
+                    };
+                    if result.is_err() {
+                        return Err(ApplicationError::PiersRejected);
                     }
                     options
                         .write(resource, WriteStorage::current(), data)
                         .await?;
                     Ok(())
                 };
-                futures::future::try_join(public, current).await?;
+                match futures::future::try_join(public, current).await {
+                    Err(ApplicationError::PiersRejected) => {
+                        error = true;
+                        break;
+                    }
+                    r => r?,
+                };
+            }
+            if error {
+                if manager.is_fast_forwarding() {
+                    warn!(
+                        "Fast forward failed due to an error with applying \
+                        the sync response. Trying again."
+                    );
+                    if let Some(ff) = manager.process_fast_forward() {
+                        send(write, ff).await?;
+                    }
+                    return Ok(());
+                } else {
+                    error!("Unhandled sync error!");
+                    return Ok(());
+                }
+            }
+            for (resource, _) in sync.diff() {
+                {
+                    changes.insert(resource.as_ref().to_owned());
+                }
+            }
+
+            for resource in sync.delete() {
+                let resource = resource.as_ref();
+                {
+                    changes.insert(resource.to_owned());
+                }
+                options.delete(resource, Storage::Public).await?;
+            }
+
+            if let Some(metadata_applier) = metadata_applier {
+                // apply the remote changes (as we will be syncing them)
+                //
+                // this has the benefit of saving the metadata even if our data
+                // is the same. If the data is the same, the pier will see that
+                // the diff is empty and not send it back. Our public buffer
+                // doesn't get modified, and next time we connect, we create a
+                // signature again. That's bad. So by adjusting our metadata
+                // here, we assue this is the first and only time we want to
+                // get this version of the resource.
+                //
+                // `TODO`: send a touch array back with the sync response
+                // instead, with the event_mtimes of the pier.
+                // Then, we can remove `sync_metadata`.
+                {
+                    let mut metadata = options.metadata().lock().await;
+                    println!("Metadata pre applied: {metadata:?}");
+                    metadata_applier.apply(&mut metadata);
+                    println!("Metadata after applied: {metadata:?}");
+                    println!("ff: {:?}", metadata_applier.metadata());
+                }
+                options.sync_metadata(Storage::Public).await?;
             }
 
             drop(manager);
@@ -785,10 +834,14 @@ async fn commit_and_send(
                             None
                         };
 
-                        let mut current = options.read(resource, Storage::Current).await?.expect(
-                            "configuration should not return Modified \
-                                if the Current storage version doesn't exist.",
-                        );
+                        let mut current = if let Some(data) =
+                            options.read(resource, Storage::Current).await?
+                        {
+                            data
+                        } else {
+                            warn!("Options::diff said current storage was modified, but it doesn't exist. Please check your `rough_resource_diff function`");
+                            continue;
+                        };
 
                         let public = options
                             .read(resource, Storage::Public)
@@ -829,22 +882,29 @@ async fn commit_and_send(
                             let event =
                                 agde::Event::new(agde::event::Kind::Modify(event), &manager);
 
-                            println!("Diff: {:#?}", event.diff().unwrap());
-
                             if let Some(ev) = create_ev {
-                                messages.push(manager.process_event(ev).unwrap());
+                                messages.push(manager.process_event(ev).expect(
+                                    "internal agde state bug - we're trying \
+                                    to send an event while fast forwarding!",
+                                ));
                             }
                             event
                         } else {
                             if let Some(ev) = create_ev {
-                                messages.push(manager.process_event(ev).unwrap());
+                                messages.push(manager.process_event(ev).expect(
+                                    "internal agde state bug - we're trying \
+                                    to send an event while fast forwarding!",
+                                ));
                             }
                             continue;
                         }
                     }
                 };
 
-                messages.push(manager.process_event(event).unwrap())
+                messages.push(manager.process_event(event).expect(
+                    "internal agde state bug - we're trying \
+                    to send an event while fast forwarding!",
+                ))
             } else {
                 // edited resource has been removed.
             }
@@ -900,10 +960,12 @@ async fn commit_and_send(
                 agde::EventKind::Modify(_ev) => {
                     let mut resource_data = options.read(&resource, Storage::Public).await?.expect(
                         "we trust our own data - there must \
-                            have been a create event before modify",
+                        have been a create event before modify",
                     );
 
-                    resource_data = applier.apply(&resource_data).unwrap();
+                    resource_data = applier
+                        .apply(resource_data)
+                        .map_or_else(|(_e, v)| v, identity);
 
                     options
                         .write(
@@ -986,9 +1048,7 @@ async fn rewind_current(
 
         // here, `resource` is just the modern name. See the code
         // above for more info
-        let unwound_public = unwinder.unwind(public, resource).expect(
-            "error when unwinding public storage. Resource name is valid and capacity is checked.",
-        );
+        let unwound_public = unwinder.unwind(public, resource).ok()?;
 
         let old_diff = agde::event::diff(&unwound_public, current);
 
@@ -1017,9 +1077,7 @@ async fn rewind_current(
         Cow::Owned(diff)
     }) {
         Err(agde::event::RewindError::ResourceDestroyed(_)) => None,
-        Err(agde::event::RewindError::ApplyError(err)) => {
-            Err(err).expect("error when applying diffs to current")
-        }
+        Err(agde::event::RewindError::Apply(_err, vec)) => Some(vec),
         Ok(vec) => Some(vec),
     }
 }

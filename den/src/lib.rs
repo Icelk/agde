@@ -1630,6 +1630,8 @@ impl<S: ExtendVec> Difference<S> {
     /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
     /// If `base` is the same data written to [`SignatureBuilder::write`], this error will not
     /// occur, granted this diff is derived from that [`Signature`].
+    ///
+    /// Ok to unwrap if [`Self::in_bounds`].
     pub fn apply(&self, base: &[u8], out: &mut Vec<u8>) -> Result<(), ApplyError> {
         self._apply(base, out, false)
     }
@@ -1652,6 +1654,8 @@ impl<S: ExtendVec> Difference<S> {
     /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
     /// If `base` is the same data written to [`SignatureBuilder::write`], this error will not
     /// occur, granted this diff is derived from that [`Signature`].
+    ///
+    /// Ok to unwrap if [`Self::in_bounds`].
     pub fn apply_adaptive_end(&self, base: &[u8], out: &mut Vec<u8>) -> Result<(), ApplyError> {
         self._apply(base, out, true)
     }
@@ -1719,6 +1723,8 @@ impl<S: ExtendVec> Difference<S> {
     ///
     /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
     ///
+    /// Ok to unwrap if [`Self::in_bounds`].
+    ///
     /// # Examples
     ///
     /// See [`Self::apply_overlaps`].
@@ -1744,6 +1750,8 @@ impl<S: ExtendVec> Difference<S> {
     /// If this returns an error, consider `base` to be bogus data.
     ///
     /// Returns [`ApplyError::RefOutOfBounds`] if a reference is out of bounds of the `base`.
+    ///
+    /// Ok to unwrap if [`Self::in_bounds`].
     ///
     /// # Examples
     ///
@@ -1927,7 +1935,33 @@ impl<S: ExtendVec> Difference<S> {
                     {
                         return false;
                     }
+                    cursor += data.len();
                 }
+            }
+        }
+
+        true
+    }
+    /// Checks `self` only contains valid references to `base`.
+    /// There will not occur any error from apply functions if this returns true.
+    ///
+    /// Returns `true` if that's the case.
+    #[must_use]
+    pub fn in_bounds(&self, base: &[u8]) -> bool {
+        let block_size = self.block_size();
+
+        for segment in self.segments() {
+            match segment {
+                Segment::Ref(ref_segment) => {
+                    let start = ref_segment.start;
+                    let seg_end = ref_segment.end(block_size);
+                    let end = seg_end.min(base.len());
+
+                    if base.get(start..end).is_none() {
+                        return false;
+                    };
+                }
+                Segment::Unknown(_unknown_segment) => {}
             }
         }
 
