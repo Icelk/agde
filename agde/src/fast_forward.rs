@@ -152,37 +152,32 @@ impl Metadata {
         self.map.insert(resource, meta);
     }
 
-    /// Calculate the changes to get the metadata from `self` to `other`.
+    /// Calculate the changes to get the metadata from `self` to `target`.
     ///
     /// `ignore_mtime_of_last_event` is used when diffing locally, as we don't care about the
     /// unrelated `mtime_of_last_event` in the current storage.
     #[must_use]
-    pub fn changes(&self, other: &Self, ignore_mtime_of_last_event: bool) -> Vec<MetadataChange> {
+    pub fn changes(&self, target: &Self, ignore_mtime_of_last_event: bool) -> Vec<MetadataChange> {
         let mut changed = Vec::new();
         for (resource, meta) in self.iter() {
-            match other.get(resource) {
-                Some(other_data) => {
-                    if other_data.size() != meta.size()
-                        || ((meta.mtime_of_last_event() != other_data.mtime_of_last_event()
+            match target.get(resource) {
+                Some(target_meta) => {
+                    if target_meta.size() != meta.size()
+                        || ((meta.mtime_of_last_event() != target_meta.mtime_of_last_event()
                             || ignore_mtime_of_last_event)
-                            && meta.mtime_in_current().map_or(true, |mtime| {
-                                mtime
-                                    != other_data
-                                        .mtime_in_current()
-                                        .expect("we just created this from local metadata")
-                            }))
+                            && meta.mtime_in_current() != target_meta.mtime_in_current())
                     {
                         changed.push(MetadataChange::Modify(
                             resource.to_owned(),
                             false,
-                            other_data.mtime_in_current(),
+                            target_meta.mtime_in_current(),
                         ));
                     }
                 }
                 None => changed.push(MetadataChange::Delete(resource.to_owned())),
             }
         }
-        for (resource, meta) in other.iter() {
+        for (resource, meta) in target.iter() {
             if !self.contains(resource) {
                 changed.push(MetadataChange::Modify(
                     resource.to_owned(),
@@ -207,7 +202,9 @@ impl Metadata {
                         if let Some(mut old) = self.get(res) {
                             // don't reset mtime_in_current.
                             old.size = meta.size;
-                            old.event_mtime = meta.event_mtime;
+                            if meta.event_mtime != Duration::ZERO {
+                                old.event_mtime = meta.event_mtime;
+                            }
                             self.insert(res.clone(), old);
                         } else {
                             self.insert(res.clone(), meta);
