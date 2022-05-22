@@ -3,12 +3,10 @@
 use std::cmp::{self, Ordering};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::hash::Hasher;
 use std::time::Duration;
 
 use den::ExtendVec;
 use serde::{Deserialize, Serialize};
-use twox_hash::xxh3::HasherExt;
 
 use crate::event;
 use crate::{utils, utils::dur_now, Event, EventKind, Uuid};
@@ -267,11 +265,11 @@ impl Log {
         };
         // UNWRAP: We've checked the conditions above.
         let iter = self.list.get(start..end).unwrap();
-        let mut hasher = twox_hash::xxh3::Hash128::default();
+        let mut hasher = xxhash_rust::xxh3::Xxh3::default();
         for ev in iter {
-            hasher.write(&ev.message_uuid.inner().to_le_bytes());
+            hasher.update(&ev.message_uuid.inner().to_le_bytes());
         }
-        let hash = hasher.finish_ext();
+        let hash = hasher.digest128();
 
         let check = UuidCheck {
             log_hash: hash.to_le_bytes(),

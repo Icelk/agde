@@ -2,10 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::hash::Hasher;
 use std::time::Duration;
-
-use twox_hash::xxh3::HasherExt;
 
 use crate::{resource, utils, SelectedPier, Uuid};
 
@@ -144,7 +141,7 @@ impl ResponseBuilder {
     pub fn insert(&mut self, resource: String, hash: ResponseHasher) {
         self.0
             .hashes
-            .insert(resource, hash.0.finish_ext().to_le_bytes());
+            .insert(resource, hash.0.digest128().to_le_bytes());
     }
     /// Get the built [`Response`].
     #[inline]
@@ -157,14 +154,14 @@ impl ResponseBuilder {
 /// [added](ResponseBuilder::insert) when all the data is written.
 #[allow(missing_debug_implementations)]
 #[must_use]
-pub struct ResponseHasher(twox_hash::Xxh3Hash128);
+pub struct ResponseHasher(xxhash_rust::xxh3::Xxh3);
 impl ResponseHasher {
     /// Creates a new, empty hasher.
     ///
     /// Add data using [`Self::write`].
     #[inline]
     pub fn new() -> Self {
-        Self(twox_hash::Xxh3Hash128::default())
+        Self(xxhash_rust::xxh3::Xxh3::default())
     }
     /// Write data from resource to the internal hasher.
     ///
@@ -172,7 +169,7 @@ impl ResponseHasher {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub fn write(&mut self, bytes: &[u8]) {
-        self.0.write(bytes);
+        self.0.update(bytes);
     }
 }
 

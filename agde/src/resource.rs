@@ -13,11 +13,6 @@ pub enum Matches {
     /// Matches the exact string.
     /// More performant than [`Self::Regex`].
     Exact(String),
-    /// Matches according to the [`regex::Regex`].
-    ///
-    /// Consider using [`Self::Exact`] in [`Self::List`] to match multiple exact resources.
-    #[serde(with = "serde_regex")]
-    Regex(regex::Regex),
     /// Matches if any [`Matches`] in the list match.
     List(Vec<Matches>),
 }
@@ -30,7 +25,6 @@ impl Matches {
             Self::All => true,
             Self::None => false,
             Self::Exact(target) => resource == target,
-            Self::Regex(regex) => regex.is_match(resource),
             Self::List(list) => list.iter().any(|matches| matches.matches(resource)),
         }
     }
@@ -93,7 +87,7 @@ impl Matcher {
                 list.push(include);
                 self
             }
-            _ => {
+            Matches::Exact(_) => {
                 self.include.make_list();
                 self.include(include)
             }
@@ -111,7 +105,7 @@ impl Matcher {
                 list.push(exclude);
                 self
             }
-            _ => {
+            Matches::Exact(_) => {
                 self.exclude.make_list();
                 self.exclude(exclude)
             }

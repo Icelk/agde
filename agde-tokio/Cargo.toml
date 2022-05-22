@@ -19,7 +19,7 @@ agde = { path = "../agde" }
 
 bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
 ctrlc = "3.2"
-env_logger = "0.9"
+env_logger = { version = "0.9", default-features = false }
 futures = { version = "0.3", default-features = false }
 log = "0.4"
 serde = { version = "^1", features = ["derive"] }
