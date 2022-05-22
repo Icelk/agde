@@ -49,7 +49,7 @@ fn send_diff() {
                     // let mut res = SliceBuf::with_whole(&mut test);
                     // res.extend_to_needed(ev.data(), b' ');
 
-                    event_applier.apply(&[]).expect("Buffer too small!");
+                    event_applier.apply([]).expect("Buffer too small!");
                 }
                 _ => panic!("Wrong EventKind"),
             }
@@ -156,7 +156,7 @@ fn basic_diff() {
                     // res.extend_to_needed(ev.data(), b' ');
 
                     println!("Resource: {:?}", std::str::from_utf8(&resource));
-                    resource = event_applier.apply(&resource).expect("Buffer too small!");
+                    resource = event_applier.apply(resource).expect("Buffer too small!");
                 }
                 _ => panic!("Wrong EventKind"),
             }
@@ -293,7 +293,7 @@ ok",
                 EventKind::Modify(_ev) => {
                     // res.extend_to_needed(ev.data(), 0);
 
-                    old = event_applier.apply(&old).expect("Buffer too small!");
+                    old = event_applier.apply(old).expect("Buffer too small!");
                 }
                 _ => panic!("Wrong EventKind"),
             }

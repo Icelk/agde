@@ -425,7 +425,8 @@ impl<'a> EventApplier<'a> {
     ///
     /// # Errors
     ///
-    /// tl;dr, this can be unwrapped if you have made sure [`Self::event`] is a [`EventKind::Modify`].
+    /// If a [`ApplyError::RefOutOfBounds`] error occurs, the apply action is completed and the
+    /// error and the applied data is returned.
     ///
     /// Returns [`ApplyError::InvalidEvent`] if this [`EventApplier`] wasn't instantiated
     /// with a [`EventKind::Modify`].
@@ -433,25 +434,34 @@ impl<'a> EventApplier<'a> {
     /// Returns a [`ApplyError::RefOutOfBounds`] if the difference of this event is out of
     /// bounds.
     #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
-    pub fn apply(&mut self, resource: &[u8]) -> Result<Vec<u8>, ApplyError> {
+    pub fn apply(
+        &mut self,
+        resource: impl Into<Vec<u8>>,
+    ) -> Result<Vec<u8>, (ApplyError, Vec<u8>)> {
         let ev = if let EventKind::Modify(ev) = self.event.inner() {
             ev
         } else {
-            return Err(ApplyError::InvalidEvent);
+            return Err((ApplyError::InvalidEvent, resource.into()));
         };
         // Match only for the current resource.
         let current_resource_name = if let Some(name) = self.modern_resource_name {
             name
         } else {
             // `TODO`: remove the `.to_vec`
-            return Ok(resource.to_vec());
+            return Ok(resource.into());
         };
+
+        let mut error = None;
+
         println!("Events: {:?}", self.events);
         let mut unwinder = event::Unwinder::new(self.events);
 
         let mut resource = match unwinder.unwind(resource, current_resource_name) {
             Ok(r) => r,
-            Err(event::UnwindError::Apply(err)) => return Err(err.into()),
+            Err(event::UnwindError::Apply(err, vec)) => {
+                error = Some(err);
+                vec
+            }
             Err(event::UnwindError::ResourceDestroyed) => {
                 unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
@@ -463,14 +473,22 @@ impl<'a> EventApplier<'a> {
         );
         let len = resource.len();
         // When back there, implement the event.
-        if ev.diff().apply_overlaps(resource.len()) {
-            let mut other = Vec::with_capacity(resource.len() + 32);
-            println!("apply: normal");
-            ev.diff().apply(&resource, &mut other)?;
-            resource = other;
+        if ev.diff().in_bounds(&resource) {
+            if ev.diff().apply_overlaps(resource.len()) {
+                let mut other = Vec::with_capacity(resource.len() + 32);
+                println!("apply: normal");
+                ev.diff()
+                    .apply(&resource, &mut other)
+                    .expect("we made sure the references were in bounds");
+                resource = other;
+            } else {
+                println!("In place");
+                ev.diff()
+                    .apply_in_place(&mut resource)
+                    .expect("we made sure the references were in bounds");
+            }
         } else {
-            println!("In place");
-            ev.diff().apply_in_place(&mut resource)?;
+            error = Some(den::ApplyError::RefOutOfBounds);
         }
         println!("Applied");
         println!("og len {len}, now {:?}", resource.len());
@@ -479,7 +497,13 @@ impl<'a> EventApplier<'a> {
         // UNWRAP: we know the ONE `ev.diff` has the same `block_size`
         offsets.add_diff(ev.diff(), len_diff);
 
-        resource = unwinder.rewind(&resource)?;
+        resource = match unwinder.rewind(&resource) {
+            Ok(v) => v,
+            Err((err, v)) => {
+                error = Some(err);
+                v
+            }
+        };
 
         offsets.apply(
             self.events
@@ -492,7 +516,11 @@ impl<'a> EventApplier<'a> {
         );
 
         println!("Rewound");
-        Ok(resource)
+        if let Some(err) = error {
+            Err((err.into(), resource))
+        } else {
+            Ok(resource)
+        }
     }
 }
 

@@ -23,6 +23,8 @@ pub(crate) enum State {
     WaitingForDiffs {
         pier: Uuid,
         latest_event: Option<Uuid>,
+        fast_forward_metadata: Metadata,
+        changes: Vec<MetadataChange>,
     },
 }
 /// An error while handling fast forwarding.
@@ -312,5 +314,28 @@ impl Response {
     /// Get the recipient of this response.
     pub fn recipient(&self) -> Uuid {
         self.pier
+    }
+}
+
+/// Returned from [`crate::Manager::apply_sync_reply`].
+#[derive(Debug)]
+#[must_use]
+pub struct MetadataApplier {
+    metadata: Metadata,
+    changes: Vec<MetadataChange>,
+}
+impl MetadataApplier {
+    pub(crate) fn new(metadata: Metadata, changes: Vec<MetadataChange>) -> Self {
+        Self { metadata, changes }
+    }
+
+    /// Apply the fast forward metadata changes to your public metadata `target`.
+    #[inline]
+    pub fn apply(&self, target: &mut Metadata) {
+        target.apply_changes(&self.changes, &self.metadata);
+    }
+    /// Get a reference to the remote's metadata acquired during the fast forward.
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
     }
 }

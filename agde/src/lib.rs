@@ -329,6 +329,13 @@ impl Message {
     pub fn inner_mut(&mut self) -> &mut MessageKind {
         &mut self.kind
     }
+    /// Get the inner [`MessageKind`].
+    ///
+    /// This contains all the data of the message.
+    #[inline]
+    pub fn into_inner(self) -> MessageKind {
+        self.kind
+    }
 
     /// Get the specific recipient if the [`MessageKind`] is targeted.
     ///
@@ -596,7 +603,25 @@ impl Manager {
     ///
     /// When you receive the [`sync::Response`], call the appropriate functions on it to apply data
     /// and [`Self::apply_sync_reply`].
-    pub fn process_sync(&mut self, request: sync::Request) -> Message {
+    ///
+    /// The `metadata_changes` are the changes from our main metadata to [`fast_forward::Response::metadata`].
+    /// It should be [`None`] when we're not fast forwarding.
+    pub fn process_sync(
+        &mut self,
+        request: sync::Request,
+        metadata_changes: Option<Vec<fast_forward::MetadataChange>>,
+    ) -> Message {
+        if let Some(metadata_changes) = metadata_changes {
+            if let fast_forward::State::WaitingForDiffs {
+                pier: _,
+                latest_event: _,
+                fast_forward_metadata: _,
+                changes,
+            } = &mut self.fast_forward
+            {
+                *changes = metadata_changes;
+            }
+        }
         self.process(MessageKind::Sync(request))
     }
     /// Turn the [`sync`] response to a message.
@@ -966,17 +991,22 @@ impl Manager {
     pub fn apply_sync_reply<'a>(
         &'a mut self,
         response: &mut sync::Response,
-    ) -> Result<event::Rewinder<'a>, fast_forward::Error> {
+    ) -> Result<(event::Rewinder<'a>, Option<fast_forward::MetadataApplier>), fast_forward::Error>
+    {
+        let mut ff = None;
         self.event_log.merge(response.take_event_log());
         self.event_log.required_event_timestamp = Some(utils::dur_now());
-        match self.fast_forward {
+        match core::mem::replace(&mut self.fast_forward, fast_forward::State::NotRunning) {
             fast_forward::State::NotRunning => {}
-            fast_forward::State::WaitingForMeta { pier: _ } => {
-                return Err(fast_forward::Error::ExpectedWaitingForDiffs)
+            fast_forward::State::WaitingForMeta { pier } => {
+                self.fast_forward = fast_forward::State::WaitingForMeta { pier };
+                return Err(fast_forward::Error::ExpectedWaitingForDiffs);
             }
             fast_forward::State::WaitingForDiffs {
                 pier: _,
                 latest_event,
+                changes,
+                fast_forward_metadata,
             } => {
                 let idx = latest_event
                     .and_then(|latest_event| self.event_log.cutoff_from_uuid(latest_event))
@@ -987,6 +1017,10 @@ impl Manager {
                     .get(idx)
                     .map_or(Duration::ZERO, |ev| ev.event.timestamp_dur());
                 self.event_log.required_event_timestamp = Some(timestamp);
+                ff = Some(fast_forward::MetadataApplier::new(
+                    fast_forward_metadata,
+                    changes,
+                ));
             }
         }
         self.fast_forward = fast_forward::State::NotRunning;
@@ -1000,7 +1034,7 @@ impl Manager {
         };
         let slice = &self.event_log.list[cutoff..];
         println!("apply sync reply cutoff: {cutoff}, slice: {slice:#?}");
-        Ok(event::Rewinder::new(slice, self))
+        Ok((event::Rewinder::new(slice, self), ff))
     }
     /// Applies the fast forward reply by modifying the inner state.
     ///
@@ -1014,7 +1048,7 @@ impl Manager {
     /// If the internal state doesn't expect this to happen, it will also throw an error.
     pub fn apply_fast_forward_reply(
         &mut self,
-        reply: &fast_forward::Response,
+        reply: fast_forward::Response,
         sender: Uuid,
     ) -> Result<sync::RequestBuilder, fast_forward::Error> {
         if let fast_forward::State::WaitingForMeta { pier } = self.fast_forward {
@@ -1027,6 +1061,9 @@ impl Manager {
         self.fast_forward = fast_forward::State::WaitingForDiffs {
             pier: reply.pier,
             latest_event: reply.current_event_uuid,
+            fast_forward_metadata: reply.metadata,
+            // this will be populated when using [`Self::process_sync`]
+            changes: vec![],
         };
         Ok(sync::RequestBuilder::new(
             sender,

@@ -326,12 +326,10 @@ pub enum UnwindError {
     /// The resource has previously been destroyed.
     ResourceDestroyed,
     /// An error during an application of a section.
-    Apply(den::ApplyError),
-}
-impl From<den::ApplyError> for UnwindError {
-    fn from(err: den::ApplyError) -> Self {
-        Self::Apply(err)
-    }
+    ///
+    /// The rewound resource is also returned, if you want to use it.
+    /// The diffs which erred aren't applied.
+    Apply(den::ApplyError, Vec<u8>),
 }
 
 /// Unwinds the stack of stored events to get the local data to a previous state.
@@ -343,16 +341,14 @@ pub struct Unwinder<'a> {
     events: &'a [log::ReceivedEvent],
     rewound_events: Vec<&'a Difference>,
     // these are allocated once to optimize allocations
-    buffer1: Vec<u8>,
-    buffer2: Vec<u8>,
+    buffer: Vec<u8>,
 }
 impl<'a> Unwinder<'a> {
     pub(crate) fn new(events: &'a [log::ReceivedEvent]) -> Self {
         Self {
             events,
             rewound_events: vec![],
-            buffer1: vec![],
-            buffer2: vec![],
+            buffer: vec![],
         }
     }
     /// # Errors
@@ -428,7 +424,7 @@ impl<'a> Unwinder<'a> {
     /// destroyed during the timeline of this unwinder.
     pub fn unwind(
         &mut self,
-        resource: &[u8],
+        resource: impl Into<Vec<u8>>,
         modern_resource_name: &'a str,
     ) -> Result<Vec<u8>, UnwindError> {
         assert_eq!(
@@ -439,13 +435,11 @@ impl<'a> Unwinder<'a> {
 
         self.check_name(modern_resource_name)?;
 
-        let mut first = true;
+        let mut error = None;
+
+        let mut resource = resource.into();
         // these are allocated once to optimize allocations
-        let mut b1 = std::mem::take(&mut self.buffer1);
-        // reset slice and set up as `resource`
-        b1.clear();
-        b1.extend_from_slice(resource);
-        let mut b2 = std::mem::take(&mut self.buffer2);
+        let mut other = std::mem::take(&mut self.buffer);
 
         // On move events, only change resource.
         // On delete messages, panic. A bug.
@@ -459,14 +453,19 @@ impl<'a> Unwinder<'a> {
                     let diff = ev.diff();
 
                     // `TODO`: don't hardcode fill_byte.
-                    if first {
-                        ev.diff().revert(resource, &mut b1, b' ')?;
+                    let ok = ev.diff().in_bounds(&resource);
+
+                    if ok {
+                        ev.diff()
+                            .revert(&resource, &mut other, b' ')
+                            .expect("we made sure the references were in bounds");
+
+                        std::mem::swap(&mut resource, &mut other);
+                        other.clear();
+                        self.rewound_events.push(diff);
                     } else {
-                        ev.diff().revert(&b1, &mut b2, b' ')?;
-                        std::mem::swap(&mut b1, &mut b2);
+                        error = Some(den::ApplyError::RefOutOfBounds);
                     }
-                    self.rewound_events.push(diff);
-                    first = false;
                 }
                 EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
                     "Unexpected delete or create event in unwinding of event log.\
@@ -474,28 +473,43 @@ impl<'a> Unwinder<'a> {
                 ),
             }
         }
-        self.buffer2 = b2;
-        Ok(b1)
+        self.buffer = other;
+
+        if let Some(err) = error {
+            Err(UnwindError::Apply(err, resource))
+        } else {
+            Ok(resource)
+        }
     }
     /// Rewinds the `resource` back up.
     ///
     /// # Errors
     ///
     /// Passes errors from [`Difference::apply`].
-    pub fn rewind(&mut self, resource: &[u8]) -> Result<Vec<u8>, den::ApplyError> {
+    pub fn rewind(&mut self, resource: &[u8]) -> Result<Vec<u8>, (den::ApplyError, Vec<u8>)> {
         let mut vec = resource.to_vec();
         let mut other = vec![];
+        let mut error = None;
         // Unwind the stack, redoing all the events.
         while let Some(diff) = self.rewound_events.pop() {
-            if diff.apply_overlaps(vec.len()) {
-                diff.apply(&vec, &mut other)?;
-                std::mem::swap(&mut vec, &mut other);
-                other.clear();
+            if diff.in_bounds(&vec) {
+                if diff.apply_overlaps(vec.len()) {
+                    diff.apply(&vec, &mut other)
+                        .expect("we made sure the references were in bounds");
+                    std::mem::swap(&mut vec, &mut other);
+                    other.clear();
+                } else {
+                    diff.apply_in_place(&mut vec)
+                        .expect("we made sure the references were in bounds");
+                }
             } else {
-                diff.apply_in_place(&mut vec)?;
+                error = Some(den::ApplyError::RefOutOfBounds);
             }
         }
-        Ok(vec)
+        match error {
+            Some(e) => Err((e, vec)),
+            None => Ok(vec),
+        }
     }
 }
 
@@ -503,15 +517,23 @@ impl<'a> Unwinder<'a> {
 /// An error when [rewinding](Rewinder::rewind).
 pub enum RewindError {
     /// An error occurred when applying a diff.
-    ApplyError(den::ApplyError),
+    ///
+    /// The rewound resource is also returned, if you want to use it.
+    /// The diffs which erred aren't applied.
+    Apply(den::ApplyError, Vec<u8>),
     /// The resource has been destroyed since last commit. Throw away your changes.
     ///
     /// The inner byte array is the `data` supposed to be rewound.
     ResourceDestroyed(Vec<u8>),
 }
-impl From<den::ApplyError> for RewindError {
-    fn from(err: den::ApplyError) -> Self {
-        Self::ApplyError(err)
+impl RewindError {
+    /// Returns the recovered data.
+    #[must_use]
+    pub fn into_data(self) -> Vec<u8> {
+        match self {
+            RewindError::Apply(_e, vec) => vec,
+            RewindError::ResourceDestroyed(vec) => vec,
+        }
     }
 }
 
@@ -545,10 +567,10 @@ impl<'a> Rewinder<'a> {
         data: impl Into<Vec<u8>>,
         mut diff_modification: impl FnMut(&Difference) -> Cow<'_, Difference>,
     ) -> Result<Vec<u8>, RewindError> {
-        // `TODO`: return list of errors if any apply fails, but just
-        // continue and collect all errors in a vec, to then return them.
         let mut vec = data.into();
         let mut other = std::mem::take(&mut self.buf);
+
+        let mut error = None;
 
         // if event started ev from beginning, don't apply the
         let breaking_idx = self
@@ -571,16 +593,28 @@ impl<'a> Rewinder<'a> {
                 continue;
             };
             let diff = diff_modification(diff);
-            if diff.apply_overlaps_adaptive_end(vec.len()) {
-                diff.apply_adaptive_end(&vec, &mut other)?;
-                std::mem::swap(&mut vec, &mut other);
-                other.clear();
+            if diff.in_bounds(&vec) {
+                if diff.apply_overlaps_adaptive_end(vec.len()) {
+                    diff.apply_adaptive_end(&vec, &mut other)
+                        .expect("we made sure the references were in bounds");
+                    std::mem::swap(&mut vec, &mut other);
+
+                    other.clear();
+                } else {
+                    diff.apply_in_place_adaptive_end(&mut vec)
+                        .expect("we made sure the references were in bounds");
+                }
             } else {
-                diff.apply_in_place_adaptive_end(&mut vec)?;
+                error = Some(den::ApplyError::RefOutOfBounds);
             }
         }
         self.buf = other;
-        Ok(vec)
+
+        if let Some(err) = error {
+            Err(RewindError::Apply(err, vec))
+        } else {
+            Ok(vec)
+        }
     }
     /// Rewinds the `resource` back up to the most recent version.
     ///
