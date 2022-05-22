@@ -298,7 +298,6 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                         }
                     },
                 }
-                println!("Metadata: {metadata:?}, offline: {offline_metadata:?}");
                 Ok(())
             }) as WriteFuture
         }),
