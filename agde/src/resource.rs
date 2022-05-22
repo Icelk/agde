@@ -11,7 +11,6 @@ pub enum Matches {
     /// Matches everything.
     All,
     /// Matches the exact string.
-    /// More performant than [`Self::Regex`].
     Exact(String),
     /// Matches if any [`Matches`] in the list match.
     List(Vec<Matches>),
