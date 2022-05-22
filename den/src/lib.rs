@@ -730,9 +730,15 @@ impl Signature {
             0..=4 => Signature::with_algorithm(HashAlgorithm::None4, block_size),
             5..=8 => Signature::with_algorithm(HashAlgorithm::None8, block_size),
             9..=16 => Signature::with_algorithm(HashAlgorithm::None16, block_size),
-            17..=256 => Signature::with_algorithm(HashAlgorithm::CyclicPoly32, block_size),
-            // 256..
-            _ => Signature::with_algorithm(HashAlgorithm::CyclicPoly64, block_size),
+            // just so the signature isn't larger than the actual data.
+            17..=64 => Signature::with_algorithm(HashAlgorithm::CyclicPoly32, block_size),
+            // according to imperical results, XXHash is just that much faster than CyclicPoly -
+            // XXH3 performs better than CyclicPoly even for rolling hash applications.
+            //
+            // This is probably due to the requirement of buffers when working with rolling hashes.
+            65..=4096 => Signature::with_algorithm(HashAlgorithm::XXH3_64, block_size),
+            // 4096..
+            _ => Signature::with_algorithm(HashAlgorithm::XXH3_128, block_size),
         }
     }
     /// This will create a new [`SignatureBuilder`] with the `algorithm`. Consider using [`Self::new`]
