@@ -187,7 +187,6 @@ impl Offsets {
     /// `events` should be an iterator over the [`Event`]s with the relevant [`Event::resource`].
     #[allow(clippy::missing_panics_doc)]
     pub fn apply<'a>(self, events: impl Iterator<Item = &'a mut Event>) {
-
         for ev in events {
             let kind = ev.inner_mut();
             match kind {
