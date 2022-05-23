@@ -148,7 +148,7 @@ impl Options {
             file_cache: Arc::new(std::sync::Mutex::new(FileCache::new(1024 * 8))),
             startup_timeout,
             sync_interval,
-            flush_interval: Duration::from_secs(5),
+            flush_interval: Duration::from_secs(30),
             force_pull,
             verify_diffs,
         }
@@ -318,7 +318,9 @@ impl Options {
         for (resource, (data, changed)) in &mut public {
             let old_changed = *changed;
             *changed = false;
-            if !old_changed {continue;}
+            if !old_changed {
+                continue;
+            }
             if let Some((vec, mtime, event_mtime)) = data {
                 self._write(
                     resource,
@@ -333,7 +335,9 @@ impl Options {
         for (resource, (data, changed)) in &mut meta {
             let old_changed = *changed;
             *changed = false;
-            if !old_changed {continue;}
+            if !old_changed {
+                continue;
+            }
             if let Some(vec) = data {
                 self._write(resource, WriteStorage::Meta, vec.clone())
                     .await?;
@@ -737,7 +741,7 @@ pub async fn run(
         tokio::spawn(async move {
             let mut i = 0;
             loop {
-                let r = if i >= 60 {
+                let r = if i >= 10 {
                     options.flush_out().await
                 } else {
                     options.flush().await
