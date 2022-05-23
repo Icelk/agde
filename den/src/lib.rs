@@ -78,6 +78,7 @@
     missing_docs
 )]
 
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, VecDeque};
@@ -199,7 +200,8 @@ impl HashMap128 {
 }
 
 /// The algorithms which can be used for hashing the data.
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize, Serialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[must_use]
 #[allow(missing_docs)]
 pub enum HashAlgorithm {
@@ -478,7 +480,8 @@ impl Debug for HashBuilder {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
 #[must_use]
 enum HashResult {
     B4([u8; 4]),
@@ -719,7 +722,8 @@ impl SignatureBuilder {
 /// A identifier of a file, much smaller than the file itself.
 ///
 /// See [crate-level documentation](crate) for more details.
-#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(PartialEq, Eq, Clone)]
 #[must_use]
 pub struct Signature {
     algo: HashAlgorithm,
@@ -1003,7 +1007,8 @@ struct BlockData {
     start: usize,
 }
 /// One or more successive blocks found in the common data.
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[must_use]
 pub struct SegmentRef {
     /// Start of segment with a length of [`Self::block_count`]*[`Signature::block_size`].
@@ -1074,7 +1079,8 @@ impl SegmentRef {
     }
 }
 /// A segment with unknown contents. This will transmit the data.
-#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(PartialEq, Eq, Clone)]
 #[must_use]
 pub struct SegmentUnknown<S: ExtendVec = Vec<u8>> {
     /// The data source to fill the unknown with.
@@ -1123,7 +1129,8 @@ impl<S: ExtendVec + std::any::Any> Debug for SegmentUnknown<S> {
     }
 }
 /// A segment of data corresponding to a multiple of [`Difference::block_size`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[must_use]
 pub enum Segment<S: ExtendVec + 'static = Vec<u8>> {
     /// Reference to successive block(s) of data.
@@ -1156,7 +1163,8 @@ impl Segment {
 }
 /// A delta between the local data and the data the [`Signature`] represents.
 #[allow(clippy::unsafe_derive_deserialize)] // See SAFETY notes.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[must_use]
 pub struct Difference<S: ExtendVec + 'static = Vec<u8>> {
     segments: Vec<Segment<S>>,
@@ -1892,7 +1900,6 @@ impl<S: ExtendVec> Difference<S> {
                     if current_end > current.len() {
                         return Err(Roob);
                     }
-                    println!("end: {current_end}, cursor: {cursor}");
                     target[seg.start()..seg.start() + current_end - cursor]
                         .copy_from_slice(&current[cursor..current_end]);
                     cursor += seg.len(block_size);
