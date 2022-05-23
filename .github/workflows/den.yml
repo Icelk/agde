@@ -4,6 +4,7 @@ on:
     push:
         paths:
             - "den/**"
+            - "Cargo.toml"
             - ".github/workflows/den.yml"
 
 env:

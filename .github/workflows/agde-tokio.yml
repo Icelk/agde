@@ -5,6 +5,7 @@ on:
         paths:
             - "agde-tokio/**"
             - "agde/**"
+            - "Cargo.toml"
             - ".github/workflows/agde-tokio.yml"
 
 env:
