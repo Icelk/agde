@@ -88,63 +88,66 @@ pub fn catch_ctrlc(handle: StateHandle) {
             let _ = send(&write, manager.process_disconnect()).await;
 
             let clean = options.read_clean().await?;
-            if clean.as_deref() == Some(b"y") {
-                info!("State clean. Exiting.");
-                return Ok(());
-            }
-            error!("State not clean. Trying to apply diffs to current buffer.");
+            if clean.as_deref() != Some(b"y") {
+                error!("State not clean. Trying to apply diffs to current buffer.");
 
-            let diff = options.diff().await?;
+                let diff = options.diff().await?;
 
-            {
-                for diff in diff {
-                    let modern = manager.modern_resource_name(
-                        diff.resource(),
-                        manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH),
-                    );
-                    if modern.is_some() {
-                        match diff {
-                            MetadataChange::Delete(_) => {}
-                            MetadataChange::Modify(resource, created, _) => {
-                                let mut current =
-                                    options.read(&resource, Storage::Current).await?.expect(
-                                        "configuration should not return Modified \
+                {
+                    for diff in diff {
+                        let modern = manager.modern_resource_name(
+                            diff.resource(),
+                            manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH),
+                        );
+                        if modern.is_some() {
+                            match diff {
+                                MetadataChange::Delete(_) => {}
+                                MetadataChange::Modify(resource, created, _) => {
+                                    let mut current =
+                                        options.read(&resource, Storage::Current).await?.expect(
+                                            "configuration should not return Modified \
                                             if the Current storage version doesn't exist.",
-                                    );
+                                        );
 
-                                let public = options
-                                    .read(&resource, Storage::Public)
-                                    .await?
-                                    .unwrap_or_default();
+                                    let public = options
+                                        .read(&resource, Storage::Public)
+                                        .await?
+                                        .unwrap_or_default();
 
-                                current = if let Some(current) = rewind_current(
-                                    &mut *manager,
-                                    created,
-                                    &resource,
-                                    &public,
-                                    &current,
-                                )
-                                .await
-                                {
-                                    current
-                                } else {
-                                    // since we keep track of the incoming events and
-                                    // which resources have been changed, this will get
-                                    // copied below.
-                                    continue;
-                                };
+                                    current = if let Some(current) = rewind_current(
+                                        &mut *manager,
+                                        created,
+                                        &resource,
+                                        &public,
+                                        &current,
+                                    )
+                                    .await
+                                    {
+                                        current
+                                    } else {
+                                        // since we keep track of the incoming events and
+                                        // which resources have been changed, this will get
+                                        // copied below.
+                                        continue;
+                                    };
 
-                                options
-                                    .write(resource, WriteStorage::current(), current)
-                                    .await?;
+                                    options
+                                        .write(resource, WriteStorage::current(), current, true)
+                                        .await?;
+                                }
                             }
                         }
                     }
                 }
             }
 
+            options.flush_out().await?;
+            options.sync_metadata(Storage::Public).await?;
+            options.sync_metadata(Storage::Current).await?;
+            info!("Successfully flushed caches.");
+
             // we are clean again!
-            options.write_clean("y").await?;
+            options.write_clean("y", true).await?;
 
             Ok::<(), ApplicationError>(())
         });
@@ -200,8 +203,8 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
     let diff_offline_metadata = Arc::clone(&offline_metadata);
     let sync_metadata = Arc::clone(&metadata);
     let sync_offline_metadata = Arc::clone(&offline_metadata);
-    Ok(Options {
-        read: Box::new(|resource, storage| {
+    Ok(Options::new(
+        Box::new(|resource, storage| {
             Box::pin(async move {
                 let path = match storage {
                     Storage::Public => format!(".agde/files/{resource}",),
@@ -221,7 +224,7 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                 Ok(Some(buf))
             }) as ReadFuture
         }),
-        write: Box::new(move |resource, storage, data| {
+        Box::new(move |resource, storage, data| {
             let metadata = Arc::clone(&write_metadata);
             let offline_metadata = Arc::clone(&write_offline_metadata);
             Box::pin(async move {
@@ -301,9 +304,6 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                                 );
                                 metadata.insert(resource, meta);
                                 println!("Resetting mtime of public from current: {metadata:?}");
-                                metadata_sync(&*metadata, "metadata")
-                                    .await
-                                    .map_err(|_| ())?;
                             }
                         }
                     },
@@ -311,7 +311,7 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                 Ok(())
             }) as WriteFuture
         }),
-        delete: Box::new(move |resource, storage| {
+        Box::new(move |resource, storage| {
             let metadata = Arc::clone(&delete_metadata);
             let offline_metadata = Arc::clone(&delete_offline_metadata);
             Box::pin(async move {
@@ -327,11 +327,8 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                 }
                 {
                     let mut metadata = metadata.lock().await;
-                    debug!("Removing {resource} from metdata cache.");
+                    debug!("Removing {resource} from metadata cache.");
                     metadata.remove(&resource);
-                    metadata_sync(&*metadata, "metadata")
-                        .await
-                        .map_err(|_| ())?;
                 }
                 let file_metadata = match tokio::fs::metadata(&path).await {
                     Ok(d) => d,
@@ -349,7 +346,7 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                 Ok(())
             }) as DeleteFuture
         }),
-        rough_resource_diff: Box::new(move || {
+        Box::new(move || {
             let metadata = Arc::clone(&diff_metadata);
             let offline_metadata = Arc::clone(&diff_offline_metadata);
             Box::pin(async move {
@@ -359,16 +356,8 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                 let changed = offline_metadata.changes(&current_metadata, true);
                 let mut metadata = metadata.lock().await;
                 metadata.apply_changes(&changed, &current_metadata);
-                {
-                    // `TODO`: Optimize this
-                    *offline_metadata = metadata.clone();
-                    futures::future::try_join(
-                        Box::pin(metadata_sync(&metadata, "metadata")),
-                        Box::pin(metadata_sync(&offline_metadata, "metadata-offline")),
-                    )
-                    .await
-                    .map_err(|_| ())?;
-                }
+                // `TODO`: Optimize this
+                *offline_metadata = metadata.clone();
                 debug!("Changed: {:?}", changed);
                 Ok(changed)
             }) as DiffFuture
@@ -391,11 +380,11 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
         }),
         metadata,
         offline_metadata,
-        startup_timeout: Duration::from_secs(7),
-        sync_interval: Duration::from_secs(10),
+        Duration::from_secs(7),
+        Duration::from_secs(10),
         force_pull,
-        verify_diffs: true,
-    })
+        true,
+    ))
 }
 
 /// Watch for changes.

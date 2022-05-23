@@ -106,12 +106,14 @@ pub struct Options {
     rough_resource_diff: DiffFn,
     sync_metadata: SyncFn,
 
-    offline_metadata: Arc<Mutex<Metadata>>,
     metadata: Arc<Mutex<Metadata>>,
+    offline_metadata: Arc<Mutex<Metadata>>,
+    file_cache: Arc<std::sync::Mutex<FileCache>>,
 
     /// For how long to wait for welcomes.
     startup_timeout: Duration,
     sync_interval: Duration,
+    flush_interval: Duration,
 
     force_pull: bool,
     /// Verifies outgoing Modify events to be correct.
@@ -128,8 +130,8 @@ impl Options {
         delete: DeleteFn,
         rough_resource_diff: DiffFn,
         sync_metadata: SyncFn,
-        offline_metadata: Arc<Mutex<Metadata>>,
         metadata: Arc<Mutex<Metadata>>,
+        offline_metadata: Arc<Mutex<Metadata>>,
         startup_timeout: Duration,
         sync_interval: Duration,
         force_pull: bool,
@@ -141,10 +143,12 @@ impl Options {
             delete,
             rough_resource_diff,
             sync_metadata,
-            offline_metadata,
             metadata,
+            offline_metadata,
+            file_cache: Arc::new(std::sync::Mutex::new(FileCache::new(1024 * 8))),
             startup_timeout,
             sync_interval,
+            flush_interval: Duration::from_secs(5),
             force_pull,
             verify_diffs,
         }
@@ -160,6 +164,14 @@ impl Options {
     }
     pub fn with_sync_interval(mut self, sync_interval: Duration) -> Self {
         self.sync_interval = sync_interval;
+        self
+    }
+    pub fn with_flush_interval(mut self, flush_interval: Duration) -> Self {
+        self.flush_interval = flush_interval;
+        self
+    }
+    pub fn with_file_cache_max_size(self, max_size: usize) -> Self {
+        self.file_cache.lock().unwrap().max_size = max_size;
         self
     }
     #[must_use]
@@ -186,6 +198,21 @@ impl Options {
 impl Options {
     pub async fn read(
         &self,
+        resource: impl Into<String> + AsRef<str>,
+        storage: Storage,
+    ) -> Result<Option<Vec<u8>>, ApplicationError> {
+        match {
+            let mut lock = self.file_cache.lock().unwrap();
+            let v = lock.read_owned(resource, storage);
+            drop(lock);
+            v
+        } {
+            Ok(v) => v,
+            Err(res) => self._read(res, storage).await,
+        }
+    }
+    async fn _read(
+        &self,
         resource: impl Into<String>,
         storage: Storage,
     ) -> Result<Option<Vec<u8>>, ApplicationError> {
@@ -200,12 +227,44 @@ impl Options {
         resource: impl Into<String>,
         storage: WriteStorage,
         data: impl Into<Vec<u8>>,
+        flush: bool,
+    ) -> Result<(), ApplicationError> {
+        match {
+            let mut lock = self.file_cache.lock().unwrap();
+            let v = lock.write(resource, data, storage, flush);
+            drop(lock);
+            v
+        } {
+            Ok(v) => v,
+            Err((res, data)) => self._write(res, storage, data).await,
+        }
+    }
+    async fn _write(
+        &self,
+        resource: impl Into<String>,
+        storage: WriteStorage,
+        data: impl Into<Vec<u8>>,
     ) -> Result<(), ApplicationError> {
         (self.write)(resource.into(), storage, data.into())
             .await
             .map_err(|_| ApplicationError::StoragePermissions)
     }
     pub async fn delete(
+        &self,
+        resource: impl Into<String> + AsRef<str>,
+        storage: Storage,
+    ) -> Result<(), ApplicationError> {
+        match {
+            let mut lock = self.file_cache.lock().unwrap();
+            let v = lock.delete(resource, storage);
+            drop(lock);
+            v
+        } {
+            Ok(v) => v,
+            Err(res) => self._delete(res, storage).await,
+        }
+    }
+    async fn _delete(
         &self,
         resource: impl Into<String>,
         storage: Storage,
@@ -238,8 +297,213 @@ impl Options {
     pub async fn read_clean(&self) -> Result<Option<Vec<u8>>, ApplicationError> {
         self.read("clean", Storage::Meta).await
     }
-    pub async fn write_clean(&self, data: impl Into<Vec<u8>>) -> Result<(), ApplicationError> {
-        self.write("clean", WriteStorage::Meta, data).await
+    pub async fn write_clean(
+        &self,
+        data: impl Into<Vec<u8>>,
+        flush: bool,
+    ) -> Result<(), ApplicationError> {
+        self.write("clean", WriteStorage::Meta, data, flush).await
+    }
+
+    pub async fn flush(&self) -> Result<(), ApplicationError> {
+        info!("Flushing.");
+        let (mut public, mut meta) = {
+            let mut lock = self.file_cache.lock().unwrap();
+            (
+                core::mem::take(&mut lock.public),
+                core::mem::take(&mut lock.meta),
+            )
+        };
+
+        for (resource, (data, changed)) in &mut public {
+            let old_changed = *changed;
+            *changed = false;
+            if !old_changed {continue;}
+            if let Some((vec, mtime, event_mtime)) = data {
+                self._write(
+                    resource,
+                    WriteStorage::Public(*mtime, *event_mtime),
+                    vec.clone(),
+                )
+                .await?;
+            } else {
+                self._delete(resource, Storage::Public).await?;
+            }
+        }
+        for (resource, (data, changed)) in &mut meta {
+            let old_changed = *changed;
+            *changed = false;
+            if !old_changed {continue;}
+            if let Some(vec) = data {
+                self._write(resource, WriteStorage::Meta, vec.clone())
+                    .await?;
+            } else {
+                self._delete(resource, Storage::Meta).await?;
+            }
+        }
+
+        {
+            let mut lock = self.file_cache.lock().unwrap();
+            {
+                public.extend(lock.public.drain());
+                meta.extend(lock.meta.drain());
+                lock.public = public;
+                lock.meta = meta;
+            }
+        }
+        Ok(())
+    }
+    /// Also clears the caches.
+    pub async fn flush_out(&self) -> Result<(), ApplicationError> {
+        info!("Flushing.");
+        let (mut public, mut meta) = {
+            let mut lock = self.file_cache.lock().unwrap();
+            (
+                core::mem::take(&mut lock.public),
+                core::mem::take(&mut lock.meta),
+            )
+        };
+
+        for (resource, (data, _)) in public.drain() {
+            if let Some((vec, mtime, event_mtime)) = data {
+                self._write(resource, WriteStorage::Public(mtime, event_mtime), vec)
+                    .await?;
+            } else {
+                self._delete(resource, Storage::Public).await?;
+            }
+        }
+        for (resource, (data, _)) in meta.drain() {
+            if let Some(vec) = data {
+                self._write(resource, WriteStorage::Meta, vec).await?;
+            } else {
+                self._delete(resource, Storage::Meta).await?;
+            }
+        }
+
+        {
+            let mut lock = self.file_cache.lock().unwrap();
+            {
+                public.extend(lock.public.drain());
+                meta.extend(lock.meta.drain());
+                lock.public = public;
+                lock.meta = meta;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct FileCache {
+    // data the same as [`WriteStorage::Public`]
+    public: HashMap<String, (Option<(Vec<u8>, WriteMtime, SystemTime)>, bool)>,
+    meta: HashMap<String, (Option<Vec<u8>>, bool)>,
+    max_size: usize,
+}
+impl FileCache {
+    fn new(max_size: usize) -> Self {
+        Self {
+            public: HashMap::new(),
+            meta: HashMap::new(),
+            max_size,
+        }
+    }
+    fn write(
+        &mut self,
+        resource: impl Into<String>,
+        data: impl Into<Vec<u8>>,
+        storage: WriteStorage,
+        flush: bool,
+    ) -> Result<Result<(), ApplicationError>, (String, Vec<u8>)> {
+        let resource = resource.into();
+        let data = data.into();
+        match storage {
+            WriteStorage::Public(mtime, event_mtime) => {
+                if data.len() < self.max_size && !flush {
+                    let tuple = (data, mtime, event_mtime);
+                    if let Some(previous) = self.public.get(&resource) {
+                        if previous.0.as_ref() == Some(&tuple) {
+                            return Ok(Ok(()));
+                        }
+                    }
+                    self.public.insert(resource, (Some(tuple), true));
+                    return Ok(Ok(()));
+                } else {
+                    // if previous instance of this resource in cache, remove it.
+                    self.public.remove(&resource);
+                }
+            }
+            WriteStorage::Meta => {
+                if data.len() < self.max_size && !flush {
+                    if let Some(previous) = self.meta.get(&resource) {
+                        if previous.0.as_ref() == Some(&data) {
+                            println!("Skipping, changed: {}", previous.1);
+                            return Ok(Ok(()));
+                        }
+                    }
+                    self.meta.insert(resource, (Some(data), true));
+                    return Ok(Ok(()));
+                } else {
+                    // if previous instance of this resource in cache, remove it.
+                    self.meta.remove(&resource);
+                }
+            }
+            WriteStorage::Current(_) => {}
+        }
+
+        Err((resource, data))
+    }
+    fn read_owned(
+        &mut self,
+        resource: impl Into<String> + AsRef<str>,
+        storage: Storage,
+    ) -> Result<Result<Option<Vec<u8>>, ApplicationError>, String> {
+        self.read(resource, storage)
+            .map(|r| r.map(|o| o.map(|v| v.to_vec())))
+    }
+    fn read(
+        &mut self,
+        resource: impl Into<String> + AsRef<str>,
+        storage: Storage,
+    ) -> Result<Result<Option<&'_ [u8]>, ApplicationError>, String> {
+        match storage {
+            Storage::Public => {
+                if let Some(v) = self.public.get(resource.as_ref()) {
+                    return Ok(Ok(v.0.as_ref().map(|(v, _, _)| v.as_slice())));
+                }
+            }
+            Storage::Current => {}
+            Storage::Meta => {
+                if let Some(v) = self.meta.get(resource.as_ref()) {
+                    return Ok(Ok(v.0.as_deref()));
+                }
+            }
+        }
+        Err(resource.into())
+    }
+    fn delete(
+        &mut self,
+        resource: impl Into<String> + AsRef<str>,
+        storage: Storage,
+    ) -> Result<Result<(), ApplicationError>, String> {
+        match storage {
+            Storage::Public => {
+                if let Some(v) = self.public.get_mut(resource.as_ref()) {
+                    v.0 = None;
+                } else {
+                    self.public.insert(resource.into(), (None, true));
+                }
+                Ok(Ok(()))
+            }
+            Storage::Current => Err(resource.into()),
+            Storage::Meta => {
+                if let Some(v) = self.meta.get_mut(resource.as_ref()) {
+                    v.0 = None;
+                } else {
+                    self.meta.insert(resource.into(), (None, true));
+                }
+                Ok(Ok(()))
+            }
+        }
     }
 }
 
@@ -294,14 +558,14 @@ pub async fn run(
                 let actual = options.read(&resource, Storage::Public).await?;
                 if let Some(actual) = actual {
                     options
-                        .write(resource, WriteStorage::current(), actual)
+                        .write(resource, WriteStorage::current(), actual, true)
                         .await?;
                 }
             }
 
-            options.write_clean("y").await?;
+            options.write_clean("y", false).await?;
         } else if changes.is_empty() {
-            options.write_clean("y").await?;
+            options.write_clean("y", false).await?;
         }
     }
 
@@ -467,17 +731,38 @@ pub async fn run(
             write.send(msg.to_bin().into()).await?;
         }
     }
+
+    let flush_handle = {
+        let options = Arc::clone(&options);
+        tokio::spawn(async move {
+            let mut i = 0;
+            loop {
+                let r = if i >= 60 {
+                    options.flush_out().await
+                } else {
+                    options.flush().await
+                };
+                if let Err(err) = r {
+                    error!("Error while flushing data: {err:?}");
+                };
+                tokio::time::sleep(options.flush_interval).await;
+                i += 1;
+            }
+        })
+    };
+
     // `TODO`: periodic calls (`clean_event_uuid_log_checks`, periodic (hash, event log) checks)
     let (oneshot_sender, oneshot_receiver) = futures::channel::oneshot::channel();
 
     tokio::spawn(async move {
-        let result = match futures::future::select(accept_handle, local_watcher).await {
-            futures::future::Either::Left((result, other))
-            | futures::future::Either::Right((result, other)) => {
-                other.abort();
-                result.expect("task panicked")
-            }
-        };
+        let (result, other) = futures::future::select(accept_handle, local_watcher)
+            .await
+            .into_inner();
+
+        flush_handle.abort();
+        other.abort();
+        let result = result.expect("task panicked");
+
         let _ = oneshot_sender.send(result);
     });
 
@@ -548,7 +833,7 @@ async fn handle_message(
                     if let Some(resource) = resource {
                         // write to `.agde/clean` that we aren't clean (we have
                         // public diffs not applied to `current`)
-                        options.write_clean("n").await?;
+                        options.write_clean("n", true).await?;
 
                         match applier.event().inner() {
                             agde::EventKind::Modify(_) => {
@@ -565,6 +850,7 @@ async fn handle_message(
                                             resource,
                                             WriteStorage::Public(WriteMtime::No, event.timestamp()),
                                             data,
+                                            false,
                                         )
                                         .await?;
                                 } else {
@@ -578,6 +864,7 @@ async fn handle_message(
                                         resource,
                                         WriteStorage::Public(WriteMtime::No, event.timestamp()),
                                         Vec::new(),
+                                        false,
                                     )
                                     .await?;
                             }
@@ -701,6 +988,7 @@ async fn handle_message(
                                 rewinder.last_change_to_resource(resource),
                             ),
                             data,
+                            false,
                         )
                         .await?;
                     Ok(())
@@ -723,7 +1011,7 @@ async fn handle_message(
                         return Err(ApplicationError::PiersRejected);
                     }
                     options
-                        .write(resource, WriteStorage::current(), data)
+                        .write(resource, WriteStorage::current(), data, true)
                         .await?;
                     Ok(())
                 };
@@ -1000,6 +1288,7 @@ async fn commit_and_send(
                             resource,
                             WriteStorage::Public(WriteMtime::LookUpCurrent, event.timestamp()),
                             resource_data,
+                            false,
                         )
                         .await?;
                 }
@@ -1009,6 +1298,7 @@ async fn commit_and_send(
                             resource,
                             WriteStorage::Public(WriteMtime::LookUpCurrent, event.timestamp()),
                             "",
+                            false,
                         )
                         .await?;
                 }
@@ -1027,7 +1317,7 @@ async fn commit_and_send(
                 let actual = options.read(resource, Storage::Public).await?;
                 if let Some(actual) = actual {
                     options
-                        .write(resource, WriteStorage::current(), actual)
+                        .write(resource, WriteStorage::current(), actual, true)
                         .await?;
                 } else {
                     options.delete(resource, Storage::Current).await?;
@@ -1058,7 +1348,7 @@ async fn commit_and_send(
     };
     futures::future::try_join(apply, send).await?;
     {
-        options.write_clean("y").await?;
+        options.write_clean("y", false).await?;
     }
     Ok(())
 }
