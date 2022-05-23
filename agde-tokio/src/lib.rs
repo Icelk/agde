@@ -440,7 +440,6 @@ impl FileCache {
                 if data.len() < self.max_size && !flush {
                     if let Some(previous) = self.meta.get(&resource) {
                         if previous.0.as_ref() == Some(&data) {
-                            println!("Skipping, changed: {}", previous.1);
                             return Ok(Ok(()));
                         }
                     }
@@ -893,7 +892,6 @@ async fn handle_message(
             send(write, msg).await?;
         }
         agde::MessageKind::FastForwardReply(ff) => {
-            println!("Fast forward changes");
             let changes = {
                 let metadata = options.metadata().lock().await;
                 metadata.changes(ff.metadata(), false)
@@ -904,7 +902,6 @@ async fn handle_message(
                 Err(agde::fast_forward::Error::UnexpectedPier) => return Ok(()),
                 e => e.expect("internal state was unexpected. Bug in agde."),
             };
-            println!("Changes: {changes:?}");
             for change in &changes {
                 match change {
                     MetadataChange::Modify(res, _created, _) => {
@@ -930,7 +927,6 @@ async fn handle_message(
         agde::MessageKind::Sync(sync) => {
             let mut builder = manager.apply_sync(&sync, sender);
             while let Some((resource, signature)) = builder.next_signature() {
-                println!("Signature from {resource}: {signature:?}");
                 let data = options.read(resource, Storage::Public).await?;
                 let data = if let Some(d) = data {
                     d
@@ -947,7 +943,6 @@ async fn handle_message(
             send(write, msg).await?;
         }
         agde::MessageKind::SyncReply(mut sync) => {
-            println!("Sync reply: {:?}", sync);
             let mut changes = changed.lock().await;
 
             let (mut rewinder, metadata_applier) =
@@ -966,7 +961,6 @@ async fn handle_message(
                         .read(resource, Storage::Public)
                         .await?
                         .unwrap_or_default();
-                    println!("Read {:?}", std::str::from_utf8(&data));
 
                     let result = if diff.apply_overlaps(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
@@ -979,11 +973,9 @@ async fn handle_message(
                     if result.is_err() {
                         return Err(ApplicationError::PiersRejected);
                     }
-                    println!("applied {:?}", std::str::from_utf8(&data));
                     data = rewinder
                         .rewind(resource, data)
                         .map_or_else(|e| e.into_data(), identity);
-                    println!("rewound {:?}", std::str::from_utf8(&data));
                     options
                         .write(
                             resource,
@@ -1072,10 +1064,7 @@ async fn handle_message(
                 // Then, we can remove `sync_metadata`.
                 {
                     let mut metadata = options.metadata().lock().await;
-                    println!("Metadata pre applied: {metadata:?}");
                     metadata_applier.apply(&mut metadata);
-                    println!("Metadata after applied: {metadata:?}");
-                    println!("ff: {:?}", metadata_applier.metadata());
                 }
                 options.sync_metadata(Storage::Public).await?;
             }
@@ -1180,7 +1169,6 @@ async fn commit_and_send(
                             // since we keep track of the incoming events and
                             // which resources have been changed, this will get
                             // copied below.
-                            println!("Resource destroyed");
                             continue;
                         };
 
@@ -1374,8 +1362,6 @@ async fn rewind_current(
 
         let old_diff = agde::event::diff(&unwound_public, current);
 
-        println!("  OLD DIFF {old_diff:?}");
-
         let mut offsets = agde::utils::Offsets::new();
         offsets.add_diff(
             &old_diff,
@@ -1395,7 +1381,6 @@ async fn rewind_current(
         // ignore `offsets`'s changes, as `apply_adaptive_end`
         // takes care of that.
         diff.set_original_data_len(original_data_len);
-        println!("Diff changed with {offsets:?}, now {diff:?}");
         Cow::Owned(diff)
     }) {
         Err(agde::event::RewindError::ResourceDestroyed(_)) => None,
