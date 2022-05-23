@@ -99,24 +99,24 @@ pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
 pub type SyncFn = Box<dyn Fn(Storage) -> SyncFuture + Send + Sync>;
 #[must_use]
 pub struct Options {
-    pub read: ReadFn,
-    pub write: WriteFn,
-    pub delete: DeleteFn,
+    read: ReadFn,
+    write: WriteFn,
+    delete: DeleteFn,
     /// Returns a list of the resources which might have changed.
-    pub rough_resource_diff: DiffFn,
-    pub sync_metadata: SyncFn,
+    rough_resource_diff: DiffFn,
+    sync_metadata: SyncFn,
 
     offline_metadata: Arc<Mutex<Metadata>>,
     metadata: Arc<Mutex<Metadata>>,
 
     /// For how long to wait for welcomes.
-    pub startup_timeout: Duration,
-    pub sync_interval: Duration,
+    startup_timeout: Duration,
+    sync_interval: Duration,
 
-    pub force_pull: bool,
+    force_pull: bool,
     /// Verifies outgoing Modify events to be correct.
     /// A bit of a performance hit, but generally recommended.
-    pub verify_diffs: bool,
+    verify_diffs: bool,
 }
 // `TODO`: Add option to write new resource changes to `Current` if that resource hasn't been
 // changed in current.
@@ -149,7 +149,8 @@ impl Options {
             verify_diffs,
         }
     }
-
+}
+impl Options {
     pub fn arc(self) -> Arc<Self> {
         Arc::new(self)
     }
@@ -157,6 +158,20 @@ impl Options {
         self.startup_timeout = startup_timeout;
         self
     }
+    pub fn with_sync_interval(mut self, sync_interval: Duration) -> Self {
+        self.sync_interval = sync_interval;
+        self
+    }
+    #[must_use]
+    pub fn sync_interval(&self) -> Duration {
+        self.sync_interval
+    }
+
+    #[must_use]
+    pub fn startup_timeout(&self) -> Duration {
+        self.startup_timeout
+    }
+
     /// The metadata of both the public and current storage.
     /// Calling [`Metadata::changes`] on `this.changes(offline_metadata)`
     /// gets you the changes to get current storage the same as the public.
@@ -167,6 +182,8 @@ impl Options {
     pub fn metadata_offline(&self) -> &Mutex<Metadata> {
         &self.offline_metadata
     }
+}
+impl Options {
     pub async fn read(
         &self,
         resource: impl Into<String>,
@@ -232,6 +249,12 @@ pub struct StateHandle {
     pub options: Arc<Options>,
     pub write: Arc<Mutex<WriteHalf>>,
     pub read: Arc<Mutex<ReadHalf>>,
+    changed: Arc<Mutex<HashSet<String>>>,
+}
+impl StateHandle {
+    pub async fn commit_and_send(&self) -> Result<(), ApplicationError> {
+        commit_and_send(&self.manager, &self.options, &self.write, &self.changed).await
+    }
 }
 pub struct Handle {
     inner: StateHandle,
@@ -464,6 +487,7 @@ pub async fn run(
             options,
             write,
             read,
+            changed,
         },
         waiter: oneshot_receiver,
     })

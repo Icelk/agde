@@ -23,5 +23,4 @@ wss.on("connection", (ws) => {
             console.log(`Got text message: '${data}'`)
         }
     })
-    ws.send("Nice to meet you!")
 })

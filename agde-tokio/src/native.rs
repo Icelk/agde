@@ -1,5 +1,11 @@
+//! Code for the native (tokio+fs) implementation of agde.
+//!
+//! Already keeping this separate from the `agde-tokio` lib to make it easier to adapt this to the
+//! web.
+
 use crate::*;
 
+// OK to have lazy_static here since our native implementation only has one agde instance running.
 lazy_static::lazy_static! {
     static ref STATE: std::sync::Mutex<Option<StateHandle>> = std::sync::Mutex::new(None);
 }
@@ -382,10 +388,57 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
         metadata,
         offline_metadata,
         startup_timeout: Duration::from_secs(7),
-        sync_interval: Duration::from_secs(5),
+        sync_interval: Duration::from_secs(10),
         force_pull,
         verify_diffs: true,
     })
+}
+
+/// Watch for changes.
+///
+/// You have to call [`notify::Watcher::watch`] to start watching and
+/// [`notify::Watcher::unwatch`] to stop the execution.
+pub async fn watch_changes(handle: StateHandle) -> impl notify::Watcher {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let watcher =
+        notify::recommended_watcher(move |res| tx.send(res).expect("receiving end failed"))
+            .expect("failed to start watcher");
+    let in_timeout = Arc::new(std::sync::Mutex::new(false));
+    let handle = Arc::new(handle);
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let ev = match ev {
+                Ok(ev) => ev,
+                Err(err) => {
+                    warn!("Watcher failed: {err:?}");
+                    continue;
+                }
+            };
+            // if
+            if ev.paths.first().map_or(false, |path| {
+                path.components()
+                    .any(|component| component.as_os_str() == ".agde")
+            }) {
+                continue;
+            }
+            // debounce
+            if !{ *in_timeout.lock().unwrap() } {
+                *in_timeout.lock().unwrap() = true;
+                let handle = Arc::clone(&handle);
+                let in_timeout = Arc::clone(&in_timeout);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+
+                    if let Err(err) = handle.commit_and_send().await {
+                        error!("Failed to commit and send: {err:?}")
+                    };
+                    *in_timeout.lock().unwrap() = false;
+                });
+            }
+        }
+        // just end the task
+    });
+    watcher
 }
 
 pub async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {
