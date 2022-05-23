@@ -5,3 +5,9 @@ members = [
     "den",
     "agde-tokio",
 ]
+
+# profile for binary sub-crates.
+[profile.distribution]
+inherits = "release"
+lto = true
+strip = true
