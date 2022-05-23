@@ -14,12 +14,10 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
     sig.write(base);
     let sig = sig.finish();
     let rough_diff = sig.diff(target);
-    println!("rough {rough_diff:?}");
     #[allow(clippy::let_and_return)]
     let granular_diff = rough_diff
         .minify(8, base)
         .expect("The way we are using the function, this should never err.");
-    println!("minified {granular_diff:?}");
     granular_diff
 }
 

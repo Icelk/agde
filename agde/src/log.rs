@@ -212,7 +212,6 @@ impl Log {
     #[inline]
     pub(crate) fn cutoff_from_time(&self, cutoff: Duration) -> Option<usize> {
         for (pos, ev) in self.list.iter().enumerate().rev() {
-            println!("Iter ev @{pos} {ev:?}");
             if ev.event.timestamp_dur() <= cutoff {
                 return Some(pos + 1);
             }
@@ -319,19 +318,9 @@ impl Log {
         message_uuid: Uuid,
     ) -> EventApplier<'a> {
         fn slice_start(log: &Log, resource: &str, message_uuid: Uuid) -> usize {
-            println!();
-            println!("  Searching for {resource:?} in {:?}", log.list);
             // `pos` is from the end of the list.
             for (pos, event) in log.list.iter().enumerate().rev() {
                 if event.message_uuid == message_uuid && event.event.resource() == resource {
-                    println!("     LOOK");
-                    println!(
-                        "Found start uuid at pos {} in list (last is latest) {:?}",
-                        pos + 1,
-                        log.list
-                    );
-                    println!("Resulting {:?}", &log.list[pos + 1..]);
-                    println!();
                     // Match!
                     // Also takes the current event in the slice.
                     // ↑ is however not true for the backup return below.
@@ -379,7 +368,6 @@ impl Log {
             .ok()
             .map(|_| event.resource());
         // Upholds the contracts described in the comment before [`EventApplier`].
-        println!("New applier with events {slice:?}");
         EventApplier {
             events: slice,
             modern_resource_name: resource,
@@ -453,7 +441,6 @@ impl<'a> EventApplier<'a> {
 
         let mut error = None;
 
-        println!("Events: {:?}", self.events);
         let mut unwinder = event::Unwinder::new(self.events);
 
         let mut resource = match unwinder.unwind(resource, current_resource_name) {
@@ -466,23 +453,16 @@ impl<'a> EventApplier<'a> {
                 unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
         };
-        println!(
-            "Unwound diff {:?} to resource: {:?}",
-            ev.diff(),
-            std::str::from_utf8(&resource)
-        );
         let len = resource.len();
         // When back there, implement the event.
         if ev.diff().in_bounds(&resource) {
             if ev.diff().apply_overlaps(resource.len()) {
                 let mut other = Vec::with_capacity(resource.len() + 32);
-                println!("apply: normal");
                 ev.diff()
                     .apply(&resource, &mut other)
                     .expect("we made sure the references were in bounds");
                 resource = other;
             } else {
-                println!("In place");
                 ev.diff()
                     .apply_in_place(&mut resource)
                     .expect("we made sure the references were in bounds");
@@ -490,8 +470,6 @@ impl<'a> EventApplier<'a> {
         } else {
             error = Some(den::ApplyError::RefOutOfBounds);
         }
-        println!("Applied");
-        println!("og len {len}, now {:?}", resource.len());
         let len_diff = utils::sub_usize(resource.len(), len);
         let mut offsets = utils::Offsets::new();
         // UNWRAP: we know the ONE `ev.diff` has the same `block_size`
@@ -511,11 +489,9 @@ impl<'a> EventApplier<'a> {
                 .filter(|stored_ev| {
                     stored_ev.event.latest_event_timestamp() < self.event.timestamp()
                 })
-                .map(|ev| &mut ev.event)
-                .inspect(|ev| println!("Applying log Offsets to ev: {ev:?}")),
+                .map(|ev| &mut ev.event),
         );
 
-        println!("Rewound");
         if let Some(err) = error {
             Err((err.into(), resource))
         } else {

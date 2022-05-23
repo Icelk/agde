@@ -187,7 +187,6 @@ impl Offsets {
     /// `events` should be an iterator over the [`Event`]s with the relevant [`Event::resource`].
     #[allow(clippy::missing_panics_doc)]
     pub fn apply<'a>(self, events: impl Iterator<Item = &'a mut Event>) {
-        println!("Offsets: {self:#?}");
 
         for ev in events {
             let kind = ev.inner_mut();
@@ -240,7 +239,6 @@ mod tests {
 
         let mut offsets = super::Offsets::new();
         offsets.add_diff(&diff, 0);
-        println!("Offsets: {offsets:?}");
         for offset in offsets.offsets {
             total += offset.len;
         }

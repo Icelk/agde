@@ -293,7 +293,6 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                                 let mut metadata = metadata.lock().await;
 
                                 let mut event_mtime = SystemTime::UNIX_EPOCH;
-                                println!("Resetting mtime of public from current: {metadata:?}");
                                 if let Some(meta) = metadata.get(&resource) {
                                     event_mtime = meta.mtime_of_last_event();
                                 }
@@ -303,7 +302,6 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                                     data.len() as u64,
                                 );
                                 metadata.insert(resource, meta);
-                                println!("Resetting mtime of public from current: {metadata:?}");
                             }
                         }
                     },

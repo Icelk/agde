@@ -734,6 +734,7 @@ pub async fn run(
             write.send(msg.to_bin().into()).await?;
         }
     }
+    info!("Began fast forwarding.");
 
     let flush_handle = {
         let options = Arc::clone(&options);
@@ -896,6 +897,8 @@ async fn handle_message(
                 let metadata = options.metadata().lock().await;
                 metadata.changes(ff.metadata(), false)
             };
+
+            info!("The pier {} responded to our fast forward request.", sender);
             options.sync_metadata(Storage::Public).await?;
             let mut sync_request = match manager.apply_fast_forward_reply(ff, sender) {
                 Ok(v) => v,
@@ -1062,6 +1065,7 @@ async fn handle_message(
                 // `TODO`: send a touch array back with the sync response
                 // instead, with the event_mtimes of the pier.
                 // Then, we can remove `sync_metadata`.
+                info!("Fast forward complete.");
                 {
                     let mut metadata = options.metadata().lock().await;
                     metadata_applier.apply(&mut metadata);
@@ -1209,6 +1213,7 @@ async fn commit_and_send(
                     }
                 };
 
+                info!("Sending event: {event:?}");
                 messages.push(manager.process_event(event).expect(
                     "internal agde state bug - we're trying \
                     to send an event while fast forwarding!",

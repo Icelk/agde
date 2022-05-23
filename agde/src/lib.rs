@@ -1033,7 +1033,6 @@ impl Manager {
                 .map_or(0, |idx| (idx + 1).min(self.event_log.list.len())),
         };
         let slice = &self.event_log.list[cutoff..];
-        println!("apply sync reply cutoff: {cutoff}, slice: {slice:#?}");
         Ok((event::Rewinder::new(slice, self), ff))
     }
     /// Applies the fast forward reply by modifying the inner state.
@@ -1147,7 +1146,6 @@ impl Manager {
             )
             .unwrap_or(0);
         let slice = &self.event_log.list[cutoff..];
-        println!("cutoff: {cutoff}, slice: {slice:#?}");
         event::Rewinder::new(slice, self)
     }
     /// Get the time of the last call to [`Self::update_last_commit`].
