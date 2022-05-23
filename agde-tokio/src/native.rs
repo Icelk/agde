@@ -245,7 +245,7 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                     WriteStorage::Public(write_mtime, mut event_mtime) => {
                         let mut metadata = metadata.lock().await;
 
-                        let mtime = match write_mtime {
+                        let mut mtime = match write_mtime {
                             WriteMtime::No => None,
                             WriteMtime::LookUpCurrent => {
                                 if let Ok(metadata) =
@@ -261,6 +261,12 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                         if let Some(meta) = metadata.get(&resource) {
                             if meta.mtime_of_last_event() != SystemTime::UNIX_EPOCH {
                                 event_mtime = meta.mtime_of_last_event();
+                            }
+                        }
+                        if mtime.is_none() {
+                            let offline_meta = { offline_metadata.lock().await.get(&resource) };
+                            if let Some(meta) = offline_meta {
+                                mtime = meta.mtime_in_current();
                             }
                         }
                         let meta =
@@ -286,9 +292,7 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                                 let mut event_mtime = SystemTime::UNIX_EPOCH;
                                 println!("Resetting mtime of public from current: {metadata:?}");
                                 if let Some(meta) = metadata.get(&resource) {
-                                    if meta.mtime_of_last_event() != SystemTime::UNIX_EPOCH {
-                                        event_mtime = meta.mtime_of_last_event();
-                                    }
+                                    event_mtime = meta.mtime_of_last_event();
                                 }
                                 let meta = ResourceMeta::new_from_event(
                                     Some(mtime),
@@ -369,10 +373,10 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                 Ok(changed)
             }) as DiffFuture
         }),
-        sync_metadata: Box::new(move |storage| {
+        Box::new(move |storage| {
             let metadata = match storage {
-                Storage::Current => Some((Arc::clone(&sync_offline_metadata), "metadata")),
-                Storage::Public => Some((Arc::clone(&sync_metadata), "metadata-offline")),
+                Storage::Public => Some((Arc::clone(&sync_metadata), "metadata")),
+                Storage::Current => Some((Arc::clone(&sync_offline_metadata), "metadata-offline")),
                 Storage::Meta => None,
             };
             Box::pin(async move {
