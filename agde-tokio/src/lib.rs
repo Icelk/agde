@@ -897,11 +897,15 @@ async fn commit_and_send(
                             std::str::from_utf8(&public)
                         );
 
-                        let event = agde::event::Modify::new_with_verification(
-                            resource.to_owned(),
-                            &current,
-                            &public,
-                        );
+                        let event = if options.verify_diffs {
+                            agde::event::Modify::new_with_verification(
+                                resource.to_owned(),
+                                &current,
+                                &public,
+                            )
+                        } else {
+                            agde::event::Modify::new(resource.to_owned(), &current, &public)
+                        };
                         if !event.diff().is_empty() {
                             let event =
                                 agde::Event::new(agde::event::Kind::Modify(event), &manager);
