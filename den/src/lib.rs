@@ -13,7 +13,8 @@
 //! Keep in mind this isn't guaranteed to give the exact same data.
 //! Please check the data with a secure hashing algorithm (e.g. SHA-3) to ensure consistency.
 //!
-//! Sending the data is possible due to [`serde`] providing serialization and deserialization.
+//! Sending the data is possible due to [`serde`](https://docs.rs/serde/) providing serialization and deserialization.
+//! This requires the cargo feature `serde` to be enabled.
 //! You serialize all the structs in this library to any format.
 //!
 //! > These examples should cover what rsync does.

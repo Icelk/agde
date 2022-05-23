@@ -397,9 +397,10 @@ impl Options {
     }
 }
 
+type PublicFile = (Vec<u8>, WriteMtime, SystemTime);
 struct FileCache {
     // data the same as [`WriteStorage::Public`]
-    public: HashMap<String, (Option<(Vec<u8>, WriteMtime, SystemTime)>, bool)>,
+    public: HashMap<String, (Option<PublicFile>, bool)>,
     meta: HashMap<String, (Option<Vec<u8>>, bool)>,
     max_size: usize,
 }
