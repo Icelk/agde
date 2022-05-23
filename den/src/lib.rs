@@ -85,6 +85,7 @@ use std::fmt::Debug;
 use std::hash::{BuildHasher, Hasher};
 use std::ops::Range;
 use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh64::Xxh64;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum LargeHash<K, V> {
@@ -205,6 +206,7 @@ pub enum HashAlgorithm {
     None4,
     None8,
     None16,
+    XXH64,
     XXH3_64,
     XXH3_128,
     CyclicPoly32,
@@ -218,6 +220,7 @@ impl HashAlgorithm {
             Self::None4 => HashBuilder::None4(StackSlice::default()),
             Self::None8 => HashBuilder::None8(StackSlice::default()),
             Self::None16 => HashBuilder::None16(StackSlice::default()),
+            Self::XXH64 => HashBuilder::XXH64(Xxh64::new(42)),
             Self::XXH3_64 => HashBuilder::XXH3_64(Xxh3::default()),
             Self::XXH3_128 => HashBuilder::XXH3_128(Xxh3::default()),
             Self::CyclicPoly32 => HashBuilder::CyclicPoly32(CyclicPoly32::new(block_size)),
@@ -388,49 +391,70 @@ pub type CyclicPoly64 = RollingHash<Box<cyclic_poly_23::CyclicPoly64>>;
 /// Implements the trait [`RollingHasher`].
 pub type Adler32 = RollingHash<adler32::RollingAdler32>;
 
-#[derive(Clone)]
 enum HashBuilder {
     None4(StackSlice<4>),
     None8(StackSlice<8>),
     None16(StackSlice<16>),
+    XXH64(Xxh64),
     XXH3_64(Xxh3),
     XXH3_128(Xxh3),
     CyclicPoly32(CyclicPoly32),
     CyclicPoly64(CyclicPoly64),
     Adler32(Adler32),
 }
+
+impl Clone for HashBuilder {
+    fn clone(&self) -> Self {
+        match self {
+            Self::None4(h) => Self::None4(h.clone()),
+            Self::None8(h) => Self::None8(h.clone()),
+            Self::None16(h) => Self::None16(h.clone()),
+            Self::XXH64(_) => Self::XXH64(Xxh64::new(42)),
+            Self::XXH3_64(h) => Self::XXH3_64(h.clone()),
+            Self::XXH3_128(h) => Self::XXH3_128(h.clone()),
+            Self::CyclicPoly32(h) => Self::CyclicPoly32(h.clone()),
+            Self::CyclicPoly64(h) => Self::CyclicPoly64(h.clone()),
+            Self::Adler32(h) => Self::Adler32(h.clone()),
+        }
+    }
+}
 impl HashBuilder {
     #[inline]
     fn finish_reset(&mut self) -> HashResult {
         match self {
             Self::None4(h) => {
-                let r = HashResult::None4(h.finish().to_le_bytes());
+                let r = HashResult::B4(h.finish().to_le_bytes());
                 *h = StackSlice::default();
                 r
             }
             Self::None8(h) => {
-                let r = HashResult::None8(h.finish().to_le_bytes());
+                let r = HashResult::B8(h.finish().to_le_bytes());
                 *h = StackSlice::default();
                 r
             }
             Self::None16(h) => {
-                let r = HashResult::None16(h.finish().to_le_bytes());
+                let r = HashResult::B16(h.finish().to_le_bytes());
                 *h = StackSlice::default();
                 r
             }
+            Self::XXH64(h) => {
+                let r = HashResult::B8(h.digest().to_le_bytes());
+                h.reset(42);
+                r
+            }
             Self::XXH3_64(h) => {
-                let r = HashResult::XXH3_64(h.digest().to_le_bytes());
+                let r = HashResult::B8(h.digest().to_le_bytes());
                 h.reset();
                 r
             }
             Self::XXH3_128(h) => {
-                let r = HashResult::XXH3_128(h.digest128().to_le_bytes());
+                let r = HashResult::B16(h.digest128().to_le_bytes());
                 h.reset();
                 r
             }
-            Self::CyclicPoly32(h) => HashResult::CyclicPoly32(h.finish_reset().to_le_bytes()),
-            Self::CyclicPoly64(h) => HashResult::CyclicPoly64(h.finish_reset().to_le_bytes()),
-            Self::Adler32(h) => HashResult::Adler32(h.finish_reset().to_le_bytes()),
+            Self::CyclicPoly32(h) => HashResult::B4(h.finish_reset().to_le_bytes()),
+            Self::CyclicPoly64(h) => HashResult::B8(h.finish_reset().to_le_bytes()),
+            Self::Adler32(h) => HashResult::B4(h.finish_reset().to_le_bytes()),
         }
     }
     #[inline]
@@ -439,6 +463,7 @@ impl HashBuilder {
             Self::None4(h) => h.write(data),
             Self::None8(h) => h.write(data),
             Self::None16(h) => h.write(data),
+            Self::XXH64(h) => h.update(data),
             Self::XXH3_64(h) | Self::XXH3_128(h) => h.update(data),
             Self::CyclicPoly32(h) => h.write(data, position),
             Self::CyclicPoly64(h) => h.write(data, position),
@@ -456,27 +481,16 @@ impl Debug for HashBuilder {
 #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
 #[must_use]
 enum HashResult {
-    None4([u8; 4]),
-    None8([u8; 8]),
-    None16([u8; 16]),
-    Fnv([u8; 8]),
-    XXH3_64([u8; 8]),
-    XXH3_128([u8; 16]),
-    CyclicPoly32([u8; 4]),
-    CyclicPoly64([u8; 8]),
-    Adler32([u8; 4]),
+    B4([u8; 4]),
+    B8([u8; 8]),
+    B16([u8; 16]),
 }
 impl HashResult {
     fn to_bytes(self) -> [u8; 16] {
         match self {
-            Self::None4(bytes) | Self::CyclicPoly32(bytes) | Self::Adler32(bytes) => {
-                to_16_le_bytes(&bytes)
-            }
-            Self::None8(bytes)
-            | Self::Fnv(bytes)
-            | Self::XXH3_64(bytes)
-            | Self::CyclicPoly64(bytes) => to_16_le_bytes(&bytes),
-            Self::None16(bytes) | Self::XXH3_128(bytes) => to_16_le_bytes(&bytes),
+            Self::B4(bytes) => to_16_le_bytes(&bytes),
+            Self::B8(bytes) => to_16_le_bytes(&bytes),
+            Self::B16(bytes) => to_16_le_bytes(&bytes),
         }
     }
 }
@@ -730,8 +744,8 @@ impl Signature {
             0..=4 => Signature::with_algorithm(HashAlgorithm::None4, block_size),
             5..=8 => Signature::with_algorithm(HashAlgorithm::None8, block_size),
             9..=16 => Signature::with_algorithm(HashAlgorithm::None16, block_size),
-            // just so the signature isn't larger than the actual data.
-            17..=64 => Signature::with_algorithm(HashAlgorithm::CyclicPoly32, block_size),
+            // XXH64 is actually faster than XXH3 for sizes of < 64 bytes.
+            17..=64 => Signature::with_algorithm(HashAlgorithm::XXH64, block_size),
             // according to imperical results, XXHash is just that much faster than CyclicPoly -
             // XXH3 performs better than CyclicPoly even for rolling hash applications.
             //
