@@ -33,3 +33,8 @@ serde = { version = "^1", features = ["derive"] }
 tokio = { version = "=1.17", features = ["macros", "rt-multi-thread", "parking_lot", "time", "sync", "fs"] }
 tokio-tungstenite = { version = "0.17", features = ["rustls-tls-webpki-roots"] }
 walkdir = "2"
+
+[profile.distribution]
+inherits = "release"
+lto = true
+strip = true

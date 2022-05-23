@@ -21,3 +21,7 @@ semver = { version = "^1", features = ["serde"] }
 serde = { version = "^1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rand = "^0.8"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -37,3 +37,23 @@ jobs:
               with:
                   working-directory: agde-tokio
                   private: true
+
+    build:
+        needs: [check]
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checking out sources
+              uses: actions/checkout@v1
+            - name: Installing Rust toolchain
+              uses: actions-rs/toolchain@v1
+              with:
+                  toolchain: stable
+                  profile: minimal
+            - uses: Swatinem/rust-cache@v1
+            - name: Compiling
+              run: cargo rustc --profile distribution
+            - name: Upload bin artefact
+              uses: actions/upload-artifact@v2
+              with:
+                  name: agde-tokio
+                  path: target/distribution/agde-tokio
