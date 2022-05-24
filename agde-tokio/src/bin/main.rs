@@ -115,9 +115,14 @@ async fn main() {
                     error!("Failed to start listening. Falling back to commit interval.");
                 }
                 native::catch_ctrlc(handle.state().clone());
-                handle.wait().await.unwrap();
+                let r = handle.wait().await;
                 let _ = watcher.unwatch(watch_path);
-                process::exit(0)
+                if let Err(err) = r {
+                    error!("Got error when running: {err}. Trying to reconnect in 10s.");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                } else {
+                    process::exit(0)
+                }
             }
             Err(err) => {
                 error!("Got error: {err}. Trying to reconnect in 10s.");
