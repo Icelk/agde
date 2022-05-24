@@ -3,11 +3,105 @@
 //! Already keeping this separate from the `agde-tokio` lib to make it easier to adapt this to the
 //! web.
 
+use std::io::{BufRead, BufReader, Read, Write};
+use std::task::Poll;
+
+use tokio::io::{AsyncRead, AsyncWrite};
+
 use crate::*;
 
 // OK to have lazy_static here since our native implementation only has one agde instance running.
 lazy_static::lazy_static! {
     static ref STATE: std::sync::Mutex<Option<StateHandle>> = std::sync::Mutex::new(None);
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Compression {
+    None = 0,
+    Zstd = 1,
+    Snappy = 2,
+}
+impl Compression {
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(match bytes.first()? {
+            0 => Self::None,
+            1 => Self::Zstd,
+            2 => Self::Snappy,
+            _ => return None,
+        })
+    }
+}
+
+struct AsyncReadBlocking<R: Read + Unpin>(R);
+impl<R: Read + Unpin> AsyncRead for AsyncReadBlocking<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let mut filled = buf.filled().len();
+        unsafe { buf.assume_init(buf.capacity()) };
+        let unfilled = &mut buf.filled_mut()[filled..];
+        let r = self.get_mut().0.read(unfilled);
+        if let Ok(read) = &r {
+            filled += read;
+        }
+
+        unsafe { buf.assume_init(filled) };
+        Poll::Ready(r.map(|_| ()))
+    }
+}
+struct AsyncWriteBlocking<R: Write + Unpin>(R);
+impl<R: Write + Unpin> AsyncWrite for AsyncWriteBlocking<R> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Poll::Ready(self.get_mut().0.write(buf))
+    }
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Poll::Ready(self.get_mut().0.flush())
+    }
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Poll::Ready(self.get_mut().0.flush())
+    }
+}
+struct AsyncReadBuf<R: AsyncRead + Unpin> {
+    reader: R,
+    buf: Vec<u8>,
+    pos: usize,
+}
+impl<R: AsyncRead + Unpin> AsyncRead for AsyncReadBuf<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        let buffer = me.buf.get(me.pos..).unwrap_or(&[]);
+        if !buffer.is_empty() {
+            let mut filled = buf.filled().len();
+            unsafe { buf.assume_init(buf.capacity()) };
+            let unfilled = &mut buf.filled_mut()[filled..];
+
+            let len = unfilled.len().min(buffer.len());
+            me.pos += len;
+            unfilled[..len].copy_from_slice(&buffer[..len]);
+            filled += len;
+
+            unsafe { buf.assume_init(filled) };
+            return Poll::Ready(Ok(()));
+        }
+
+        Pin::new(&mut me.reader).poll_read(cx, buf)
+    }
 }
 
 async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
@@ -502,14 +596,19 @@ pub async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {
     let conenction = result?;
     Ok(conenction.0.split())
 }
-pub async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
+async fn initial_metadata<
+    F: Future<Output = Result<Metadata, io::Error>>,
+    ReadF: Future<Output = Result<Option<Vec<u8>>, ()>>,
+    WriteF: Future<Output = Result<(), ()>>,
+>(
     name: &str,
     new: impl Fn() -> F,
     force_pull: bool,
+    read: impl Fn(String) -> ReadF,
+    write: impl Fn(String, Vec<u8>) -> WriteF,
 ) -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;
-    let metadata = tokio::fs::read(format!(".agde/{name}"))
-        .then(|r| async move { r.map_err(|_| ()) })
+    let metadata = read(format!(".agde/{name}"))
         .then(|data| async move {
             match data {
                 Ok(v) => match v {
@@ -524,20 +623,22 @@ pub async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
                 &data,
                 bincode::config::standard().write_fixed_array_length(),
             )
-            .map_err(|_| ())
+            .map_err(|_| true)
         });
     match metadata.await {
         Ok((metadata, _)) => {
             let mut metadata: Metadata = metadata;
             let mut differing = Vec::new();
-            for (resource, metadata) in metadata.iter() {
+            for (resource, _metadata) in metadata.iter() {
                 let meta = tokio::fs::metadata(format!(".agde/files/{resource}")).await;
                 match meta {
-                    Ok(meta) => {
-                        if meta.len() != metadata.size() {
-                            differing.push(resource.to_owned());
-                            error!("File {resource} has different length in cached metadata and on disk.");
-                        }
+                    Ok(_meta) => {
+                        // don't do metadata checks, as compression changes the size
+                        //
+                        // if meta.len() != metadata.size() {
+                        // differing.push(resource.to_owned());
+                        // error!("File {resource} has different length in cached metadata and on disk.");
+                        // }
                     }
                     Err(err) => match err.kind() {
                         io::ErrorKind::NotFound => {

@@ -13,7 +13,6 @@ use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
 use agde::Manager;
 use futures::{Future, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite;
 
@@ -869,8 +868,6 @@ async fn handle_message(
                                 let resource_data = options.read(resource, Storage::Public).await?;
 
                                 if let Some(data) = resource_data {
-                                    info!("Read {:?} from public", String::from_utf8_lossy(&data));
-
                                     let resource = resource.to_owned();
                                     let data =
                                         applier.apply(data).map_or_else(|(_e, v)| v, identity);
@@ -884,7 +881,11 @@ async fn handle_message(
                                         .await?;
                                 } else {
                                     // `TODO`: log check
-                                    warn!("Got Modify event, but resource doesn't exist. Reconnecting might help, but this could be an extortion to attempt to make you disconnect.");
+                                    warn!(
+                                        "Got Modify event, but resource doesn't exist. \
+                                        Reconnecting might help, but this could be an \
+                                        extortion to attempt to make you disconnect."
+                                    );
                                 };
                             }
                             agde::EventKind::Create(_) => {
@@ -1157,21 +1158,23 @@ async fn commit_and_send(
                             None
                         };
 
-                        let mut current = if let Some(data) =
-                            options.read(resource, Storage::Current).await?
-                        {
-                            data
-                        } else {
-                            warn!("Options::diff said current storage was modified, but it doesn't exist. Please check your `rough_resource_diff function`");
-                            continue;
-                        };
+                        let mut current =
+                            if let Some(data) = options.read(resource, Storage::Current).await? {
+                                data
+                            } else {
+                                warn!(
+                                    "Options::diff said current storage was modified, \
+                                    but it doesn't exist. Please check \
+                                    your `rough_resource_diff function`"
+                                );
+                                continue;
+                            };
 
                         let public = options
                             .read(resource, Storage::Public)
                             .await?
                             .unwrap_or_default();
 
-                        info!("Read {:?} from public", String::from_utf8_lossy(&public));
                         info!(
                             "Last check: {:?}, now {:?}",
                             manager.last_commit_or_epoch(),
@@ -1189,11 +1192,6 @@ async fn commit_and_send(
                             // copied below.
                             continue;
                         };
-
-                        warn!(
-                            "Unwould public data, now resource at: '''\n{:?}\n'''",
-                            std::str::from_utf8(&public)
-                        );
 
                         let event = if options.verify_diffs {
                             agde::event::Modify::new_with_verification(
@@ -1324,7 +1322,6 @@ async fn commit_and_send(
         {
             let mut changes = changed.lock().await;
             for resource in &*changes {
-                warn!("Resource {resource} changed, from **remote**");
                 let actual = options.read(resource, Storage::Public).await?;
                 if let Some(actual) = actual {
                     options

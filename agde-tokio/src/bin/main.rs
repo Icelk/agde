@@ -1,4 +1,5 @@
 use agde::Manager;
+use agde_tokio::native::Compression;
 use clap::{command, Arg, Command};
 use log::error;
 use notify::Watcher;
@@ -67,6 +68,13 @@ fn command() -> Command<'static> {
                 .help("Number of seconds (float) between writing cache to the FS.")
                 .validator(validate(|f: f64| f > 0.)),
         )
+        .arg(
+            Arg::new("compress")
+                .short('c')
+                .long("compress")
+                .possible_values(["none", "snappy", "zstd"])
+                .default_value("zstd"),
+        )
 }
 
 #[tokio::main]
@@ -88,8 +96,18 @@ async fn main() {
         .value_of_t("flush")
         .expect("--flush-interval takes a float value");
 
+    let compress = match matches
+        .value_of("compress")
+        .expect("we passed a default value")
+    {
+        "none" => Compression::None,
+        "snappy" => Compression::Snappy,
+        "zstd" => Compression::Zstd,
+        _ => unreachable!("we've covered all the possible values"),
+    };
+
     loop {
-        let options = native::options_fs(force)
+        let options = native::options_fs(force, compress)
             .await
             .expect("failed to read file system metadata");
         let options = options
