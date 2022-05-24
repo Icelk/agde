@@ -510,6 +510,15 @@ pub async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
     tokio::fs::create_dir_all(".agde").await?;
     let metadata = tokio::fs::read(format!(".agde/{name}"))
         .then(|r| async move { r.map_err(|_| ()) })
+        .then(|data| async move {
+            match data {
+                Ok(v) => match v {
+                    Some(v) => Ok(v),
+                    None => Err(false),
+                },
+                Err(()) => Err(true),
+            }
+        })
         .and_then(|data| async move {
             bincode::serde::decode_from_slice::<Metadata, _>(
                 &data,
@@ -546,8 +555,10 @@ pub async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
 
             Ok(metadata)
         }
-        Err(_) => {
-            error!("Metadata corrupt. Recreating.");
+        Err(hard_error) => {
+            if hard_error {
+                error!("Metadata corrupt. Recreating.");
+            }
 
             let populated = tokio::task::spawn_blocking(move || {
                 walkdir::WalkDir::new("./")
