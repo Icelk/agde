@@ -624,7 +624,7 @@ async fn initial_metadata<
     write: impl Fn(String, Vec<u8>) -> WriteF,
 ) -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;
-    let metadata = read(format!("{name}"))
+    let metadata = read(name.to_owned())
         .then(|data| async move {
             match data {
                 Ok(v) => match v {
