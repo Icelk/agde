@@ -570,6 +570,8 @@ pub async fn run(
             options.write_clean("y", false).await?;
         } else if changes.is_empty() {
             options.write_clean("y", false).await?;
+        } else {
+            return Err("state not clean".into());
         }
     }
 
