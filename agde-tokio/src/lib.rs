@@ -96,7 +96,6 @@ pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
 pub type WriteFn = Box<dyn Fn(String, WriteStorage, Vec<u8>) -> WriteFuture + Send + Sync>;
 pub type DeleteFn = Box<dyn Fn(String, Storage) -> DeleteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
-pub type SyncFn = Box<dyn Fn(Storage) -> SyncFuture + Send + Sync>;
 #[must_use]
 pub struct Options {
     read: ReadFn,
@@ -104,7 +103,6 @@ pub struct Options {
     delete: DeleteFn,
     /// Returns a list of the resources which might have changed.
     rough_resource_diff: DiffFn,
-    sync_metadata: SyncFn,
 
     metadata: Arc<Mutex<Metadata>>,
     offline_metadata: Arc<Mutex<Metadata>>,
@@ -129,7 +127,6 @@ impl Options {
         write: WriteFn,
         delete: DeleteFn,
         rough_resource_diff: DiffFn,
-        sync_metadata: SyncFn,
         metadata: Arc<Mutex<Metadata>>,
         offline_metadata: Arc<Mutex<Metadata>>,
         startup_timeout: Duration,
@@ -142,7 +139,6 @@ impl Options {
             write,
             delete,
             rough_resource_diff,
-            sync_metadata,
             metadata,
             offline_metadata,
             file_cache: Arc::new(std::sync::Mutex::new(FileCache::new(1024 * 8))),
@@ -289,9 +285,35 @@ impl Options {
     /// - [`Storage::Current`] syncs [`Self::metadata_offline`]
     /// - [`Storage::Meta`] returns `Ok(())` without doing anything.
     pub async fn sync_metadata(&self, storage: Storage) -> Result<(), ApplicationError> {
-        (self.sync_metadata)(storage)
-            .await
-            .map_err(|()| ApplicationError::StoragePermissions)
+        match storage {
+            Storage::Public => {
+                let lock = self.metadata().lock().await;
+                let data = bincode::serde::encode_to_vec(
+                    &*lock,
+                    bincode::config::standard().write_fixed_array_length(),
+                )
+                .expect("failed to serialize metadata");
+                self.write("metadata".to_owned(), WriteStorage::Meta, data, true)
+                    .await?;
+            }
+            Storage::Current => {
+                let lock = self.metadata_offline().lock().await;
+                let data = bincode::serde::encode_to_vec(
+                    &*lock,
+                    bincode::config::standard().write_fixed_array_length(),
+                )
+                .expect("failed to serialize metadata");
+                self.write(
+                    "metadata-offline".to_owned(),
+                    WriteStorage::Meta,
+                    data,
+                    true,
+                )
+                .await?;
+            }
+            Storage::Meta => {}
+        }
+        Ok(())
     }
 
     pub async fn read_clean(&self) -> Result<Option<Vec<u8>>, ApplicationError> {

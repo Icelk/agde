@@ -57,15 +57,6 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
 
     Ok(Metadata::new(map))
 }
-async fn metadata_sync(metadata: &Metadata, name: &str) -> Result<(), io::Error> {
-    let data = bincode::serde::encode_to_vec(
-        metadata,
-        bincode::config::standard().write_fixed_array_length(),
-    )
-    .expect("serialization of metadata should be infallible");
-    tokio::fs::write(format!(".agde/{name}"), data).await?;
-    Ok(())
-}
 
 pub fn catch_ctrlc(handle: StateHandle) {
     let manager = Arc::clone(&handle.manager);
@@ -179,136 +170,225 @@ pub fn catch_ctrlc(handle: StateHandle) {
     }
 }
 
-pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
-    let metadata =
-        initial_metadata("metadata", || metadata_new(Storage::Public), force_pull).await?;
-    // A metadata cache that is held constant between diff calls.
-    let offline_metadata = initial_metadata(
-        "metadata-offline",
-        || {
-            let r = Ok(metadata.clone());
-            futures::future::ready(r)
-        },
-        force_pull,
-    )
-    .await?;
-
-    let metadata = Arc::new(Mutex::new(metadata));
-    let offline_metadata = Arc::new(Mutex::new(offline_metadata));
+pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Options, io::Error> {
+    // empty temporary metadata
+    let metadata = Arc::new(Mutex::new(Metadata::new(HashMap::new())));
+    let offline_metadata = Arc::new(Mutex::new(Metadata::new(HashMap::new())));
     let write_metadata = Arc::clone(&metadata);
     let write_offline_metadata = Arc::clone(&offline_metadata);
     let delete_metadata = Arc::clone(&metadata);
     let delete_offline_metadata = Arc::clone(&offline_metadata);
     let diff_metadata = Arc::clone(&metadata);
     let diff_offline_metadata = Arc::clone(&offline_metadata);
-    let sync_metadata = Arc::clone(&metadata);
-    let sync_offline_metadata = Arc::clone(&offline_metadata);
-    Ok(Options::new(
-        Box::new(|resource, storage| {
-            Box::pin(async move {
-                let path = match storage {
-                    Storage::Public => format!(".agde/files/{resource}",),
-                    Storage::Current => format!("./{resource}"),
-                    Storage::Meta => format!(".agde/{resource}"),
-                };
-                let file = tokio::fs::File::open(&path).await;
-                let mut file = match file {
-                    Ok(f) => f,
+
+    let read = |resource, storage| {
+        Box::pin(async move {
+            let path = match storage {
+                Storage::Public => format!(".agde/files/{resource}",),
+                Storage::Current => format!("./{resource}"),
+                Storage::Meta => format!(".agde/{resource}"),
+            };
+            tokio::task::spawn_blocking(move || {
+                let mut file = match std::fs::File::open(&path) {
+                    Ok(f) => BufReader::new(f),
                     Err(err) => match err.kind() {
                         io::ErrorKind::NotFound => return Ok(None),
                         _ => return Err(()),
                     },
                 };
-                let mut buf = Vec::with_capacity(4096);
-                file.read_to_end(&mut buf).await.map_err(|_| ())?;
-                Ok(Some(buf))
-            }) as ReadFuture
-        }),
-        Box::new(move |resource, storage, data| {
-            let metadata = Arc::clone(&write_metadata);
-            let offline_metadata = Arc::clone(&write_offline_metadata);
-            Box::pin(async move {
-                let path = match storage {
-                    WriteStorage::Public(_, _) => format!(".agde/files/{resource}",),
-                    WriteStorage::Current(_) => format!("./{resource}"),
-                    WriteStorage::Meta => format!(".agde/{resource}"),
+
+                let buf = if !matches!(storage, Storage::Current) {
+                    println!("Decompress file {path:?}");
+                    let buffer = file.fill_buf().map_err(|_| ())?;
+                    println!(
+                        "First 128 in buf {:?}",
+                        String::from_utf8_lossy(&buffer[..buffer.len().min(128)])
+                    );
+                    let compress = Compression::from_bytes(buffer);
+                    // don't ignore the first if we have old storage which stored without the
+                    // compression header.
+                    if compress.is_some() {
+                        file.read_exact(&mut [0; 1])
+                            .expect("failed to read from buffer");
+                    }
+                    let compress = compress.unwrap_or(Compression::None);
+                    match compress {
+                        Compression::None => {
+                            let mut buf = Vec::with_capacity(1024);
+                            file.read_to_end(&mut buf).map_err(|_| ())?;
+                            buf
+                        }
+                        Compression::Zstd => todo!(),
+                        Compression::Snappy => {
+                            let mut decompressor = snap::read::FrameDecoder::new(file);
+                            let mut decompressed_buf = Vec::with_capacity(1024);
+                            let r = decompressor.read_to_end(&mut decompressed_buf);
+                            if r.is_err() {
+                                warn!(
+                                    "Reading from agde public file failed. \
+                                        Make sure you have permissions and didn't \
+                                        modify the compressed files."
+                                );
+                                return Err(());
+                            }
+
+                            decompressed_buf
+                        }
+                    }
+                } else {
+                    println!("Dont");
+                    let mut buf = Vec::with_capacity(1024);
+                    file.read_to_end(&mut buf).map_err(|_| ())?;
+                    buf
                 };
 
-                if let Some(path) = Path::new(&path).parent() {
-                    tokio::fs::create_dir_all(path).await.map_err(|_| ())?;
-                }
+                Ok(Some(buf))
+            })
+            .await
+            .unwrap()
+        }) as ReadFuture
+    };
+    let write = move |resource: String, storage, data: Vec<u8>| {
+        let metadata = Arc::clone(&write_metadata);
+        let offline_metadata = Arc::clone(&write_offline_metadata);
+        Box::pin(async move {
+            let path = match storage {
+                WriteStorage::Public(_, _) => format!(".agde/files/{resource}",),
+                WriteStorage::Current(_) => format!("./{resource}"),
+                WriteStorage::Meta => format!(".agde/{resource}"),
+            };
+
+            if let Some(path) = Path::new(&path).parent() {
+                tokio::fs::create_dir_all(path).await.map_err(|_| ())?;
+            }
+            if data.len() < 300 {
                 info!("Writing to {path}, {:?}", String::from_utf8_lossy(&data));
+            } else {
+                info!("Writing to {path} with length {}", data.len());
+            }
 
-                let mut file = tokio::fs::File::create(&path).await.map_err(|_| ())?;
-                file.write_all(&data).await.map_err(|_| ())?;
-                file.flush().await.map_err(|_| ())?;
-                match storage {
-                    // meta storage obviously doesn't affect the files' metadata.
-                    WriteStorage::Meta => {}
-                    WriteStorage::Public(write_mtime, mut event_mtime) => {
-                        let mut metadata = metadata.lock().await;
+            let data_len = data.len();
+            let file_path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut file = std::fs::File::create(&file_path).map_err(|_| ())?;
+                if !matches!(storage, WriteStorage::Current(_)) {
+                    file.write(&[compression as u8]).map_err(|_| ())?;
+                    println!("Compresss! {file_path:?}");
+                    match compression {
+                        Compression::None => {
+                            file.write_all(&data).map_err(|_| ())?;
+                        }
+                        Compression::Zstd => todo!(),
+                        Compression::Snappy => {
+                            let mut compressor = snap::write::FrameEncoder::new(&mut file);
+                            compressor.write_all(&data).map_err(|_| ())?;
+                        }
+                    }
+                } else {
+                    println!("Dont");
+                    file.write_all(&data).map_err(|_| ())?;
+                }
+                file.flush().map_err(|_| ())?;
+                Ok(())
+            })
+            .await
+            .unwrap()?;
 
-                        let mut mtime = match write_mtime {
-                            WriteMtime::No => None,
-                            WriteMtime::LookUpCurrent => {
-                                if let Ok(metadata) =
-                                    tokio::fs::metadata(format!("./{resource}")).await
-                                {
-                                    let mtime = metadata.modified().map_err(|_| ())?;
-                                    Some(mtime)
-                                } else {
-                                    None
-                                }
+            match storage {
+                // meta storage obviously doesn't affect the files' metadata.
+                WriteStorage::Meta => {}
+                WriteStorage::Public(write_mtime, mut event_mtime) => {
+                    let mut metadata = metadata.lock().await;
+
+                    let mut mtime = match write_mtime {
+                        WriteMtime::No => None,
+                        WriteMtime::LookUpCurrent => {
+                            if let Ok(metadata) = tokio::fs::metadata(format!("./{resource}")).await
+                            {
+                                let mtime = metadata.modified().map_err(|_| ())?;
+                                Some(mtime)
+                            } else {
+                                None
                             }
-                        };
-                        if let Some(meta) = metadata.get(&resource) {
-                            if meta.mtime_of_last_event() != SystemTime::UNIX_EPOCH {
+                        }
+                    };
+                    if let Some(meta) = metadata.get(&resource) {
+                        if meta.mtime_of_last_event() != SystemTime::UNIX_EPOCH {
+                            event_mtime = meta.mtime_of_last_event();
+                        }
+                    }
+                    if mtime.is_none() {
+                        let offline_meta = { offline_metadata.lock().await.get(&resource) };
+                        if let Some(meta) = offline_meta {
+                            mtime = meta.mtime_in_current();
+                        }
+                    }
+                    let meta = ResourceMeta::new_from_event(mtime, event_mtime, data_len as u64);
+                    metadata.insert(resource, meta);
+                }
+                WriteStorage::Current(write_mtime) => match write_mtime {
+                    WriteMtime::No => {}
+                    WriteMtime::LookUpCurrent => {
+                        let file_metadata = tokio::fs::metadata(&path).await.map_err(|_| ())?;
+                        let mtime = file_metadata.modified().map_err(|_| ())?;
+                        {
+                            let mut metadata = offline_metadata.lock().await;
+
+                            metadata.insert(
+                                resource.clone(),
+                                ResourceMeta::new(Some(mtime), data_len as u64),
+                            );
+                        }
+                        {
+                            let mut metadata = metadata.lock().await;
+
+                            let mut event_mtime = SystemTime::UNIX_EPOCH;
+                            if let Some(meta) = metadata.get(&resource) {
                                 event_mtime = meta.mtime_of_last_event();
                             }
+                            let meta = ResourceMeta::new_from_event(
+                                Some(mtime),
+                                event_mtime,
+                                data_len as u64,
+                            );
+                            metadata.insert(resource, meta);
                         }
-                        if mtime.is_none() {
-                            let offline_meta = { offline_metadata.lock().await.get(&resource) };
-                            if let Some(meta) = offline_meta {
-                                mtime = meta.mtime_in_current();
-                            }
-                        }
-                        let meta =
-                            ResourceMeta::new_from_event(mtime, event_mtime, data.len() as u64);
-                        metadata.insert(resource, meta);
                     }
-                    WriteStorage::Current(write_mtime) => match write_mtime {
-                        WriteMtime::No => {}
-                        WriteMtime::LookUpCurrent => {
-                            let file_metadata = tokio::fs::metadata(&path).await.map_err(|_| ())?;
-                            let mtime = file_metadata.modified().map_err(|_| ())?;
-                            {
-                                let mut metadata = offline_metadata.lock().await;
+                },
+            }
+            Ok(())
+        }) as WriteFuture
+    };
 
-                                metadata.insert(
-                                    resource.clone(),
-                                    ResourceMeta::new(Some(mtime), data.len() as u64),
-                                );
-                            }
-                            {
-                                let mut metadata = metadata.lock().await;
+    let meta = initial_metadata(
+        "metadata",
+        || metadata_new(Storage::Public),
+        force_pull,
+        |res| read(res, Storage::Meta),
+        |res, data| write(res, WriteStorage::Meta, data),
+    )
+    .await?;
+    // A metadata cache that is held constant between diff calls.
+    let offline_meta = initial_metadata(
+        "metadata-offline",
+        || {
+            let r = Ok(meta.clone());
+            futures::future::ready(r)
+        },
+        force_pull,
+        |res| read(res, Storage::Meta),
+        |res, data| write(res, WriteStorage::Meta, data),
+    )
+    .await?;
 
-                                let mut event_mtime = SystemTime::UNIX_EPOCH;
-                                if let Some(meta) = metadata.get(&resource) {
-                                    event_mtime = meta.mtime_of_last_event();
-                                }
-                                let meta = ResourceMeta::new_from_event(
-                                    Some(mtime),
-                                    event_mtime,
-                                    data.len() as u64,
-                                );
-                                metadata.insert(resource, meta);
-                            }
-                        }
-                    },
-                }
-                Ok(())
-            }) as WriteFuture
-        }),
+    {
+        *metadata.lock().await = meta;
+        *offline_metadata.lock().await = offline_meta;
+    }
+
+    Ok(Options::new(
+        Box::new(read),
+        Box::new(write),
         Box::new(move |resource, storage| {
             let metadata = Arc::clone(&delete_metadata);
             let offline_metadata = Arc::clone(&delete_offline_metadata);
@@ -359,22 +439,6 @@ pub async fn options_fs(force_pull: bool) -> Result<Options, io::Error> {
                 debug!("Changed: {:?}", changed);
                 Ok(changed)
             }) as DiffFuture
-        }),
-        Box::new(move |storage| {
-            let metadata = match storage {
-                Storage::Public => Some((Arc::clone(&sync_metadata), "metadata")),
-                Storage::Current => Some((Arc::clone(&sync_offline_metadata), "metadata-offline")),
-                Storage::Meta => None,
-            };
-            Box::pin(async move {
-                if let Some((meta, name)) = metadata {
-                    metadata_sync(&*meta.lock().await, name)
-                        .await
-                        .map_err(|_| ())
-                } else {
-                    Ok(())
-                }
-            })
         }),
         metadata,
         offline_metadata,
@@ -502,7 +566,16 @@ pub async fn initial_metadata<F: Future<Output = Result<Metadata, io::Error>>>(
 
             if !populated || force_pull {
                 let metadata = new().await?;
-                if let Err(err) = metadata_sync(&metadata, name).await {
+                let r = write(
+                    name.to_owned(),
+                    bincode::serde::encode_to_vec(
+                        &metadata,
+                        bincode::config::standard().write_fixed_array_length(),
+                    )
+                    .expect("failed to serialize metadata"),
+                )
+                .await;
+                if let Err(err) = r {
                     error!("Failed to write newly created metadata: {err:?}");
                 }
                 Ok(metadata)
