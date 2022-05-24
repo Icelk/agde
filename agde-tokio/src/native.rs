@@ -292,12 +292,7 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
                 };
 
                 let buf = if !matches!(storage, Storage::Current) {
-                    println!("Decompress file {path:?}");
                     let buffer = file.fill_buf().map_err(|_| ())?;
-                    println!(
-                        "First 128 in buf {:?}",
-                        String::from_utf8_lossy(&buffer[..buffer.len().min(128)])
-                    );
                     let compress = Compression::from_bytes(buffer);
                     // don't ignore the first if we have old storage which stored without the
                     // compression header.
@@ -312,7 +307,22 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
                             file.read_to_end(&mut buf).map_err(|_| ())?;
                             buf
                         }
-                        Compression::Zstd => todo!(),
+                        Compression::Zstd => {
+                            let mut decompressor = zstd::stream::read::Decoder::with_buffer(file)
+                                .expect("Failed to create zstd decoder");
+                            let mut decompressed_buf = Vec::with_capacity(1024);
+                            let r = decompressor.read_to_end(&mut decompressed_buf);
+                            if let Err(err) = r {
+                                warn!(
+                                    "Reading from agde public file failed. \
+                                    Make sure you have permissions and didn't \
+                                    modify the compressed files: {err:?}"
+                                );
+                                return Err(());
+                            }
+
+                            decompressed_buf
+                        }
                         Compression::Snappy => {
                             let mut decompressor = snap::read::FrameDecoder::new(file);
                             let mut decompressed_buf = Vec::with_capacity(1024);
@@ -367,19 +377,25 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
                 let mut file = std::fs::File::create(&file_path).map_err(|_| ())?;
                 if !matches!(storage, WriteStorage::Current(_)) {
                     file.write(&[compression as u8]).map_err(|_| ())?;
-                    println!("Compresss! {file_path:?}");
                     match compression {
                         Compression::None => {
                             file.write_all(&data).map_err(|_| ())?;
                         }
-                        Compression::Zstd => todo!(),
+                        Compression::Zstd => {
+                            let mut compressor = zstd::stream::write::Encoder::new(
+                                &mut file,
+                                zstd::DEFAULT_COMPRESSION_LEVEL,
+                            )
+                            .expect("Failed to create a zstd encoder.");
+                            compressor.write_all(&data).map_err(|_| ())?;
+                            compressor.finish().map_err(|_| ())?;
+                        }
                         Compression::Snappy => {
                             let mut compressor = snap::write::FrameEncoder::new(&mut file);
                             compressor.write_all(&data).map_err(|_| ())?;
                         }
                     }
                 } else {
-                    println!("Dont");
                     file.write_all(&data).map_err(|_| ())?;
                 }
                 file.flush().map_err(|_| ())?;
@@ -456,7 +472,7 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
 
     let meta = initial_metadata(
         "metadata",
-        || metadata_new(Storage::Public),
+        || metadata_new(Storage::Current),
         force_pull,
         |res| read(res, Storage::Meta),
         |res, data| write(res, WriteStorage::Meta, data),
@@ -608,7 +624,7 @@ async fn initial_metadata<
     write: impl Fn(String, Vec<u8>) -> WriteF,
 ) -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;
-    let metadata = read(format!(".agde/{name}"))
+    let metadata = read(format!("{name}"))
         .then(|data| async move {
             match data {
                 Ok(v) => match v {
@@ -676,7 +692,7 @@ async fn initial_metadata<
             .await
             .unwrap();
 
-            if !populated || force_pull {
+            if !populated || !hard_error || force_pull {
                 let metadata = new().await?;
                 let r = write(
                     name.to_owned(),

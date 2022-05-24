@@ -753,9 +753,12 @@ pub async fn run(
 
     // trigger fast forward
     {
-        let mut manager = manager.lock().await;
-        if let Some(msg) = manager.process_fast_forward() {
+        let mut mgr = manager.lock().await;
+        if let Some(msg) = mgr.process_fast_forward() {
             send(&write, &msg).await?;
+        } else {
+            drop(mgr);
+            commit_and_send(&manager, &options, &write, &changed).await?;
         }
     }
     info!("Began fast forwarding.");
