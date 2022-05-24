@@ -946,8 +946,6 @@ async fn handle_message(
             send(write, &msg).await?;
         }
         agde::MessageKind::SyncReply(mut sync) => {
-            let mut changes = changed.lock().await;
-
             let (mut rewinder, metadata_applier) =
                 if let Ok(rewinder) = manager.apply_sync_reply(&mut sync) {
                     rewinder
@@ -1037,17 +1035,9 @@ async fn handle_message(
                     return Ok(());
                 }
             }
-            for (resource, _) in sync.diff() {
-                {
-                    changes.insert(resource.as_ref().to_owned());
-                }
-            }
 
             for resource in sync.delete() {
                 let resource = resource.as_ref();
-                {
-                    changes.insert(resource.to_owned());
-                }
                 options.delete(resource, Storage::Public).await?;
             }
 
@@ -1074,7 +1064,6 @@ async fn handle_message(
             }
 
             drop(manager);
-            drop(changes);
             commit_and_send(mgr, options, write, changed).await?;
         }
         agde::MessageKind::HashCheck(_) => todo!(),
