@@ -581,7 +581,7 @@ pub async fn run(
     {
         let message = { manager.process_hello() };
         write
-            .send(message.to_bin().into())
+            .send(to_compressed_bin(&message).into())
             .await
             .map_err(|_| ApplicationError::UnexpectedServerClose)?;
 
@@ -613,14 +613,15 @@ pub async fn run(
                             warn!("Recieved text from server: {text:?}");
                         }
                         tungstenite::Message::Binary(data) => {
-                            if let Ok(message) = agde::Message::from_bin(&data) {
+                            if let Ok(message) = from_compressed_bin(&data) {
                                 total += 1;
                                 match message.inner() {
                                     agde::MessageKind::Hello(hello) => {
                                         // copied from loop below.
                                         info!("Pier {} joined the network.", hello.uuid());
                                         let msg = manager.apply_hello(hello);
-                                        if write.send(msg.to_bin().into()).await.is_err() {
+                                        if write.send(to_compressed_bin(&msg).into()).await.is_err()
+                                        {
                                             return Err(Box::new(ApplicationError::StreamBroken));
                                         }
                                     }
@@ -687,7 +688,7 @@ pub async fn run(
                         warn!("Recieved text from server: {text:?}");
                     }
                     tungstenite::Message::Binary(data) => {
-                        let message = agde::Message::from_bin(&data);
+                        let message = from_compressed_bin(&data);
                         let message = if let Ok(m) = message {
                             m
                         } else {
@@ -731,8 +732,7 @@ pub async fn run(
     {
         let mut manager = manager.lock().await;
         if let Some(msg) = manager.process_fast_forward() {
-            let mut write = write.lock().await;
-            write.send(msg.to_bin().into()).await?;
+            send(&write, &msg).await?;
         }
     }
     info!("Began fast forwarding.");
@@ -805,8 +805,7 @@ async fn handle_message(
         agde::MessageKind::Hello(hello) => {
             info!("Pier {} joined the network.", hello.uuid());
             let msg = manager.apply_hello(&hello);
-            let mut w = write.lock().await;
-            if w.send(msg.to_bin().into()).await.is_err() {
+            if send(write, &msg).await.is_err() {
                 return Err(ApplicationError::StreamBroken);
             }
         }
@@ -891,7 +890,7 @@ async fn handle_message(
         agde::MessageKind::FastForward(_ff) => {
             let meta = options.metadata().lock().await;
             let msg = manager.process_fast_forward_response(meta.clone(), sender);
-            send(write, msg).await?;
+            send(write, &msg).await?;
         }
         agde::MessageKind::FastForwardReply(ff) => {
             let changes = {
@@ -926,7 +925,7 @@ async fn handle_message(
 
             let sync_request = sync_request.finish();
             let msg = manager.process_sync(sync_request, Some(changes));
-            send(write, msg).await?;
+            send(write, &msg).await?;
         }
         agde::MessageKind::Sync(sync) => {
             let mut builder = manager.apply_sync(&sync, sender);
@@ -944,7 +943,7 @@ async fn handle_message(
                 builder.add_diff(resource, diff);
             }
             let msg = manager.process_sync_reply(builder);
-            send(write, msg).await?;
+            send(write, &msg).await?;
         }
         agde::MessageKind::SyncReply(mut sync) => {
             let mut changes = changed.lock().await;
@@ -1030,7 +1029,7 @@ async fn handle_message(
                         the sync response. Trying again."
                     );
                     if let Some(ff) = manager.process_fast_forward() {
-                        send(write, ff).await?;
+                        send(write, &ff).await?;
                     }
                     return Ok(());
                 } else {
@@ -1330,10 +1329,10 @@ async fn commit_and_send(
     let send = async {
         let mut write = write.lock().await;
         for message in &messages {
-            let message = message.to_bin().into();
+            let message = to_compressed_bin(message);
 
             write
-                .feed(message)
+                .feed(message.into())
                 .await
                 .map_err(|_| ApplicationError::UnexpectedServerClose)?;
         }
@@ -1395,11 +1394,35 @@ async fn rewind_current(
     }
 }
 
-async fn send(stream: &Mutex<WriteHalf>, message: agde::Message) -> Result<(), ApplicationError> {
+fn from_compressed_bin(bytes: &[u8]) -> Result<agde::Message, ()> {
+    let read = std::io::Cursor::new(bytes);
+    let mut decompressor = snap::read::FrameDecoder::new(read);
+    bincode::serde::decode_from_std_read(
+        &mut decompressor,
+        bincode::config::standard().write_fixed_array_length(),
+    )
+    .map_err(|_| ())
+}
+fn to_compressed_bin(message: &agde::Message) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let mut compressor = snap::write::FrameEncoder::new(&mut buffer);
+
+    bincode::serde::encode_into_std_write(
+        message,
+        &mut compressor,
+        bincode::config::standard().write_fixed_array_length(),
+    )
+    .unwrap();
+
+    compressor.into_inner().expect("failed to write to a vec");
+    buffer
+}
+async fn send(stream: &Mutex<WriteHalf>, message: &agde::Message) -> Result<(), ApplicationError> {
+    let buffer = to_compressed_bin(message);
     stream
         .lock()
         .await
-        .send(message.to_bin().into())
+        .send(buffer.into())
         .await
         .map_err(|_| ApplicationError::UnexpectedServerClose)
 }

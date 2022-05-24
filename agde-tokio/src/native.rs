@@ -85,7 +85,7 @@ pub fn catch_ctrlc(handle: StateHandle) {
         let returned = runtime.block_on(async move {
             let mut manager = manager.lock().await;
 
-            let _ = send(&write, manager.process_disconnect()).await;
+            let _ = send(&write, &manager.process_disconnect()).await;
 
             let clean = options.read_clean().await?;
             if clean.as_deref() != Some(b"y") {
