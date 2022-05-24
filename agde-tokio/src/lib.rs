@@ -724,8 +724,8 @@ pub async fn run(
         let changed = Arc::clone(&changed);
         tokio::spawn(async move {
             loop {
-                commit_and_send(&manager, &options, &write, &changed).await?;
                 tokio::time::sleep(options.sync_interval).await;
+                commit_and_send(&manager, &options, &write, &changed).await?;
             }
         })
     };
