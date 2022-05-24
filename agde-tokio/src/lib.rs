@@ -359,7 +359,7 @@ impl Options {
     }
     /// Also clears the caches.
     pub async fn flush_out(&self) -> Result<(), ApplicationError> {
-        info!("Flushing.");
+        info!("Flushing out cache.");
         let (mut public, mut meta) = {
             let mut lock = self.file_cache.lock().unwrap();
             (
@@ -745,6 +745,7 @@ pub async fn run(
             let mut i = 0;
             loop {
                 let r = if i >= 10 {
+                    i = 0;
                     options.flush_out().await
                 } else {
                     options.flush().await
