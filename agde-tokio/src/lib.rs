@@ -541,8 +541,26 @@ pub struct StateHandle {
     changed: Arc<Mutex<HashSet<String>>>,
 }
 impl StateHandle {
-    pub async fn commit_and_send(&self) -> Result<(), ApplicationError> {
-        commit_and_send(&self.manager, &self.options, &self.write, &self.changed).await
+    /// Commit and send our changes.
+    /// This also pulls the changes from others to the `current` storage.
+    ///
+    /// The `cursors` are a list of byte-index positions in the resources where you have cursors
+    /// (read: text-editing cursors). After calling this function, their [`Cursor::index`] are
+    /// modified according to the changes from your piers. This means your user's cursor changes
+    /// position when pulling changes, to the logically same place, even if edits happened above in
+    /// the document.
+    pub async fn commit_and_send(
+        &self,
+        cursors: &mut [Cursor<'_>],
+    ) -> Result<(), ApplicationError> {
+        commit_and_send(
+            &self.manager,
+            &self.options,
+            &self.write,
+            &self.changed,
+            cursors,
+        )
+        .await
     }
 }
 pub struct Handle {
@@ -556,6 +574,16 @@ impl Handle {
     pub async fn wait(self) -> Result<(), ApplicationError> {
         self.waiter.await.expect("agde panicked")
     }
+}
+
+/// A cursor into a resource.
+///
+/// Used by [`StateHandle::commit_and_send`] to calculate where the user's cursor should move after
+/// merging others' data.
+#[derive(Debug)]
+pub struct Cursor<'a> {
+    pub resource: &'a str,
+    pub index: usize,
 }
 
 pub async fn run(
@@ -738,6 +766,8 @@ pub async fn run(
 
     info!("Began listening to messages.");
 
+    // `TODO`: move this out of the run function, so people can pass the `cursors` to
+    // `commit_and_send`.
     let local_watcher: tokio::task::JoinHandle<Result<(), ApplicationError>> = {
         let options = Arc::clone(&options);
         let manager = Arc::clone(&manager);
@@ -746,7 +776,8 @@ pub async fn run(
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(options.sync_interval).await;
-                commit_and_send(&manager, &options, &write, &changed).await?;
+                // `TODO`: cursors, see above
+                commit_and_send(&manager, &options, &write, &changed, &mut []).await?;
             }
         })
     };
@@ -758,7 +789,8 @@ pub async fn run(
             send(&write, &msg).await?;
         } else {
             drop(mgr);
-            commit_and_send(&manager, &options, &write, &changed).await?;
+            // cursors: we hopefully aren't reading this currently
+            commit_and_send(&manager, &options, &write, &changed, &mut []).await?;
         }
     }
     info!("Began fast forwarding.");
@@ -1093,7 +1125,10 @@ async fn handle_message(
             }
 
             drop(manager);
-            commit_and_send(mgr, options, write, changed).await?;
+            // cursors: we hopefully aren't reading this currently.
+            //  if we are, then this probably contains many Unknown segments.
+            //  The user also shouldn't edit a resource at the same time as it gets synced.
+            commit_and_send(mgr, options, write, changed, &mut []).await?;
         }
         agde::MessageKind::HashCheck(_) => todo!(),
         agde::MessageKind::HashCheckReply(_) => todo!(),
@@ -1118,6 +1153,7 @@ async fn commit_and_send(
     options: &Options,
     write: &Mutex<WriteHalf>,
     changed: &Mutex<HashSet<String>>,
+    cursors: &mut [Cursor<'_>],
 ) -> Result<(), ApplicationError> {
     {
         let ff = { manager.lock().await.is_fast_forwarding() };
@@ -1184,9 +1220,15 @@ async fn commit_and_send(
                             SystemTime::now()
                         );
 
-                        current = if let Some(current) =
-                            rewind_current(&mut manager, *created, resource, &public, &current)
-                                .await
+                        current = if let Some(current) = rewind_current(
+                            &mut manager,
+                            *created,
+                            resource,
+                            public.as_slice(),
+                            current,
+                            cursors,
+                        )
+                        .await
                         {
                             current
                         } else {
@@ -1368,9 +1410,11 @@ async fn rewind_current(
     manager: &mut Manager,
     created: bool,
     resource: &str,
-    public: &[u8],
-    current: &[u8],
+    public: impl Into<Vec<u8>>,
+    current: impl Into<Vec<u8>>,
+    cursors: &mut [Cursor<'_>],
 ) -> Option<Vec<u8>> {
+    let current = current.into();
     let last_commit = manager.last_commit_or_epoch();
     let offsets = if !created {
         let mut unwinder = manager.unwinder_to(last_commit);
@@ -1379,7 +1423,7 @@ async fn rewind_current(
         // above for more info
         let unwound_public = unwinder.unwind(public, resource).ok()?;
 
-        let old_diff = agde::event::diff(&unwound_public, current);
+        let old_diff = agde::event::diff(&unwound_public, &current);
 
         let mut offsets = agde::utils::Offsets::new();
         offsets.add_diff(
@@ -1393,7 +1437,7 @@ async fn rewind_current(
 
     let mut rewinder = manager.rewind_from_last_commit();
 
-    match rewinder.rewind_with_modify_diff(resource, current, |diff| {
+    let r = match rewinder.rewind_with_modify_diff(resource, current, |diff| {
         let mut diff = diff.clone();
         let original_data_len = diff.original_data_len();
         offsets.apply_single(&mut diff);
@@ -1403,9 +1447,40 @@ async fn rewind_current(
         Cow::Owned(diff)
     }) {
         Err(agde::event::RewindError::ResourceDestroyed(_)) => None,
-        Err(agde::event::RewindError::Apply(_err, vec)) => Some(vec),
+        Err(agde::event::RewindError::Apply(err, vec)) => {
+            warn!("Error when rewinding current storage (a stored diff is invalid): {err:?}");
+            Some(vec)
+        }
         Ok(vec) => Some(vec),
+    };
+
+    // the resource isn't destroyed
+    if r.is_some() {
+        let mut cursors = cursors
+            .iter_mut()
+            .filter(|c| {
+                c.resource.strip_prefix("./").unwrap_or(c.resource)
+                    == resource.strip_prefix("./").unwrap_or(resource)
+            })
+            .peekable();
+        // we have at least 1 applicable cursor
+        if cursors.peek().is_some() {
+            let mut offsets = agde::utils::Offsets::new();
+            for diff in rewinder
+                .events()
+                .filter(|ev| ev.resource() == resource)
+                .filter_map(agde::Event::diff)
+            {
+                // len_diff doesn't for `transform_index`.
+                offsets.add_diff(diff, 0)
+            }
+            for cursor in cursors {
+                cursor.index = offsets.transform_index(cursor.index);
+            }
+        }
     }
+
+    r
 }
 
 fn from_compressed_bin(bytes: &[u8]) -> Result<agde::Message, ()> {

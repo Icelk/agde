@@ -5,6 +5,7 @@ use log::error;
 use notify::Watcher;
 use std::process;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agde_tokio::*;
@@ -126,15 +127,29 @@ async fn main() {
 
         match run(url, manager, options).await {
             Ok(handle) => {
-                let mut watcher = native::watch_changes(handle.state().clone()).await;
+                let watch_handle = Arc::new(handle.state().clone());
+                let mut watcher = native::watch_changes(move || {
+                    let handle = Arc::clone(&watch_handle);
+                    async move {
+                        if let Err(err) = handle.commit_and_send(&mut []).await {
+                            error!("Failed to commit and send: {err:?}")
+                        };
+                    }
+                })
+                .await;
+
                 let watch_path = std::path::Path::new(".");
                 let r = watcher.watch(watch_path, notify::RecursiveMode::Recursive);
                 if r.is_err() {
                     error!("Failed to start listening. Falling back to commit interval.");
                 }
+
                 native::catch_ctrlc(handle.state().clone());
+
                 let r = handle.wait().await;
+
                 let _ = watcher.unwatch(watch_path);
+
                 if let Err(err) = r {
                     error!("Got error when running: {err}. Trying to reconnect in 10s.");
                     tokio::time::sleep(Duration::from_secs(10)).await;

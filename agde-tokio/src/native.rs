@@ -199,12 +199,15 @@ pub fn catch_ctrlc(handle: StateHandle) {
                                         .await?
                                         .unwrap_or_default();
 
+                                    // cursors: we're catching ctrlc, so this isn't our highest
+                                    // priority
                                     current = if let Some(current) = rewind_current(
                                         &mut *manager,
                                         created,
                                         &resource,
-                                        &public,
-                                        &current,
+                                        public,
+                                        current,
+                                        &mut [],
                                     )
                                     .await
                                     {
@@ -563,13 +566,18 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
 ///
 /// You have to call [`notify::Watcher::watch`] to start watching and
 /// [`notify::Watcher::unwatch`] to stop the execution.
-pub async fn watch_changes(handle: StateHandle) -> impl notify::Watcher {
+pub async fn watch_changes<CommitFut: Future<Output = ()> + Send>(
+    commit: impl Fn() -> CommitFut + Send + Sync + 'static,
+) -> impl notify::Watcher {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let watcher =
         notify::recommended_watcher(move |res| tx.send(res).expect("receiving end failed"))
             .expect("failed to start watcher");
+
     let in_timeout = Arc::new(std::sync::Mutex::new(false));
-    let handle = Arc::new(handle);
+
+    let commit = Arc::new(commit);
+
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             let ev = match ev {
@@ -589,14 +597,12 @@ pub async fn watch_changes(handle: StateHandle) -> impl notify::Watcher {
             // debounce
             if !{ *in_timeout.lock().unwrap() } {
                 *in_timeout.lock().unwrap() = true;
-                let handle = Arc::clone(&handle);
+                let commit = Arc::clone(&commit);
                 let in_timeout = Arc::clone(&in_timeout);
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
 
-                    if let Err(err) = handle.commit_and_send().await {
-                        error!("Failed to commit and send: {err:?}")
-                    };
+                    commit().await;
                     *in_timeout.lock().unwrap() = false;
                 });
             }
