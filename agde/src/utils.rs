@@ -197,6 +197,19 @@ impl Offsets {
             }
         }
     }
+
+    /// Returns where `index` is after the diffs we are tracking are applied.
+    ///
+    /// This is provided on a best-effort basis, just like the rest of this struct.
+    #[must_use]
+    pub fn transform_index(&self, mut index: usize) -> usize {
+        for offset in &self.offsets {
+            if offset.idx <= index {
+                index = utils::iusize_add_saturating(index, offset.len);
+            }
+        }
+        index
+    }
 }
 impl Default for Offsets {
     fn default() -> Self {
