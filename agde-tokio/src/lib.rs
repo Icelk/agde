@@ -602,7 +602,7 @@ pub async fn run(
 ) -> Result<Handle, DynError> {
     let state = options.read_clean().await?;
 
-    if state.as_deref() != Some(b"y") {
+    if state.as_deref() != Some(b"y") && state.is_some() {
         error!("State isn't clean.");
 
         let changes = options.diff().await?;
@@ -1292,7 +1292,7 @@ async fn commit_and_send(
         manager.update_last_commit();
     }
 
-    {
+    if !changes.is_empty() {
         {
             // this needed to be used as sometimes when a file has changed mtime but not been
             // modified, the diff doesn't get sent and we don't write to the file again.
