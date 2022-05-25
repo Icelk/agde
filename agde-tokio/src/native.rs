@@ -268,16 +268,6 @@ pub fn catch_ctrlc(handle: StateHandle) {
 }
 
 pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Options, io::Error> {
-    // empty temporary metadata
-    let metadata = Arc::new(Mutex::new(Metadata::new(HashMap::new())));
-    let offline_metadata = Arc::new(Mutex::new(Metadata::new(HashMap::new())));
-    let write_metadata = Arc::clone(&metadata);
-    let write_offline_metadata = Arc::clone(&offline_metadata);
-    let delete_metadata = Arc::clone(&metadata);
-    let delete_offline_metadata = Arc::clone(&offline_metadata);
-    let diff_metadata = Arc::clone(&metadata);
-    let diff_offline_metadata = Arc::clone(&offline_metadata);
-
     let read = |resource, storage| {
         Box::pin(async move {
             let path = match storage {
@@ -355,6 +345,35 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
             .unwrap()
         }) as ReadFuture
     };
+
+    let metadata = initial_metadata(
+        "metadata",
+        || metadata_new(Storage::Current),
+        force_pull,
+        |res| read(res, Storage::Meta),
+    )
+    .await?;
+    // A metadata cache that is held constant between diff calls.
+    let offline_metadata = initial_metadata(
+        "metadata-offline",
+        || {
+            let r = Ok(metadata.clone());
+            futures::future::ready(r)
+        },
+        force_pull,
+        |res| read(res, Storage::Meta),
+    )
+    .await?;
+
+    let metadata = Arc::new(Mutex::new(metadata));
+    let offline_metadata = Arc::new(Mutex::new(offline_metadata));
+    let write_metadata = Arc::clone(&metadata);
+    let write_offline_metadata = Arc::clone(&offline_metadata);
+    let delete_metadata = Arc::clone(&metadata);
+    let delete_offline_metadata = Arc::clone(&offline_metadata);
+    let diff_metadata = Arc::clone(&metadata);
+    let diff_offline_metadata = Arc::clone(&offline_metadata);
+
     let write = move |resource: String, storage, data: Vec<u8>| {
         let metadata = Arc::clone(&write_metadata);
         let offline_metadata = Arc::clone(&write_offline_metadata);
@@ -473,32 +492,6 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
         }) as WriteFuture
     };
 
-    let meta = initial_metadata(
-        "metadata",
-        || metadata_new(Storage::Current),
-        force_pull,
-        |res| read(res, Storage::Meta),
-        |res, data| write(res, WriteStorage::Meta, data),
-    )
-    .await?;
-    // A metadata cache that is held constant between diff calls.
-    let offline_meta = initial_metadata(
-        "metadata-offline",
-        || {
-            let r = Ok(meta.clone());
-            futures::future::ready(r)
-        },
-        force_pull,
-        |res| read(res, Storage::Meta),
-        |res, data| write(res, WriteStorage::Meta, data),
-    )
-    .await?;
-
-    {
-        *metadata.lock().await = meta;
-        *offline_metadata.lock().await = offline_meta;
-    }
-
     Ok(Options::new(
         Box::new(read),
         Box::new(write),
@@ -587,7 +580,6 @@ pub async fn watch_changes<CommitFut: Future<Output = ()> + Send>(
                     continue;
                 }
             };
-            // if
             if ev.paths.first().map_or(false, |path| {
                 path.components()
                     .any(|component| component.as_os_str() == ".agde")
@@ -621,13 +613,11 @@ pub async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {
 async fn initial_metadata<
     F: Future<Output = Result<Metadata, io::Error>>,
     ReadF: Future<Output = Result<Option<Vec<u8>>, ()>>,
-    WriteF: Future<Output = Result<(), ()>>,
 >(
     name: &str,
     new: impl Fn() -> F,
     force_pull: bool,
     read: impl Fn(String) -> ReadF,
-    write: impl Fn(String, Vec<u8>) -> WriteF,
 ) -> Result<Metadata, io::Error> {
     tokio::fs::create_dir_all(".agde").await?;
     let metadata = read(name.to_owned())
@@ -699,20 +689,7 @@ async fn initial_metadata<
             .unwrap();
 
             if !populated || !hard_error || force_pull {
-                let metadata = new().await?;
-                let r = write(
-                    name.to_owned(),
-                    bincode::serde::encode_to_vec(
-                        &metadata,
-                        bincode::config::standard().write_fixed_array_length(),
-                    )
-                    .expect("failed to serialize metadata"),
-                )
-                .await;
-                if let Err(err) = r {
-                    error!("Failed to write newly created metadata: {err:?}");
-                }
-                Ok(metadata)
+                new().await
             } else {
                 error!("Metadata not found. Directory is not empty. Refusing to override files.");
                 Err(io::Error::new(
