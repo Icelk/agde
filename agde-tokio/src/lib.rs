@@ -1304,11 +1304,6 @@ async fn commit_and_send(
             // commit.
             metadata.apply_current_mtime_changes(&changes);
         }
-        futures::future::try_join(
-            options.sync_metadata(Storage::Public),
-            options.sync_metadata(Storage::Current),
-        )
-        .await?;
     }
 
     // Execute `apply` and `send` at the same time!
