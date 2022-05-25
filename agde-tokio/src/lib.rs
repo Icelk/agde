@@ -336,11 +336,9 @@ impl Options {
             )
         };
 
-        for (resource, (data, changed)) in &mut public {
-            let old_changed = *changed;
-            *changed = false;
-            if !old_changed {
-                continue;
+        let public_iter = public.iter().map(|(resource, (data, changed))| async move {
+            if !*changed {
+                return Ok(());
             }
             if let Some((vec, mtime, event_mtime)) = data {
                 self._write(
@@ -352,12 +350,11 @@ impl Options {
             } else {
                 self._delete(resource, Storage::Public).await?;
             }
-        }
-        for (resource, (data, changed)) in &mut meta {
-            let old_changed = *changed;
-            *changed = false;
-            if !old_changed {
-                continue;
+            Ok(())
+        });
+        let meta_iter = meta.iter().map(|(resource, (data, changed))| async move {
+            if !*changed {
+                return Ok(());
             }
             if let Some(vec) = data {
                 self._write(resource, WriteStorage::Meta, vec.clone())
@@ -365,6 +362,18 @@ impl Options {
             } else {
                 self._delete(resource, Storage::Meta).await?;
             }
+            Ok(())
+        });
+        let public_future = futures::future::try_join_all(public_iter);
+        let meta_future = futures::future::try_join_all(meta_iter);
+        // batch them up in 1 job to complete IO in one go
+        futures::future::try_join(public_future, meta_future).await?;
+
+        for (_, changed) in &mut public.values_mut() {
+            *changed = false;
+        }
+        for (_, changed) in &mut meta.values_mut() {
+            *changed = false;
         }
 
         {
