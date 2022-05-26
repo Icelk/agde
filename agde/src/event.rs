@@ -337,7 +337,7 @@ pub enum UnwindError {
 pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
     events: &'a [log::ReceivedEvent],
-    rewound_events: Vec<&'a Difference>,
+    unwound_events: Vec<&'a Difference>,
     // these are allocated once to optimize allocations
     buffer: Vec<u8>,
 }
@@ -345,7 +345,7 @@ impl<'a> Unwinder<'a> {
     pub(crate) fn new(events: &'a [log::ReceivedEvent]) -> Self {
         Self {
             events,
-            rewound_events: vec![],
+            unwound_events: vec![],
             buffer: vec![],
         }
     }
@@ -426,7 +426,7 @@ impl<'a> Unwinder<'a> {
         modern_resource_name: &'a str,
     ) -> Result<Vec<u8>, UnwindError> {
         assert_eq!(
-            self.rewound_events.len(),
+            self.unwound_events.len(),
             0,
             "The rewinding stack must be empty!"
         );
@@ -460,7 +460,7 @@ impl<'a> Unwinder<'a> {
 
                         std::mem::swap(&mut resource, &mut other);
                         other.clear();
-                        self.rewound_events.push(diff);
+                        self.unwound_events.push(diff);
                     } else {
                         error = Some(den::ApplyError::RefOutOfBounds);
                     }
@@ -484,12 +484,15 @@ impl<'a> Unwinder<'a> {
     /// # Errors
     ///
     /// Passes errors from [`Difference::apply`].
-    pub fn rewind(&mut self, resource: &[u8]) -> Result<Vec<u8>, (den::ApplyError, Vec<u8>)> {
-        let mut vec = resource.to_vec();
+    pub fn rewind(
+        &mut self,
+        resource: impl Into<Vec<u8>>,
+    ) -> Result<Vec<u8>, (den::ApplyError, Vec<u8>)> {
+        let mut vec = resource.into();
         let mut other = vec![];
         let mut error = None;
         // Unwind the stack, redoing all the events.
-        while let Some(diff) = self.rewound_events.pop() {
+        while let Some(diff) = self.unwound_events.pop() {
             if diff.in_bounds(&vec) {
                 if diff.apply_overlaps(vec.len()) {
                     diff.apply(&vec, &mut other)
