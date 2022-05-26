@@ -1157,6 +1157,7 @@ async fn handle_message(
     }
     Ok(())
 }
+/// Just returns `Ok(())` if the manager is fast forwarding.
 async fn commit_and_send(
     manager: &Mutex<Manager>,
     options: &Options,
@@ -1164,11 +1165,9 @@ async fn commit_and_send(
     changed: &Mutex<HashSet<String>>,
     cursors: &mut [Cursor<'_>],
 ) -> Result<(), ApplicationError> {
-    {
-        let ff = { manager.lock().await.is_fast_forwarding() };
-        if ff {
-            return Ok(());
-        }
+    let mut manager = manager.lock().await;
+    if manager.is_fast_forwarding() {
+        return Ok(());
     }
 
     let changes = options.diff().await?;
@@ -1178,8 +1177,6 @@ async fn commit_and_send(
     let mut messages = Vec::with_capacity(changes.len());
 
     {
-        let mut manager = manager.lock().await;
-
         for diff in &changes {
             let modern =
                 manager.modern_resource_name(diff.resource(), manager.last_commit_or_epoch());
@@ -1308,8 +1305,6 @@ async fn commit_and_send(
 
     // Execute `apply` and `send` at the same time!
     let apply = async {
-        let mut manager = manager.lock().await;
-
         for message in &messages {
             let event = if let agde::MessageKind::Event(ev) = message.inner() {
                 ev
