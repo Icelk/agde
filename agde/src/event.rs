@@ -512,6 +512,11 @@ impl<'a> Unwinder<'a> {
             None => Ok(vec),
         }
     }
+
+    /// Clears all unwound events. Makes [`Self::rewind`] useless if called after [`Self::unwind`].
+    pub(crate) fn clear_unwound(&mut self) {
+        self.unwound_events.clear();
+    }
 }
 
 #[derive(Debug)]

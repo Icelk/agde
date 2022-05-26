@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::{resource, utils, SelectedPier, Uuid};
+use crate::{event, resource, utils, Manager, SelectedPier, Uuid};
 
 /// A check to affirm the selected resources contain the same data.
 ///
@@ -23,7 +23,7 @@ pub struct Request {
     /// The actual timestamp
     cutoff_timestamp: Duration,
     /// The offset to get `cutoff_timestamp` from `now`.
-    /// To get when this was created, take `cutoff_timestamp + offset`.
+    /// To get when this request was created, take `cutoff_timestamp + offset`.
     offset: Duration,
 }
 impl Request {
@@ -60,6 +60,15 @@ impl Request {
     pub(crate) fn cutoff_offset(&self) -> Duration {
         self.offset
     }
+    /// Get an unwinder to unwind the resources you will add to the map before calling
+    /// [`crate::Manager::apply_hash_check_reply`].
+    ///
+    /// If you start doing this now, before getting the response, keep in mind you have to check
+    /// [`Response::different_cutoff`]. If that returns `true`, you have to call
+    /// [`Response::unwinder`] and start the process over again.
+    pub fn unwinder<'a>(&self, manager: &'a Manager) -> ResponseHashRewinder<'a> {
+        ResponseHashRewinder(manager.unwinder_to(utils::dur_to_systime(self.cutoff_timestamp)))
+    }
 }
 impl PartialEq for Request {
     fn eq(&self, other: &Self) -> bool {
@@ -86,6 +95,7 @@ pub type ResponseHash = [u8; 16];
 #[must_use]
 pub struct Response {
     pier: Uuid,
+    resources: resource::Matcher,
     hashes: BTreeMap<String, ResponseHash>,
     requested_cutoff_timestamp: Duration,
     cutoff_timestamp: Duration,
@@ -114,6 +124,20 @@ impl Response {
     pub fn different_cutoff(&self) -> bool {
         self.requested_cutoff_timestamp == self.cutoff_timestamp
     }
+    /// Get the request's cutoff.
+    /// Used when constructing our own [hashes](Self::hashes) to then give to
+    /// [`crate::Manager::apply_hash_check_reply`].
+    #[inline]
+    pub(crate) fn cutoff_timestamp(&self) -> Duration {
+        self.cutoff_timestamp
+    }
+    /// Get an unwinder to unwind the resources you will add to the map before calling
+    /// [`crate::Manager::apply_hash_check_reply`].
+    ///
+    /// The returned item should be reused for each resource.
+    pub fn unwinder<'a>(&self, manager: &'a Manager) -> ResponseHashRewinder<'a> {
+        ResponseHashRewinder(manager.unwinder_to(utils::dur_to_systime(self.cutoff_timestamp())))
+    }
 }
 impl PartialEq for Response {
     fn eq(&self, other: &Self) -> bool {
@@ -121,19 +145,41 @@ impl PartialEq for Response {
     }
 }
 impl Eq for Response {}
+
+/// A struct used to rewind resources before hashing them to call
+/// [`crate::Manager::apply_hash_check_reply`].
+pub struct ResponseHashRewinder<'a>(event::Unwinder<'a>);
+impl<'a> ResponseHashRewinder<'a> {
+    /// Unwind the resources before creating a `hash` for [`crate::Manager::apply_hash_check_reply`].
+    ///
+    /// Call this for every resource.
+    pub fn unwinder(&mut self) -> &mut event::Unwinder<'a> {
+        self.0.clear_unwound();
+        &mut self.0
+    }
+}
+
 /// Builder struct for [`Response`].
 #[derive(Debug)]
-#[repr(transparent)]
-pub struct ResponseBuilder(Response);
-impl ResponseBuilder {
-    pub(crate) fn new(pier: Uuid, request: &Request, selected_cutoff_offset: Duration) -> Self {
-        Self(Response {
-            pier,
-            hashes: BTreeMap::new(),
-            requested_cutoff_timestamp: request.cutoff_timestamp,
-            cutoff_timestamp: (request.cutoff_timestamp + request.offset)
-                .saturating_sub(selected_cutoff_offset),
-        })
+pub struct ResponseBuilder<'a>(Response, event::Unwinder<'a>);
+impl<'a> ResponseBuilder<'a> {
+    pub(crate) fn new(
+        pier: Uuid,
+        request: Request,
+        selected_cutoff_offset: Duration,
+        unwinder: event::Unwinder<'a>,
+    ) -> Self {
+        Self(
+            Response {
+                pier,
+                resources: request.resources,
+                hashes: BTreeMap::new(),
+                requested_cutoff_timestamp: request.cutoff_timestamp,
+                cutoff_timestamp: (request.cutoff_timestamp + request.offset)
+                    .saturating_sub(selected_cutoff_offset),
+            },
+            unwinder,
+        )
     }
     /// It's a logic error to pass a `resource` that isn't included in the [`Request::matches`].
     #[allow(clippy::needless_pass_by_value)] // The hasher is consumed for one resource.
@@ -142,6 +188,13 @@ impl ResponseBuilder {
         self.0
             .hashes
             .insert(resource, hash.0.digest128().to_le_bytes());
+    }
+    /// Unwind the resources before creating a `hash` for [`Self::insert`].
+    ///
+    /// Call this for every resource.
+    pub fn unwinder(&mut self) -> &mut event::Unwinder<'a> {
+        self.1.clear_unwound();
+        &mut self.1
     }
     /// Get the built [`Response`].
     #[inline]

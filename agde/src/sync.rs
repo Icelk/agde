@@ -4,11 +4,11 @@
 
 use std::cmp;
 use std::collections::{hash_map, HashMap};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{log, Uuid};
+use crate::{event, log, Manager, Uuid};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 pub(crate) enum RevertTo {
@@ -126,14 +126,26 @@ pub struct ResponseBuilder<'a> {
     pier: Uuid,
     /// Binary sorted by String
     diff: Vec<(String, den::Difference)>,
+
+    unwinder: Option<event::Unwinder<'a>>,
 }
 impl<'a> ResponseBuilder<'a> {
-    pub(crate) fn new(request: &'a Request, pier: Uuid) -> Self {
+    pub(crate) fn new(request: &'a Request, pier: Uuid, manager: &'a Manager) -> Self {
         Self {
             request,
             signature_iter: request.signatures.iter(),
             pier,
             diff: Vec::new(),
+
+            unwinder: match request.revert {
+                RevertTo::Latest => None,
+                RevertTo::Origin => Some(manager.unwinder_to(SystemTime::UNIX_EPOCH)),
+                RevertTo::To(uuid) => Some({
+                    let events_start = manager.event_log.cutoff_from_uuid(uuid).unwrap_or(0);
+                    let events = &manager.event_log.list[events_start..];
+                    event::Unwinder::new(events)
+                }),
+            },
         }
     }
     /// Use this in a `while let Some((resource, signature)) = response_builder.next_signature()`
@@ -144,7 +156,17 @@ impl<'a> ResponseBuilder<'a> {
     pub fn next_signature(&mut self) -> Option<(&str, &den::Signature)> {
         self.signature_iter.next().map(|(k, v)| (&**k, v))
     }
+    /// Return the unwinder (if any) to use for the `resource` before [adding](Self::add_diff) it.
+    pub fn unwinder(&mut self) -> Option<&mut event::Unwinder<'a>> {
+        self.unwinder.as_mut().map(|unwinder| {
+            unwinder.clear_unwound();
+            unwinder
+        })
+    }
     /// Tell the requester their `resource` needs to apply `diff` to get our data.
+    ///
+    /// You have to rewind `resource` before getting the `diff` if [`Self::unwinder`] returns
+    /// [`Some`].
     ///
     /// # Panics
     ///
@@ -173,7 +195,7 @@ impl<'a> ResponseBuilder<'a> {
                 .unwrap_or(log.limit() as usize),
             self.request.log_settings.1 as usize,
         );
-        let event_log = log.get_max(Some(max)).to_vec();
+        let event_log = log.get_max(max).to_vec();
         let last = event_log.last().map(|ev| ev.message_uuid);
         self.diff.retain(|diff| !diff.1.is_empty());
         Response {

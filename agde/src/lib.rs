@@ -862,7 +862,7 @@ impl Manager {
             pier
         }
     }
-    /// Use the [`event::Unwinder`] before inserting any hashes.
+    /// Use the [`hash_check::ResponseBuilder::unwinder`] before inserting any hashes.
     ///
     /// For each resource which [`hash_check::Request::matches`], execute
     /// [`hash_check::ResponseBuilder::insert`]. When all are inserted, run
@@ -872,21 +872,19 @@ impl Manager {
     #[allow(clippy::unused_self)] // Consistency between functions.
     pub fn apply_hash_check(
         &mut self,
-        check: &hash_check::Request,
+        check: hash_check::Request,
         sender: Uuid,
-    ) -> (hash_check::ResponseBuilder, event::Unwinder) {
+    ) -> hash_check::ResponseBuilder {
         let cutoff = cmp::min(check.cutoff_offset(), self.event_log.lifetime() / 2);
 
         let unwinder = self
             .event_log
             .unwind_to(utils::dur_now().saturating_sub(cutoff));
-        (
-            hash_check::ResponseBuilder::new(sender, check, cutoff),
-            unwinder,
-        )
+        hash_check::ResponseBuilder::new(sender, check, cutoff, unwinder)
     }
     /// If the returned [`sync::RequestBuilder`] is [`Some`], loop over each resource
     /// in the [`Vec`] next to the `RequestBuilder`. Add all the [`den::Signature`]s for the resources.
+    /// Before creating the signatures, please unwind them using the [`hash_check::Response::unwinder`].
     /// Run [`sync::RequestBuilder::finish`] once every [`den::Signature`] has been added.
     /// Then, execute [`Self::process_sync`] with the [`sync::RequestBuilder`].
     /// If it's [`None`], the data matches.
@@ -952,13 +950,18 @@ impl Manager {
         let request = if differing_data.is_empty() {
             None
         } else {
+            let cutoff = self
+                .event_log
+                .cutoff_from_time(response.cutoff_timestamp())
+                .unwrap_or(0);
+            let revert_to = sync::RevertTo::To(self.event_log.list[cutoff].message_uuid);
             Some((
                 sync::RequestBuilder::new(
                     sender,
                     // Get all events in the log, up to `self.event_log.limit()`
                     Duration::ZERO,
                     self.event_log.limit(),
-                    sync::RevertTo::Latest,
+                    revert_to,
                 ),
                 differing_data,
             ))
@@ -966,13 +969,12 @@ impl Manager {
         Ok((request, delete))
     }
     /// Creates a [builder](sync::ResponseBuilder) used to construct a sync response.
-    #[allow(clippy::unused_self)] // method consistency
     pub fn apply_sync<'a>(
-        &mut self,
+        &'a self,
         request: &'a sync::Request,
         sender: Uuid,
     ) -> sync::ResponseBuilder<'a> {
-        sync::ResponseBuilder::new(request, sender)
+        sync::ResponseBuilder::new(request, sender, self)
     }
     /// Applies the event log of the sync reply.
     ///
@@ -991,13 +993,24 @@ impl Manager {
     pub fn apply_sync_reply<'a>(
         &'a mut self,
         response: &mut sync::Response,
-    ) -> Result<(event::Rewinder<'a>, Option<fast_forward::MetadataApplier>), fast_forward::Error>
-    {
-        let mut ff = None;
+    ) -> Result<SyncReplyAction, fast_forward::Error> {
         self.event_log.merge(response.take_event_log());
         self.event_log.required_event_timestamp = Some(utils::dur_now());
+
+        let cutoff = match response.revert() {
+            sync::RevertTo::Latest => self.event_log.list.len(),
+            sync::RevertTo::Origin => 0,
+            sync::RevertTo::To(uuid) => self
+                .event_log
+                .cutoff_from_uuid(uuid)
+                .map_or(0, |idx| (idx + 1).min(self.event_log.list.len())),
+        };
+        let slice = &self.event_log.list[cutoff..];
+
         match core::mem::replace(&mut self.fast_forward, fast_forward::State::NotRunning) {
-            fast_forward::State::NotRunning => {}
+            fast_forward::State::NotRunning => Ok(SyncReplyAction::HashCheck {
+                unwinder: event::Unwinder::new(slice),
+            }),
             fast_forward::State::WaitingForMeta { pier } => {
                 self.fast_forward = fast_forward::State::WaitingForMeta { pier };
                 return Err(fast_forward::Error::ExpectedWaitingForDiffs);
@@ -1017,23 +1030,16 @@ impl Manager {
                     .get(idx)
                     .map_or(Duration::ZERO, |ev| ev.event.timestamp_dur());
                 self.event_log.required_event_timestamp = Some(timestamp);
-                ff = Some(fast_forward::MetadataApplier::new(
-                    fast_forward_metadata,
-                    changes,
-                ));
+
+                self.fast_forward = fast_forward::State::NotRunning;
+
+                let applier = fast_forward::MetadataApplier::new(fast_forward_metadata, changes);
+                Ok(SyncReplyAction::FastForward {
+                    rewinder: event::Rewinder::new(slice, self),
+                    metadata_applier: applier,
+                })
             }
         }
-        self.fast_forward = fast_forward::State::NotRunning;
-        let cutoff = match response.revert() {
-            sync::RevertTo::Latest => self.event_log.list.len(),
-            sync::RevertTo::Origin => 0,
-            sync::RevertTo::To(uuid) => self
-                .event_log
-                .cutoff_from_uuid(uuid)
-                .map_or(0, |idx| (idx + 1).min(self.event_log.list.len())),
-        };
-        let slice = &self.event_log.list[cutoff..];
-        Ok((event::Rewinder::new(slice, self), ff))
     }
     /// Applies the fast forward reply by modifying the inner state.
     ///
@@ -1250,4 +1256,32 @@ impl SelectedPier {
     pub fn uuid(&self) -> Uuid {
         self.uuid
     }
+}
+
+/// The action to perform after calling [`Manager::apply_sync_reply`].
+#[derive(Debug)]
+pub enum SyncReplyAction<'a> {
+    /// Rewind the public and current storage with `rewinder`.
+    ///
+    /// You only have to do this to the resources returned by the functions on
+    /// [`sync::Response`].
+    ///
+    /// Call the methods on the [`sync::Response`] to actually make changes to the
+    /// resources returned before using the `rewinder`.
+    FastForward {
+        ///
+        rewinder: event::Rewinder<'a>,
+        /// Apply this to your public metadata.
+        metadata_applier: fast_forward::MetadataApplier,
+    },
+    /// Unwind the public and current storage with `unwinder`, then
+    /// apply what's returned the methods on the [`sync::Response`]
+    /// and then [`event::Unwinder::rewind`].
+    ///
+    /// You only have to do this to the resources returned by the functions on
+    /// [`sync::Response`].
+    HashCheck {
+        ///
+        unwinder: event::Unwinder<'a>,
+    },
 }

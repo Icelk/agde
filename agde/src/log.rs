@@ -291,8 +291,8 @@ impl Log {
     }
 
     /// Caps `max` to the length of the inner list.
-    pub(crate) fn get_max(&self, max: Option<usize>) -> &[ReceivedEvent] {
-        &self.list[..max.map_or(self.len(), |max| cmp::min(max, self.len()))]
+    pub(crate) fn get_max(&self, max: usize) -> &[ReceivedEvent] {
+        &self.list[..cmp::min(max, self.len())]
     }
 
     /// `timestamp` is duration since `UNIX_EPOCH` when the `old_name` was relevant.
@@ -486,7 +486,7 @@ impl<'a> EventApplier<'a> {
         // UNWRAP: we know the ONE `ev.diff` has the same `block_size`
         offsets.add_diff(ev.diff(), len_diff);
 
-        resource = match unwinder.rewind(&resource) {
+        resource = match unwinder.rewind(resource) {
             Ok(v) => v,
             Err((err, v)) => {
                 error = Some(err);
