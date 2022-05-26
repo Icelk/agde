@@ -186,6 +186,17 @@ impl Log {
         self.trim();
     }
     pub(crate) fn merge(&mut self, mut new_log: Vec<ReceivedEvent>) {
+        // we don't know it it's sorted, so we can't just take the last element
+        let newest = new_log
+            .iter()
+            .max_by(|a, b| a.event.timestamp_dur().cmp(&b.event.timestamp_dur()));
+        if let Some(newest) = newest {
+            self.list.drain(
+                ..self
+                    .cutoff_from_time(newest.event.timestamp_dur() - Duration::from_secs(5))
+                    .unwrap_or(0),
+            );
+        }
         self.list.append(&mut new_log);
         self.list.sort_unstable_by(|a, b| match a.cmp(b) {
             Ordering::Equal => a.event.sender().cmp(&b.event.sender()),
