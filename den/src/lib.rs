@@ -740,9 +740,21 @@ impl Signature {
     /// If small documents are what's mostly being transmitted, consider `512`.
     /// Consider running [`Difference::minify`] if getting the smallest diff is your concern.
     ///
-    /// This creates a signature of a resource. The signature takes up much less space.
+    /// This creates a signature of a resource. The signature takes up much less space than the
+    /// resource.
+    ///
+    /// Larger `block_size`s will take more less to compute but signatures become larger, as if a
+    /// block's contents isn't found, it has to send `block_size` bytes of data.
+    /// Smaller `block_size`s takes more time to compute, but send data in the [`Signature`].
+    /// Diffs with smaller `block_size`s also have the advantage of interfering less with changes
+    /// if applied to data other than what's [written to the signature](SignatureBuilder::write).
     ///
     /// The [`HashAlgorithm`] is chosen using experience with hasher's performance and heuristics.
+    /// You can query the algorithm using [`Self::algorithm`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `block_size` is `0`.
     #[allow(clippy::new_ret_no_self)] // This returns a builder.
     pub fn new(block_size: usize) -> SignatureBuilder {
         match block_size {
@@ -764,9 +776,7 @@ impl Signature {
     /// if you don't know *exactly* what you are doing, as it sets the algorithm for you.
     /// You can query the algorithm using [`Self::algorithm`].
     ///
-    /// Larger `block_size`s will take more time to compute, but will be more secure.
-    /// Smaller `block_size`s takes less time to compute, are less secure, and require sending more
-    /// data in the [`Signature`], as more blocks are sent.
+    /// See [`Self::new`] for more details and insights into how to choose `block_size`.
     ///
     /// # Panics
     ///
