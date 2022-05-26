@@ -1013,7 +1013,7 @@ impl Manager {
             }),
             fast_forward::State::WaitingForMeta { pier } => {
                 self.fast_forward = fast_forward::State::WaitingForMeta { pier };
-                return Err(fast_forward::Error::ExpectedWaitingForDiffs);
+                Err(fast_forward::Error::ExpectedWaitingForDiffs)
             }
             fast_forward::State::WaitingForDiffs {
                 pier: _,

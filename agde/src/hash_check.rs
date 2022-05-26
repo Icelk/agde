@@ -148,6 +148,7 @@ impl Eq for Response {}
 
 /// A struct used to rewind resources before hashing them to call
 /// [`crate::Manager::apply_hash_check_reply`].
+#[derive(Debug)]
 pub struct ResponseHashRewinder<'a>(event::Unwinder<'a>);
 impl<'a> ResponseHashRewinder<'a> {
     /// Unwind the resources before creating a `hash` for [`crate::Manager::apply_hash_check_reply`].
