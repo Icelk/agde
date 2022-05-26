@@ -23,7 +23,7 @@ agde = { path = "../agde" }
 
 bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
 clap = { version = "3.1", features = ["cargo"] }
-ctrlc = "3.2"
+ctrlc = { version = "3.2", features = ["termination"] }
 env_logger = { version = "0.9", default-features = false, features = ["termcolor", "atty", "humantime"] }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 lazy_static = "1.4.0"
