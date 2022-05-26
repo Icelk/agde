@@ -1017,7 +1017,7 @@ async fn handle_message(
         }
         agde::MessageKind::SyncReply(mut sync) => {
             let (mut rewinder, metadata_applier) =
-                if let Ok(action) = manager.apply_sync_reply(&mut sync) {
+                if let Ok(action) = manager.apply_sync_reply(&mut sync, sender) {
                     action
                 } else {
                     warn!("Got erroneous sync message while fast-forwarding: {sync:?}");

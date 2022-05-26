@@ -993,7 +993,23 @@ impl Manager {
     pub fn apply_sync_reply<'a>(
         &'a mut self,
         response: &mut sync::Response,
+        sender: Uuid,
     ) -> Result<SyncReplyAction, fast_forward::Error> {
+        match self.fast_forward {
+            fast_forward::State::NotRunning => {}
+            fast_forward::State::WaitingForMeta { pier }
+            | fast_forward::State::WaitingForDiffs {
+                pier,
+                latest_event: _,
+                fast_forward_metadata: _,
+                changes: _,
+            } => {
+                if pier != sender {
+                    return Ok(SyncReplyAction::UnexpectedPier);
+                }
+            }
+        }
+
         self.event_log.merge(response.take_event_log());
         self.event_log.required_event_timestamp = Some(utils::dur_now());
 
@@ -1284,4 +1300,7 @@ pub enum SyncReplyAction<'a> {
         ///
         unwinder: event::Unwinder<'a>,
     },
+    /// An unexpected pier sent us a [`Self::HashCheck`] sync message while we are fast forwarding.
+    /// Do nothing and ignore this message. Something's wrong with someone else's code.
+    UnexpectedPier,
 }
