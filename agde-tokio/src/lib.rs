@@ -1020,228 +1020,8 @@ async fn handle_message(
             drop(manager);
             send(write, &msg).await?;
         }
-        agde::MessageKind::SyncReply(mut sync) => {
-            let action = if let Ok(action) = manager.apply_sync_reply(&mut sync, sender) {
-                action
-            } else {
-                warn!("Got erroneous sync message while fast-forwarding: {sync:?}");
-                return Ok(());
-            };
-
-            match action {
-                agde::SyncReplyAction::FastForward {
-                    rewinder,
-                    metadata_applier,
-                } => {
-                    let mut public_rewinder = rewinder;
-                    let mut current_rewinder = public_rewinder.clone();
-                    let mut error = false;
-                    // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
-                    for (resource, diff) in sync.diff() {
-                        let resource = resource.as_ref();
-                        let public = async {
-                            let mut data = options
-                                .read(resource, Storage::Public)
-                                .await?
-                                .unwrap_or_default();
-
-                            let result = if diff.apply_overlaps(data.len()) {
-                                let mut other = Vec::with_capacity(data.len() + 64);
-                                let r = diff.apply(&data, &mut other);
-                                data = other;
-                                r
-                            } else {
-                                diff.apply_in_place(&mut data)
-                            };
-                            if result.is_err() {
-                                return Err(ApplicationError::PiersRejected);
-                            }
-                            data = public_rewinder
-                                .rewind(resource, data)
-                                .map_or_else(|e| e.into_data(), identity);
-                            options
-                                .write(
-                                    resource,
-                                    WriteStorage::Public(
-                                        WriteMtime::No,
-                                        public_rewinder.last_change_to_resource(resource),
-                                    ),
-                                    data,
-                                    false,
-                                )
-                                .await?;
-                            Ok(())
-                        };
-                        let current = async {
-                            let mut data = options
-                                .read(resource, Storage::Current)
-                                .await?
-                                .unwrap_or_default();
-
-                            let result = if diff.apply_overlaps_adaptive_end(data.len()) {
-                                let mut other = Vec::with_capacity(data.len() + 64);
-                                let r = diff.apply_adaptive_end(&data, &mut other);
-                                data = other;
-                                r
-                            } else {
-                                diff.apply_in_place_adaptive_end(&mut data)
-                            };
-                            data = current_rewinder
-                                .rewind(resource, data)
-                                .map_or_else(|e| e.into_data(), identity);
-                            if result.is_err() {
-                                return Err(ApplicationError::PiersRejected);
-                            }
-                            options
-                                .write(resource, WriteStorage::current(), data, true)
-                                .await?;
-                            Ok(())
-                        };
-                        match futures::future::try_join(public, current).await {
-                            Err(ApplicationError::PiersRejected) => {
-                                error = true;
-                                break;
-                            }
-                            r => r?,
-                        };
-                    }
-                    if error {
-                        warn!(
-                            "Fast forward failed due to an error with applying \
-                        the sync response. Trying again."
-                        );
-                        if let Some(ff) = manager.process_fast_forward() {
-                            send(write, &ff).await?;
-                        }
-                        return Ok(());
-                    }
-
-                    for resource in sync.delete() {
-                        let resource = resource.as_ref();
-                        options.delete(resource, Storage::Public).await?;
-                    }
-
-                    // apply the remote changes (as we will be syncing them)
-                    //
-                    // this has the benefit of saving the metadata even if our data
-                    // is the same. If the data is the same, the pier will see that
-                    // the diff is empty and not send it back. Our public buffer
-                    // doesn't get modified, and next time we connect, we create a
-                    // signature again. That's bad. So by adjusting our metadata
-                    // here, we assue this is the first and only time we want to
-                    // get this version of the resource.
-                    //
-                    // `TODO`: send a touch array back with the sync response
-                    // instead, with the event_mtimes of the pier.
-                    // Then, we can remove `sync_metadata`.
-                    info!("Fast forward complete.");
-                    {
-                        let mut metadata = options.metadata().lock().await;
-                        metadata_applier.apply(&mut metadata);
-                    }
-                    options.sync_metadata(Storage::Public).await?;
-                }
-                agde::SyncReplyAction::HashCheck { unwinder } => {
-                    let mut public_unwinder = unwinder;
-                    let mut current_unwinder = public_unwinder.clone();
-                    let mut error = false;
-                    // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
-                    for (resource, diff) in sync.diff() {
-                        let resource = resource.as_ref();
-                        let public = async {
-                            let data = options
-                                .read(resource, Storage::Public)
-                                .await?
-                                .unwrap_or_default();
-
-                            let mut data = public_unwinder
-                                .unwind(data, resource)
-                                .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
-
-                            let result = if diff.apply_overlaps(data.len()) {
-                                let mut other = Vec::with_capacity(data.len() + 64);
-                                let r = diff.apply(&data, &mut other);
-                                data = other;
-                                r
-                            } else {
-                                diff.apply_in_place(&mut data)
-                            };
-                            if result.is_err() {
-                                return Err(ApplicationError::PiersRejected);
-                            }
-                            data = public_unwinder
-                                .rewind(data)
-                                .map_or_else(|(_err, vec)| vec, identity);
-                            options
-                                .write(
-                                    resource,
-                                    WriteStorage::Public(
-                                        WriteMtime::No,
-                                        public_unwinder.last_change_to_resource(resource),
-                                    ),
-                                    data,
-                                    false,
-                                )
-                                .await?;
-                            Ok(())
-                        };
-                        let current = async {
-                            let data = options
-                                .read(resource, Storage::Current)
-                                .await?
-                                .unwrap_or_default();
-
-                            let mut data = current_unwinder
-                                .unwind(data, resource)
-                                .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
-
-                            let result = if diff.apply_overlaps_adaptive_end(data.len()) {
-                                let mut other = Vec::with_capacity(data.len() + 64);
-                                let r = diff.apply_adaptive_end(&data, &mut other);
-                                data = other;
-                                r
-                            } else {
-                                diff.apply_in_place_adaptive_end(&mut data)
-                            };
-                            if result.is_err() {
-                                return Err(ApplicationError::PiersRejected);
-                            }
-                            data = current_unwinder
-                                .rewind(data)
-                                .map_or_else(|(_err, vec)| vec, identity);
-                            options
-                                .write(resource, WriteStorage::current(), data, true)
-                                .await?;
-                            Ok(())
-                        };
-                        match futures::future::try_join(public, current).await {
-                            Err(ApplicationError::PiersRejected) => {
-                                error = true;
-                                break;
-                            }
-                            r => r?,
-                        };
-                    }
-                    if error {
-                        warn!(
-                            "Fast forward failed due to an error with applying \
-                        the sync response. Trying again."
-                        );
-                        if let Some(ff) = manager.process_fast_forward() {
-                            send(write, &ff).await?;
-                        }
-                        return Ok(());
-                    }
-
-                    for resource in sync.delete() {
-                        let resource = resource.as_ref();
-                        options.delete(resource, Storage::Public).await?;
-                    }
-                }
-                agde::SyncReplyAction::UnexpectedPier => return Ok(()),
-            }
-
-            drop(manager);
+        agde::MessageKind::SyncReply(sync) => {
+            handle_sync_reply(&mut manager, options, write, sync, sender).await?;
             // cursors: we hopefully aren't reading this currently.
             //  if we are, then this probably contains many Unknown segments.
             //  The user also shouldn't edit a resource at the same time as it gets synced.
@@ -1702,6 +1482,236 @@ async fn rewind_current(
     }
 
     r
+}
+
+async fn handle_sync_reply(
+    manager: &mut Manager,
+    options: &Options,
+    write: &Mutex<WriteHalf>,
+    mut sync: agde::sync::Response,
+    sender: agde::Uuid,
+) -> Result<(), ApplicationError> {
+    let action = if let Ok(action) = manager.apply_sync_reply(&mut sync, sender) {
+        action
+    } else {
+        warn!("Got erroneous sync message while fast-forwarding: {sync:?}");
+        return Ok(());
+    };
+
+    match action {
+        agde::SyncReplyAction::FastForward {
+            rewinder,
+            metadata_applier,
+        } => {
+            let mut public_rewinder = rewinder;
+            let mut current_rewinder = public_rewinder.clone();
+            let mut error = false;
+            // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
+            for (resource, diff) in sync.diff() {
+                let resource = resource.as_ref();
+                let public = async {
+                    let mut data = options
+                        .read(resource, Storage::Public)
+                        .await?
+                        .unwrap_or_default();
+
+                    let result = if diff.apply_overlaps(data.len()) {
+                        let mut other = Vec::with_capacity(data.len() + 64);
+                        let r = diff.apply(&data, &mut other);
+                        data = other;
+                        r
+                    } else {
+                        diff.apply_in_place(&mut data)
+                    };
+                    if result.is_err() {
+                        return Err(ApplicationError::PiersRejected);
+                    }
+                    data = public_rewinder
+                        .rewind(resource, data)
+                        .map_or_else(|e| e.into_data(), identity);
+                    options
+                        .write(
+                            resource,
+                            WriteStorage::Public(
+                                WriteMtime::No,
+                                public_rewinder.last_change_to_resource(resource),
+                            ),
+                            data,
+                            false,
+                        )
+                        .await?;
+                    Ok(())
+                };
+                let current = async {
+                    let mut data = options
+                        .read(resource, Storage::Current)
+                        .await?
+                        .unwrap_or_default();
+
+                    let result = if diff.apply_overlaps_adaptive_end(data.len()) {
+                        let mut other = Vec::with_capacity(data.len() + 64);
+                        let r = diff.apply_adaptive_end(&data, &mut other);
+                        data = other;
+                        r
+                    } else {
+                        diff.apply_in_place_adaptive_end(&mut data)
+                    };
+                    data = current_rewinder
+                        .rewind(resource, data)
+                        .map_or_else(|e| e.into_data(), identity);
+                    if result.is_err() {
+                        return Err(ApplicationError::PiersRejected);
+                    }
+                    options
+                        .write(resource, WriteStorage::current(), data, true)
+                        .await?;
+                    Ok(())
+                };
+                match futures::future::try_join(public, current).await {
+                    Err(ApplicationError::PiersRejected) => {
+                        error = true;
+                        break;
+                    }
+                    r => r?,
+                };
+            }
+            if error {
+                warn!(
+                    "Fast forward failed due to an error with applying \
+                        the sync response. Trying again."
+                );
+                if let Some(ff) = manager.process_fast_forward() {
+                    send(write, &ff).await?;
+                }
+                return Ok(());
+            }
+
+            for resource in sync.delete() {
+                let resource = resource.as_ref();
+                options.delete(resource, Storage::Public).await?;
+            }
+
+            // apply the remote changes (as we will be syncing them)
+            //
+            // this has the benefit of saving the metadata even if our data
+            // is the same. If the data is the same, the pier will see that
+            // the diff is empty and not send it back. Our public buffer
+            // doesn't get modified, and next time we connect, we create a
+            // signature again. That's bad. So by adjusting our metadata
+            // here, we assue this is the first and only time we want to
+            // get this version of the resource.
+            //
+            // `TODO`: send a touch array back with the sync response
+            // instead, with the event_mtimes of the pier.
+            // Then, we can remove `sync_metadata`.
+            info!("Fast forward complete.");
+            {
+                let mut metadata = options.metadata().lock().await;
+                metadata_applier.apply(&mut metadata);
+            }
+            options.sync_metadata(Storage::Public).await?;
+        }
+        agde::SyncReplyAction::HashCheck { unwinder } => {
+            let mut public_unwinder = unwinder;
+            let mut current_unwinder = public_unwinder.clone();
+            let mut error = false;
+            // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
+            for (resource, diff) in sync.diff() {
+                let resource = resource.as_ref();
+                let public = async {
+                    let data = options
+                        .read(resource, Storage::Public)
+                        .await?
+                        .unwrap_or_default();
+
+                    let mut data = public_unwinder
+                        .unwind(data, resource)
+                        .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
+
+                    let result = if diff.apply_overlaps(data.len()) {
+                        let mut other = Vec::with_capacity(data.len() + 64);
+                        let r = diff.apply(&data, &mut other);
+                        data = other;
+                        r
+                    } else {
+                        diff.apply_in_place(&mut data)
+                    };
+                    if result.is_err() {
+                        return Err(ApplicationError::PiersRejected);
+                    }
+                    data = public_unwinder
+                        .rewind(data)
+                        .map_or_else(|(_err, vec)| vec, identity);
+                    options
+                        .write(
+                            resource,
+                            WriteStorage::Public(
+                                WriteMtime::No,
+                                public_unwinder.last_change_to_resource(resource),
+                            ),
+                            data,
+                            false,
+                        )
+                        .await?;
+                    Ok(())
+                };
+                let current = async {
+                    let data = options
+                        .read(resource, Storage::Current)
+                        .await?
+                        .unwrap_or_default();
+
+                    let mut data = current_unwinder
+                        .unwind(data, resource)
+                        .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
+
+                    let result = if diff.apply_overlaps_adaptive_end(data.len()) {
+                        let mut other = Vec::with_capacity(data.len() + 64);
+                        let r = diff.apply_adaptive_end(&data, &mut other);
+                        data = other;
+                        r
+                    } else {
+                        diff.apply_in_place_adaptive_end(&mut data)
+                    };
+                    if result.is_err() {
+                        return Err(ApplicationError::PiersRejected);
+                    }
+                    data = current_unwinder
+                        .rewind(data)
+                        .map_or_else(|(_err, vec)| vec, identity);
+                    options
+                        .write(resource, WriteStorage::current(), data, true)
+                        .await?;
+                    Ok(())
+                };
+                match futures::future::try_join(public, current).await {
+                    Err(ApplicationError::PiersRejected) => {
+                        error = true;
+                        break;
+                    }
+                    r => r?,
+                };
+            }
+            if error {
+                warn!(
+                    "Fast forward failed due to an error with applying \
+                        the sync response. Trying again."
+                );
+                if let Some(ff) = manager.process_fast_forward() {
+                    send(write, &ff).await?;
+                }
+                return Ok(());
+            }
+
+            for resource in sync.delete() {
+                let resource = resource.as_ref();
+                options.delete(resource, Storage::Public).await?;
+            }
+        }
+        agde::SyncReplyAction::UnexpectedPier => return Ok(()),
+    }
+
+    Ok(())
 }
 
 fn from_compressed_bin(bytes: &[u8]) -> Result<agde::Message, ()> {
