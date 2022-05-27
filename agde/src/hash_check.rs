@@ -196,9 +196,7 @@ impl<'a> ResponseBuilder<'a> {
     #[allow(clippy::needless_pass_by_value)] // The hasher is consumed for one resource.
     #[inline]
     pub fn insert(&mut self, resource: String, hash: ResponseHash) {
-        self.0
-            .hashes
-            .insert(resource, hash);
+        self.0.hashes.insert(resource, hash);
     }
     /// Unwind the resources before creating a `hash` for [`Self::insert`].
     ///

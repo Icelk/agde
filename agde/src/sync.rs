@@ -192,7 +192,9 @@ impl<'a> ResponseBuilder<'a> {
             }
         }
         let max = cmp::min(
-            manager.event_log.cutoff_from_time(self.request.log_settings.0)
+            manager
+                .event_log
+                .cutoff_from_time(self.request.log_settings.0)
                 .unwrap_or(manager.event_log.limit() as usize),
             self.request.log_settings.1 as usize,
         );
