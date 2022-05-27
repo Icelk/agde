@@ -128,6 +128,14 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
                     if !metadata.is_file() {
                         continue;
                     }
+                    // > 1GiB
+                    if metadata.len() > 1024 * 1024 * 1024 {
+                        warn!(
+                            "Not tracking file {:?} because it's larger than 1 GiB",
+                            entry.path()
+                        );
+                        continue;
+                    }
                     let modified = metadata.modified()?;
 
                     map.insert(
