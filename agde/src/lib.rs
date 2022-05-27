@@ -627,8 +627,8 @@ impl Manager {
     /// Turn the [`sync`] response to a message.
     ///
     /// This should be sent back to the pier which requested the sync.
-    pub fn process_sync_reply(&mut self, response: sync::ResponseBuilder) -> Message {
-        self.process(MessageKind::SyncReply(response.finish(&self.event_log)))
+    pub fn process_sync_reply(&mut self, response: sync::Response) -> Message {
+        self.process(MessageKind::SyncReply(response))
     }
     /// Returns [`None`] if we haven't registered any piers.
     pub fn process_fast_forward(&mut self) -> Option<Message> {
@@ -871,7 +871,7 @@ impl Manager {
     /// `sender` is the UUID of the pier who sent this, [`Message::sender`].
     #[allow(clippy::unused_self)] // Consistency between functions.
     pub fn apply_hash_check(
-        &mut self,
+        &self,
         check: hash_check::Request,
         sender: Uuid,
     ) -> hash_check::ResponseBuilder {
@@ -879,7 +879,7 @@ impl Manager {
 
         let unwinder = self
             .event_log
-            .unwind_to(utils::dur_now().saturating_sub(cutoff));
+            .unwind_to(utils::dur_now().saturating_sub(cutoff), self);
         hash_check::ResponseBuilder::new(sender, check, cutoff, unwinder)
     }
     /// If the returned [`sync::RequestBuilder`] is [`Some`], loop over each resource
@@ -989,7 +989,7 @@ impl Manager {
         &'a mut self,
         response: &mut sync::Response,
         sender: Uuid,
-    ) -> Result<SyncReplyAction, fast_forward::Error> {
+    ) -> Result<SyncReplyAction<'a>, fast_forward::Error> {
         match self.fast_forward {
             fast_forward::State::NotRunning => {}
             fast_forward::State::WaitingForMeta { pier }
@@ -1020,7 +1020,7 @@ impl Manager {
 
         match core::mem::replace(&mut self.fast_forward, fast_forward::State::NotRunning) {
             fast_forward::State::NotRunning => Ok(SyncReplyAction::HashCheck {
-                unwinder: event::Unwinder::new(slice),
+                unwinder: event::Unwinder::new(slice, Some(self)),
             }),
             fast_forward::State::WaitingForMeta { pier } => {
                 self.fast_forward = fast_forward::State::WaitingForMeta { pier };
@@ -1139,7 +1139,7 @@ impl Manager {
             .unwrap_or(0);
         let events = &self.event_log.list[events_start..];
 
-        event::Unwinder::new(events)
+        event::Unwinder::new(events, Some(self))
     }
     /// Get an [`event::Rewinder`] which can apply all the stored diffs received since the last
     /// data commit to a resource.

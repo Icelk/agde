@@ -8,7 +8,7 @@ use std::time::Duration;
 use den::ExtendVec;
 use serde::{Deserialize, Serialize};
 
-use crate::event;
+use crate::{event, Manager};
 use crate::{utils, utils::dur_now, Event, EventKind, Uuid};
 
 /// Implements [`ExtendVec`] to fill with zeroes. Reduces memory usage when storing log.
@@ -305,7 +305,7 @@ impl Log {
 
         let slice = &self.list[slice_start..];
 
-        event::Unwinder::new(slice)
+        event::Unwinder::new(slice, None)
             .check_name(old_name)
             .ok()
             .map(|()| old_name)
@@ -313,7 +313,11 @@ impl Log {
 
     /// Rewinds to `timestamp` or as far as we can.
     #[inline]
-    pub(crate) fn unwind_to(&self, timestamp: Duration) -> event::Unwinder {
+    pub(crate) fn unwind_to<'a>(
+        &'a self,
+        timestamp: Duration,
+        manager: &'a Manager,
+    ) -> event::Unwinder<'a> {
         let mut cutoff = 0;
         for (pos, received_ev) in self.list.iter().enumerate().rev() {
             if received_ev.event.timestamp_dur() <= timestamp {
@@ -321,7 +325,7 @@ impl Log {
             }
         }
 
-        event::Unwinder::new(&self.list[cutoff..])
+        event::Unwinder::new(&self.list[cutoff..], Some(manager))
     }
     pub(crate) fn event_applier<'a>(
         &'a mut self,
@@ -374,7 +378,7 @@ impl Log {
 
         let slice = &mut self.list[slice_index..];
         // This check is required for the code at [`EventApplier::apply`] to not panic.
-        let resource = event::Unwinder::new(slice)
+        let resource = event::Unwinder::new(slice, None)
             .check_name(event.resource())
             .ok()
             .map(|_| event.resource());
@@ -452,7 +456,7 @@ impl<'a> EventApplier<'a> {
 
         let mut error = None;
 
-        let mut unwinder = event::Unwinder::new(self.events);
+        let mut unwinder = event::Unwinder::new(self.events, None);
 
         let mut resource = match unwinder.unwind(resource, current_resource_name) {
             Ok(r) => r,

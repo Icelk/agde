@@ -143,7 +143,7 @@ impl<'a> ResponseBuilder<'a> {
                 RevertTo::To(uuid) => Some({
                     let events_start = manager.event_log.cutoff_from_uuid(uuid).unwrap_or(0);
                     let events = &manager.event_log.list[events_start..];
-                    event::Unwinder::new(events)
+                    event::Unwinder::new(events, Some(manager))
                 }),
             },
         }
@@ -179,7 +179,8 @@ impl<'a> ResponseBuilder<'a> {
         }
         self
     }
-    pub(crate) fn finish(mut self, log: &log::Log) -> Response {
+    /// Finish the response.
+    pub fn finish(mut self, manager: &Manager) -> Response {
         let mut delete = Vec::new();
         for resource in self.request.signatures.keys() {
             if self
@@ -191,11 +192,11 @@ impl<'a> ResponseBuilder<'a> {
             }
         }
         let max = cmp::min(
-            log.cutoff_from_time(self.request.log_settings.0)
-                .unwrap_or(log.limit() as usize),
+            manager.event_log.cutoff_from_time(self.request.log_settings.0)
+                .unwrap_or(manager.event_log.limit() as usize),
             self.request.log_settings.1 as usize,
         );
-        let event_log = log.get_max(max).to_vec();
+        let event_log = manager.event_log.get_max(max).to_vec();
         let last = event_log.last().map(|ev| ev.message_uuid);
         self.diff.retain(|diff| !diff.1.is_empty());
         Response {

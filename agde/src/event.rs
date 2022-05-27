@@ -329,30 +329,44 @@ pub enum UnwindError {
     /// The diffs which erred aren't applied.
     Apply(den::ApplyError, Vec<u8>),
 }
+impl UnwindError {
+    /// Get the data of [`Self::Apply`] or, if [`Self::ResourceDestroyed`], return `default_err`.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn into_data<E>(self, default_err: E) -> Result<Vec<u8>, E> {
+        match self {
+            UnwindError::ResourceDestroyed => Err(default_err),
+            UnwindError::Apply(_, vec) => Ok(vec),
+        }
+    }
+}
 
 /// Unwinds the stack of stored events to get the local data to a previous state.
 ///
 /// Has nothing to do with unwinding of the program's stack in a [`panic!`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Unwinder<'a> {
     /// Ordered from last (temporally).
     events: &'a [log::ReceivedEvent],
     unwound_events: Vec<&'a Difference>,
     // these are allocated once to optimize allocations
     buffer: Vec<u8>,
+    manager: Option<&'a Manager>,
 }
 impl<'a> Unwinder<'a> {
-    pub(crate) fn new(events: &'a [log::ReceivedEvent]) -> Self {
+    /// If you supply [`None`] to `manager` and this leaks to the user, and they call
+    /// [`Self::last_change_to_resource`]
+    pub(crate) fn new(events: &'a [log::ReceivedEvent], manager: Option<&'a Manager>) -> Self {
         Self {
             events,
             unwound_events: vec![],
             buffer: vec![],
+            manager,
         }
     }
     /// # Errors
     ///
     /// Will never return [`UnwindError::Apply`].
-    pub(crate) fn check_name(&self, modern_resource_name: &'a str) -> Result<(), UnwindError> {
+    pub(crate) fn check_name(&self, modern_resource_name: &str) -> Result<(), UnwindError> {
         for log_event in self.events {
             if log_event.event.resource() == modern_resource_name {
                 match &log_event.event.inner() {
@@ -376,7 +390,7 @@ impl<'a> Unwinder<'a> {
         &'b self,
         modern_resource_name: &'b str,
     ) -> Result<impl Iterator<Item = &Difference> + 'b, UnwindError> {
-        self.check_name(modern_resource_name)?;
+        Unwinder::new(self.events, None).check_name(modern_resource_name)?;
 
         let iter = self.events.iter().rev().filter_map(move |received_ev| {
             if received_ev.event.resource() != modern_resource_name {
@@ -423,7 +437,7 @@ impl<'a> Unwinder<'a> {
     pub fn unwind(
         &mut self,
         resource: impl Into<Vec<u8>>,
-        modern_resource_name: &'a str,
+        modern_resource_name: &str,
     ) -> Result<Vec<u8>, UnwindError> {
         assert_eq!(
             self.unwound_events.len(),
@@ -431,7 +445,7 @@ impl<'a> Unwinder<'a> {
             "The rewinding stack must be empty!"
         );
 
-        self.check_name(modern_resource_name)?;
+        Unwinder::new(self.events, None).check_name(modern_resource_name)?;
 
         let mut error = None;
 
@@ -517,6 +531,13 @@ impl<'a> Unwinder<'a> {
     pub(crate) fn clear_unwound(&mut self) {
         self.unwound_events.clear();
     }
+
+    /// See [`Manager::last_change_to_resource`].
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)] // this is guaranteed by the contracts in `Self::new`
+    pub fn last_change_to_resource(&self, resource: &str) -> SystemTime {
+        self.manager.unwrap().last_change_to_resource(resource)
+    }
 }
 
 #[derive(Debug)]
@@ -546,7 +567,7 @@ impl RewindError {
 /// Struct to apply all the diffs from a specified timestamp to a resource.
 ///
 /// See [`Manager::rewind_from_last_commit`] for more info.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Rewinder<'a> {
     /// Ordered from last (temporally).
     events: &'a [log::ReceivedEvent],
