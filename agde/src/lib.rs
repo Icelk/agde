@@ -36,7 +36,7 @@ pub mod sync;
 pub mod utils;
 
 use std::cmp;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Display};
 use std::ops::DerefMut;
 use std::sync::Mutex;
@@ -464,6 +464,12 @@ pub struct Manager {
     event_uuid_conversation_piers: log::UuidReplies,
 
     fast_forward: fast_forward::State,
+    /// The remote we're having a conversation with to check our hashes.
+    hash_checking: Option<Uuid>,
+    /// The piers which have cancelled our fast forward/hash check request.
+    /// Should be cleared once the exchange is done (in `apply_sync_reply`).
+    cancelled_piers: BTreeSet<Uuid>,
+    cancelled_piers_last_changed: Duration,
 }
 impl Manager {
     /// Creates a empty manager.
@@ -491,6 +497,9 @@ impl Manager {
             event_uuid_conversation_piers: log::UuidReplies::new(),
 
             fast_forward: fast_forward::State::NotRunning,
+            hash_checking: None,
+            cancelled_piers: BTreeSet::new(),
+            cancelled_piers_last_changed: utils::dur_now(),
         }
     }
     /// Get the UUID of this client.
@@ -579,9 +588,8 @@ impl Manager {
     ///
     /// This is between event log check and sync to make sure our data is valid.
     /// Then, we don't need to sync.
-    ///
-    /// `TODO`: Consider if this is necessary, or if we should simply check the sync.
     pub fn process_hash_check(&mut self, pier: SelectedPier) -> Message {
+        self.hash_checking = Some(pier.uuid());
         self.process(MessageKind::HashCheck(hash_check::Request::new(
             pier,
             resource::Matcher::all(),
@@ -630,9 +638,11 @@ impl Manager {
     pub fn process_sync_reply(&mut self, response: sync::Response) -> Message {
         self.process(MessageKind::SyncReply(response))
     }
-    /// Returns [`None`] if we haven't registered any piers.
+    /// Returns [`None`] if we haven't registered any piers which are willing to talk to us (they
+    /// haven't cancelled us).
     pub fn process_fast_forward(&mut self) -> Option<Message> {
-        let pier = self.choose_pier(|_, _| true)?;
+        self.clean_cancelled_piers();
+        let pier = self.choose_pier(|uuid, _| !self.cancelled_piers.contains(&uuid))?;
         self.fast_forward = fast_forward::State::WaitingForMeta { pier: pier.uuid() };
         Some(
             self.process(MessageKind::FastForward(fast_forward::Request::new(
@@ -896,6 +906,8 @@ impl Manager {
     ///
     /// Returns [`fast_forward::Error::ExpectedNotRunning`] if [`Manager::is_fast_forwarding`] is
     /// true.
+    /// If `sender` isn't the pier we decided to talk to, or if we haven't initiated a conversation
+    /// ([`Self::process_hash_check`]), [`fast_forward::Error::UnexpectedPier`] is returned.
     #[allow(clippy::type_complexity, clippy::unused_self)] // method consistency
     pub fn apply_hash_check_reply(
         &mut self,
@@ -926,6 +938,13 @@ impl Manager {
                     }
                 }
             }
+        }
+        if let Some(pier) = self.hash_checking {
+            if pier != sender {
+                return Err(fast_forward::Error::UnexpectedPier);
+            }
+        } else {
+            return Err(fast_forward::Error::UnexpectedPier);
         }
         if self.is_fast_forwarding() {
             return Err(fast_forward::Error::ExpectedNotRunning);
@@ -1098,6 +1117,33 @@ impl Manager {
         self.piers.remove(&sender);
         self.event_uuid_conversation_piers.remove_pier(sender);
     }
+    /// Accept a cancellation event from `sender`.
+    ///
+    pub fn apply_cancelled(&mut self, sender: Uuid) -> CancelAction {
+        self.cancelled_piers.insert(sender);
+        self.cancelled_piers_last_changed = utils::dur_now();
+        if let Some(pier) = self.hash_checking {
+            if sender == pier {
+                let pier = self.hash_check_persistent();
+                return pier.map_or(CancelAction::Nothing, CancelAction::HashCheck);
+            }
+        }
+        match self.fast_forward {
+            fast_forward::State::NotRunning => {}
+            fast_forward::State::WaitingForMeta { pier }
+            | fast_forward::State::WaitingForDiffs {
+                pier,
+                latest_event: _,
+                fast_forward_metadata: _,
+                changes: _,
+            } => {
+                if pier == sender {
+                    return CancelAction::FastForward;
+                }
+            }
+        }
+        CancelAction::Nothing
+    }
 }
 impl Manager {
     /// Get the random number generator of this manager.
@@ -1205,10 +1251,36 @@ impl Manager {
             .map_or(SystemTime::UNIX_EPOCH, |ev| ev.event.timestamp())
     }
 
+    /// Get the pier to use when starting a hash check.
+    /// This should only be called if our [`Capabilities::persistent`] is set.
+    /// If we're a temporary client (read: not server), this isn't needed.
+    ///
+    /// Call [`Manager::process_hash_check`] with the returned [`SelectedPier`].
+    /// It is [`None`] if no other piers (which have not returned [`MessageKind::Cancelled`])
+    /// are in the network. If that's the case, do nothing.
+    pub fn hash_check_persistent(&mut self) -> Option<SelectedPier> {
+        self.clean_cancelled_piers();
+        self.choose_pier(|uuid, capabilities| {
+            capabilities.persistent() && !self.cancelled_piers.contains(&uuid)
+        })
+    }
+    fn clean_cancelled_piers(&mut self) {
+        if utils::dur_now().saturating_sub(self.cancelled_piers_last_changed)
+            > Duration::from_secs(60).saturating_sub(
+                // if someone spams us with cancelled piers, decrease this to avoid
+                // `cancelled_piers_last_changed` being pegged and us not getting to sync
+                Duration::from_millis(250)
+                    * u32::try_from(self.cancelled_piers.len()).unwrap_or(u32::MAX),
+            )
+        {
+            self.cancelled_piers.clear();
+        }
+    }
+
     /// Get an iterator of the piers filtered by `filter`.
     pub fn filter_piers<'a>(
         &'a self,
-        filter: impl Fn(Uuid, &Capabilities) -> bool + 'a,
+        mut filter: impl FnMut(Uuid, &Capabilities) -> bool + 'a,
     ) -> impl Iterator<Item = (Uuid, &'a Capabilities)> {
         self.piers.iter().filter_map(move |(uuid, capabilities)| {
             if filter(*uuid, capabilities) {
@@ -1221,7 +1293,7 @@ impl Manager {
     /// Returns [`None`] if no pier was accepted from the `filter`.
     pub(crate) fn choose_pier(
         &self,
-        filter: impl Fn(Uuid, &Capabilities) -> bool + Clone,
+        mut filter: impl FnMut(Uuid, &Capabilities) -> bool + Clone,
     ) -> Option<SelectedPier> {
         let mut total_desire = 0.0;
         for (_, capabilities) in self
@@ -1298,4 +1370,14 @@ pub enum SyncReplyAction<'a> {
     /// An unexpected pier sent us a [`Self::HashCheck`] sync message while we are fast forwarding.
     /// Do nothing and ignore this message. Something's wrong with someone else's code.
     UnexpectedPier,
+}
+/// The action to follow after calling [`Manager::apply_cancelled`].
+#[derive(Debug, Clone, Copy)]
+pub enum CancelAction {
+    /// Do nothing.
+    Nothing,
+    /// Initiate a hash check with the selected pier.
+    HashCheck(SelectedPier),
+    /// [Trigger](Manager::process_fast_forward) a fast forward.
+    FastForward,
 }

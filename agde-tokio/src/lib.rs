@@ -1147,11 +1147,21 @@ async fn handle_message(
         agde::MessageKind::EventUuidLogCheckReply { uuid: _, check: _ } => {
             todo!()
         }
-        // Have a map of current conversations with piers.
-        // If a Cancelled received, look up if we have a conversation (Enum of kind, list of tried piers), and call
-        // the appropriate function to initiate a new one, ignoring all the tried.
-        // If we get no result, give up.
-        agde::MessageKind::Cancelled(_) => todo!(),
+        agde::MessageKind::Cancelled(_) => match manager.apply_cancelled(sender) {
+            agde::CancelAction::Nothing => {}
+            agde::CancelAction::HashCheck(pier) => {
+                let msg = manager.process_hash_check(pier);
+                drop(manager);
+                send(write, &msg).await?;
+            }
+            agde::CancelAction::FastForward => {
+                let msg = manager.process_fast_forward();
+                drop(manager);
+                if let Some(msg) = msg {
+                    send(write, &msg).await?;
+                }
+            }
+        },
         agde::MessageKind::Disconnect => {
             info!("Pier {sender} disconnected.");
             manager.apply_disconnect(sender);
@@ -1578,8 +1588,9 @@ async fn handle_sync_reply(
             if error {
                 warn!(
                     "Fast forward failed due to an error with applying \
-                        the sync response. Trying again."
+                    the sync response. Trying again."
                 );
+
                 if let Some(ff) = manager.process_fast_forward() {
                     send(write, &ff).await?;
                 }
@@ -1614,7 +1625,6 @@ async fn handle_sync_reply(
         agde::SyncReplyAction::HashCheck { unwinder } => {
             let mut public_unwinder = unwinder;
             let mut current_unwinder = public_unwinder.clone();
-            let mut error = false;
             // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
             for (resource, diff) in sync.diff() {
                 let resource = resource.as_ref();
@@ -1628,17 +1638,14 @@ async fn handle_sync_reply(
                         .unwind(data, resource)
                         .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
 
-                    let result = if diff.apply_overlaps(data.len()) {
+                    if diff.apply_overlaps(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
-                        let r = diff.apply(&data, &mut other);
-                        data = other;
-                        r
-                    } else {
-                        diff.apply_in_place(&mut data)
+                        if diff.apply(&data, &mut other).is_ok() {
+                            data = other;
+                        }
+                    } else if diff.in_bounds(&data) {
+                        diff.apply_in_place(&mut data).unwrap();
                     };
-                    if result.is_err() {
-                        return Err(ApplicationError::PiersRejected);
-                    }
                     data = public_unwinder
                         .rewind(data)
                         .map_or_else(|(_err, vec)| vec, identity);
@@ -1665,17 +1672,14 @@ async fn handle_sync_reply(
                         .unwind(data, resource)
                         .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
 
-                    let result = if diff.apply_overlaps_adaptive_end(data.len()) {
+                    if diff.apply_overlaps_adaptive_end(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
-                        let r = diff.apply_adaptive_end(&data, &mut other);
-                        data = other;
-                        r
-                    } else {
-                        diff.apply_in_place_adaptive_end(&mut data)
+                        if diff.apply_adaptive_end(&data, &mut other).is_ok() {
+                            data = other;
+                        }
+                    } else if diff.in_bounds(&data) {
+                        diff.apply_in_place_adaptive_end(&mut data).unwrap();
                     };
-                    if result.is_err() {
-                        return Err(ApplicationError::PiersRejected);
-                    }
                     data = current_unwinder
                         .rewind(data)
                         .map_or_else(|(_err, vec)| vec, identity);
@@ -1684,23 +1688,7 @@ async fn handle_sync_reply(
                         .await?;
                     Ok(())
                 };
-                match futures::future::try_join(public, current).await {
-                    Err(ApplicationError::PiersRejected) => {
-                        error = true;
-                        break;
-                    }
-                    r => r?,
-                };
-            }
-            if error {
-                warn!(
-                    "Fast forward failed due to an error with applying \
-                        the sync response. Trying again."
-                );
-                if let Some(ff) = manager.process_fast_forward() {
-                    send(write, &ff).await?;
-                }
-                return Ok(());
+                futures::future::try_join(public, current).await?;
             }
 
             for resource in sync.delete() {
