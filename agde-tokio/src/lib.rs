@@ -794,7 +794,53 @@ pub async fn run(
     // trigger fast forward
     {
         let mut mgr = manager.lock().await;
-        if let Some(msg) = mgr.process_fast_forward() {
+        if let Some(msg) = mgr
+            .process_fast_forward()
+            .expect("BUG: Internal agde state error when trying to fast forward.")
+        {
+            let manager = Arc::clone(&manager);
+            let write2 = Arc::clone(&write);
+            let pier = if let agde::Recipient::Selected(pier) = msg.recipient() {
+                pier.uuid()
+            } else {
+                unreachable!("A fast forward message has to have a recipient")
+            };
+            tokio::spawn(async move {
+                let mut pier = pier;
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let mut manager = manager.lock().await;
+
+                    // we're still fast forwarding
+                    if manager.is_fast_forwarding() {
+                        let action = manager.apply_cancelled(pier);
+
+                        if let agde::CancelAction::FastForward = action {
+                            let ff = manager.process_fast_forward().expect(
+                                "BUG: Internal agde state error when trying \
+                                to recover from a failed fast forward",
+                            );
+
+                            if let Some(ff) = ff {
+                                drop(manager);
+
+                                pier = if let agde::Recipient::Selected(pier) = ff.recipient() {
+                                    pier.uuid()
+                                } else {
+                                    unreachable!("A fast forward message has to have a recipient")
+                                };
+
+                                if let Err(err) = send(&write2, &ff).await {
+                                    error!("Error when trying to fast forward to other piers after one failed: {err:?}");
+                                };
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+            });
+            drop(mgr);
             send(&write, &msg).await?;
         } else {
             drop(mgr);
@@ -825,6 +871,7 @@ pub async fn run(
     };
 
     // `TODO`: periodic calls (`clean_event_uuid_log_checks`, periodic (hash, event log) checks)
+    // Make sure we check that we aren't fast forwarding.
     let (oneshot_sender, oneshot_receiver) = futures::channel::oneshot::channel();
 
     tokio::spawn(async move {
@@ -1150,12 +1197,18 @@ async fn handle_message(
         agde::MessageKind::Cancelled(_) => match manager.apply_cancelled(sender) {
             agde::CancelAction::Nothing => {}
             agde::CancelAction::HashCheck(pier) => {
-                let msg = manager.process_hash_check(pier);
+                // UNWRAP: see the docs of `apply_cancelled`.
+                let msg = manager
+                    .process_hash_check(pier)
+                    .expect("BUG: Internal agde state error when accepting cancel event.");
                 drop(manager);
                 send(write, &msg).await?;
             }
             agde::CancelAction::FastForward => {
-                let msg = manager.process_fast_forward();
+                // UNWRAP: see the docs of `apply_cancelled`.
+                let msg = manager
+                    .process_fast_forward()
+                    .expect("BUG: Internal agde state error when accepting cancel event.");
                 drop(manager);
                 if let Some(msg) = msg {
                     send(write, &msg).await?;
@@ -1179,6 +1232,7 @@ async fn commit_and_send(
 ) -> Result<(), ApplicationError> {
     let mut manager = manager.lock().await;
     if manager.is_fast_forwarding() {
+        info!("Don't commit and send - we're fast forwarding.");
         return Ok(());
     }
 
@@ -1288,9 +1342,9 @@ async fn commit_and_send(
                     }
                 };
 
-                info!("Sending event: {event:?}");
+                debug!("Sending event: {event:?}");
                 messages.push(manager.process_event(event).expect(
-                    "internal agde state bug - we're trying \
+                    "BUG: internal agde state error - we're trying \
                     to send an event while fast forwarding!",
                 ))
             } else {
@@ -1591,7 +1645,11 @@ async fn handle_sync_reply(
                     the sync response. Trying again."
                 );
 
-                if let Some(ff) = manager.process_fast_forward() {
+                // UNWRAP: see the docs of `apply_sync_reply`.
+                if let Some(ff) = manager.process_fast_forward().expect(
+                    "BUG: Internal agde state error when \
+                    trying fast forward again after pier failed us",
+                ) {
                     send(write, &ff).await?;
                 }
                 return Ok(());

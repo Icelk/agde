@@ -588,16 +588,28 @@ impl Manager {
     ///
     /// This is between event log check and sync to make sure our data is valid.
     /// Then, we don't need to sync.
-    pub fn process_hash_check(&mut self, pier: SelectedPier) -> Message {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fast_forward::Error::ExpectedNotRunning`] if [`Self::is_fast_forwarding`].
+    pub fn process_hash_check(
+        &mut self,
+        pier: SelectedPier,
+    ) -> Result<Message, fast_forward::Error> {
+        if let fast_forward::State::NotRunning = self.fast_forward {
+        } else {
+            return Err(fast_forward::Error::ExpectedNotRunning);
+        }
         self.hash_checking = Some(pier.uuid());
-        self.process(MessageKind::HashCheck(hash_check::Request::new(
+        let msg = self.process(MessageKind::HashCheck(hash_check::Request::new(
             pier,
             resource::Matcher::all(),
             cmp::min(
                 utils::dur_now().saturating_sub(Duration::from_secs(15)),
                 self.event_log.lifetime() / 2,
             ),
-        )))
+        )));
+        Ok(msg)
     }
     /// Make a message from the [`hash_check::Response`], created using
     /// [`hash_check::ResponseBuilder::finish`].
@@ -640,15 +652,27 @@ impl Manager {
     }
     /// Returns [`None`] if we haven't registered any piers which are willing to talk to us (they
     /// haven't cancelled us).
-    pub fn process_fast_forward(&mut self) -> Option<Message> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fast_forward::Error::ExpectedNotRunning`] if [`Self::hash_checking()`] is [`Some`].
+    pub fn process_fast_forward(&mut self) -> Result<Option<Message>, fast_forward::Error> {
+        if self.hash_checking().is_some() {
+            return Err(fast_forward::Error::ExpectedNotRunning);
+        }
         self.clean_cancelled_piers();
-        let pier = self.choose_pier(|uuid, _| !self.cancelled_piers.contains(&uuid))?;
-        self.fast_forward = fast_forward::State::WaitingForMeta { pier: pier.uuid() };
-        Some(
-            self.process(MessageKind::FastForward(fast_forward::Request::new(
-                pier.uuid(),
-            ))),
-        )
+
+        // so we can use `?` ↓ for the `None`.
+        let mut msg = || {
+            let pier = self.choose_pier(|uuid, _| !self.cancelled_piers.contains(&uuid))?;
+            self.fast_forward = fast_forward::State::WaitingForMeta { pier: pier.uuid() };
+            Some(
+                self.process(MessageKind::FastForward(fast_forward::Request::new(
+                    pier.uuid(),
+                ))),
+            )
+        };
+        Ok(msg())
     }
     /// The `public_metadata` is the metadata of the public storage.
     pub fn process_fast_forward_response(
@@ -998,6 +1022,10 @@ impl Manager {
     /// The [`event::Rewinder`] returned should be called for all [modified
     /// resources](sync::Response::diff).
     ///
+    /// You can be sure when calling [`Manager::process_fast_forward`] and
+    /// [`Manager::process_hash_check`] that they won't return state errors, as this guarantees the
+    /// action returned can be ran, because it's currently running.
+    ///
     /// # Errors
     ///
     /// Returns [`fast_forward::Error::ExpectedWaitingForDiffs`] if we're syncing non-fast forward
@@ -1023,6 +1051,11 @@ impl Manager {
                 }
             }
         }
+        if let Some(pier) = self.hash_checking() {
+            if pier != sender {
+                return Ok(SyncReplyAction::UnexpectedPier);
+            }
+        }
 
         self.event_log.merge(response.take_event_log());
         self.event_log.required_event_timestamp = Some(utils::dur_now());
@@ -1038,9 +1071,12 @@ impl Manager {
         let slice = &self.event_log.list[cutoff..];
 
         match core::mem::replace(&mut self.fast_forward, fast_forward::State::NotRunning) {
-            fast_forward::State::NotRunning => Ok(SyncReplyAction::HashCheck {
-                unwinder: event::Unwinder::new(slice, Some(self)),
-            }),
+            fast_forward::State::NotRunning => {
+                self.hash_checking = None;
+                Ok(SyncReplyAction::HashCheck {
+                    unwinder: event::Unwinder::new(slice, Some(self)),
+                })
+            }
             fast_forward::State::WaitingForMeta { pier } => {
                 self.fast_forward = fast_forward::State::WaitingForMeta { pier };
                 Err(fast_forward::Error::ExpectedWaitingForDiffs)
@@ -1119,6 +1155,9 @@ impl Manager {
     }
     /// Accept a cancellation event from `sender`.
     ///
+    /// You can be sure when calling [`Manager::process_fast_forward`] and
+    /// [`Manager::process_hash_check`] that they won't return state errors, as this guarantees the
+    /// action returned can be ran, because it's currently running.
     pub fn apply_cancelled(&mut self, sender: Uuid) -> CancelAction {
         self.cancelled_piers.insert(sender);
         self.cancelled_piers_last_changed = utils::dur_now();
@@ -1275,6 +1314,11 @@ impl Manager {
         {
             self.cancelled_piers.clear();
         }
+    }
+    /// Returns the pier we're currently asking to check our resource's hashes against.
+    #[must_use]
+    pub fn hash_checking(&self) -> Option<Uuid> {
+        self.hash_checking
     }
 
     /// Get an iterator of the piers filtered by `filter`.
