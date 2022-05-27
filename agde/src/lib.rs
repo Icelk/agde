@@ -901,7 +901,7 @@ impl Manager {
         &mut self,
         response: &hash_check::Response,
         sender: Uuid,
-        our_hashes: &hash_check::Response,
+        our_hashes: &BTreeMap<String, hash_check::ResponseHash>,
     ) -> Result<(Option<(sync::RequestBuilder, Vec<String>)>, Vec<String>), fast_forward::Error>
     {
         /// this could be made faster (using sorted iterators as in elipdotter)
@@ -933,17 +933,12 @@ impl Manager {
         let mut differing_data = vec![];
         let mut delete = vec![];
         // See which items in response we don't have.
-        btreemap_difference(
-            &mut differing_data,
-            None,
-            response.hashes(),
-            our_hashes.hashes(),
-        );
+        btreemap_difference(&mut differing_data, None, response.hashes(), our_hashes);
         // See which items the response doesn't have.
         btreemap_difference(
             &mut differing_data,
             Some(&mut delete),
-            our_hashes.hashes(),
+            our_hashes,
             response.hashes(),
         );
 

@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::identity;
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -873,6 +873,7 @@ async fn handle_message(
         agde::MessageKind::Hello(hello) => {
             info!("Pier {} joined the network.", hello.uuid());
             let msg = manager.apply_hello(&hello);
+            drop(manager);
             if send(write, &msg).await.is_err() {
                 return Err(ApplicationError::StreamBroken);
             }
@@ -960,6 +961,7 @@ async fn handle_message(
         agde::MessageKind::FastForward(_ff) => {
             let meta = options.metadata().lock().await;
             let msg = manager.process_fast_forward_response(meta.clone(), sender);
+            drop(manager);
             send(write, &msg).await?;
         }
         agde::MessageKind::FastForwardReply(ff) => {
@@ -999,6 +1001,7 @@ async fn handle_message(
         }
         agde::MessageKind::Sync(sync) => {
             let mut builder = manager.apply_sync(&sync, sender);
+            // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
             while let Some((resource, signature)) = builder.next_signature() {
                 let data = options.read(resource, Storage::Public).await?;
                 let data = if let Some(d) = data {
@@ -1013,6 +1016,7 @@ async fn handle_message(
                 builder.add_diff(resource, diff);
             }
             let msg = manager.process_sync_reply(builder);
+            drop(manager);
             send(write, &msg).await?;
         }
         agde::MessageKind::SyncReply(mut sync) => {
@@ -1025,6 +1029,7 @@ async fn handle_message(
                 };
 
             let mut error = false;
+            // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
             for (resource, diff) in sync.diff() {
                 let resource = resource.as_ref();
                 let public = async {
@@ -1139,8 +1144,123 @@ async fn handle_message(
             //  The user also shouldn't edit a resource at the same time as it gets synced.
             commit_and_send(mgr, options, write, changed, &mut []).await?;
         }
-        agde::MessageKind::HashCheck(_) => todo!(),
-        agde::MessageKind::HashCheckReply(_) => todo!(),
+        agde::MessageKind::HashCheck(hc) => {
+            let response_builder = manager.apply_hash_check(hc, sender);
+            {
+                let metadata = options.metadata().lock().await;
+                // `TODO`: do this in parallel, but that uses more memory! Requires ↓
+                for (resource, _meta) in metadata.iter() {
+                    if response_builder.matches(resource) {
+                        // `TODO`: create a streaming API for `options` which hashes the resource
+                        // without reading the whole thing into memory.
+                        let data = options.read(resource, Storage::Public).await?;
+                        if let Some(data) = data {
+                            // unwind the data
+                            let unwinder = response_builder.unwinder();
+                            let data = match unwinder.unwind(data, resource) {
+                                Ok(data) => data,
+                                Err(agde::event::UnwindError::ResourceDestroyed) => continue,
+                                Err(agde::event::UnwindError::Apply(_err, data)) => data,
+                            };
+
+                            let mut hash = agde::hash_check::ResponseHasher::new();
+                            hash.write(&data);
+                            response_builder.insert(resource.to_owned(), hash.finish());
+                        } else {
+                            // do nothing, by just not adding to the response, we signal we don't
+                            // have it when the pier later checks the differences.
+                        }
+                    }
+                }
+            }
+
+            let msg = manager.process_hash_check_reply(response_builder.finish());
+            drop(manager);
+            send(write, &msg).await?;
+        }
+        agde::MessageKind::HashCheckReply(hc) => {
+            if manager.is_fast_forwarding() {
+                warn!(
+                    "Pier {sender} tried to send a hash check reply when we are fast forwarding."
+                );
+                return Ok(());
+            }
+
+            let mut our_hashes = BTreeMap::new();
+
+            {
+                let metadata = options.metadata().lock().await;
+                let mut unwinder = hc.unwinder(&manager);
+                // `TODO`: do this in parallel, but that uses more memory! Requires ↓
+                for (resource, _meta) in metadata.iter() {
+                    if hc.matches(resource) {
+                        // `TODO`: create a streaming API for `options` which hashes the resource
+                        // without reading the whole thing into memory.
+                        let data = options.read(resource, Storage::Public).await?;
+                        if let Some(data) = data {
+                            // unwind the data
+                            let unwinder = unwinder.unwinder();
+                            let data = match unwinder.unwind(data, resource) {
+                                Ok(data) => data,
+                                Err(agde::event::UnwindError::ResourceDestroyed) => continue,
+                                Err(agde::event::UnwindError::Apply(_err, data)) => data,
+                            };
+
+                            let mut hash = agde::hash_check::ResponseHasher::new();
+                            hash.write(&data);
+                            our_hashes.insert(resource.to_owned(), hash.finish());
+                        } else {
+                            // do nothing, by just not adding to the response, we signal we don't
+                            // have it when the pier later checks the differences.
+                        }
+                    }
+                }
+            }
+
+            let (sync, delete) = manager
+                .apply_hash_check_reply(&hc, sender, &our_hashes)
+                .expect("Tried to execute a hash check while fast forwarding.");
+
+            // free memory
+            drop(our_hashes);
+
+            // delete all in parallell
+            futures::future::try_join_all(delete.into_iter().map(|r| {
+                futures::future::try_join(
+                    options.delete(&r, Storage::Public),
+                    options.delete(&r, Storage::Current),
+                )
+            }))
+            .await?;
+
+            if let Some((sync, resources)) = sync {
+                let unwinder = hc.unwinder(&manager);
+                // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
+                for resource in resources {
+                    let data = options.read(resource, Storage::Public).await?;
+                    if let Some(data) = data {
+                        // unwind the data
+                        let unwinder = unwinder.unwinder();
+                        let data = match unwinder.unwind(data, &resource) {
+                            Ok(data) => data,
+                            Err(agde::event::UnwindError::ResourceDestroyed) => continue,
+                            Err(agde::event::UnwindError::Apply(_err, data)) => data,
+                        };
+
+                        let mut sig = agde::den::Signature::new(128);
+                        sig.write(&data);
+                        let sig = sig.finish();
+                        sync.insert(resource, sig);
+                    } else {
+                        // do nothing, by just not adding to the response, we signal we don't
+                        // have it when the pier later checks the differences.
+                    }
+                }
+                let msg = manager.process_sync(sync.finish(), None);
+                drop(manager);
+                send(write, &msg).await?;
+            }
+        }
         agde::MessageKind::EventUuidLogCheck { uuid: _, check: _ } => todo!(),
         agde::MessageKind::EventUuidLogCheckReply { uuid: _, check: _ } => {
             todo!()

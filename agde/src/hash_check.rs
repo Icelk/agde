@@ -66,6 +66,7 @@ impl Request {
     /// If you start doing this now, before getting the response, keep in mind you have to check
     /// [`Response::different_cutoff`]. If that returns `true`, you have to call
     /// [`Response::unwinder`] and start the process over again.
+    #[inline]
     pub fn unwinder<'a>(&self, manager: &'a Manager) -> ResponseHashRewinder<'a> {
         ResponseHashRewinder(manager.unwinder_to(utils::dur_to_systime(self.cutoff_timestamp)))
     }
@@ -80,7 +81,9 @@ impl PartialEq for Request {
 impl Eq for Request {}
 
 /// The hash data for the response.
-pub type ResponseHash = [u8; 16];
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ResponseHash([u8; 16]);
 
 /// A response to [`Request`].
 ///
@@ -138,6 +141,12 @@ impl Response {
     pub fn unwinder<'a>(&self, manager: &'a Manager) -> ResponseHashRewinder<'a> {
         ResponseHashRewinder(manager.unwinder_to(utils::dur_to_systime(self.cutoff_timestamp())))
     }
+    /// Test if `resource` is included in the requested hash check.
+    #[inline]
+    #[must_use]
+    pub fn matches(&self, resource: &str) -> bool {
+        self.resources.matches(resource)
+    }
 }
 impl PartialEq for Response {
     fn eq(&self, other: &Self) -> bool {
@@ -154,6 +163,7 @@ impl<'a> ResponseHashRewinder<'a> {
     /// Unwind the resources before creating a `hash` for [`crate::Manager::apply_hash_check_reply`].
     ///
     /// Call this for every resource.
+    #[inline]
     pub fn unwinder(&mut self) -> &mut event::Unwinder<'a> {
         self.0.clear_unwound();
         &mut self.0
@@ -185,14 +195,15 @@ impl<'a> ResponseBuilder<'a> {
     /// It's a logic error to pass a `resource` that isn't included in the [`Request::matches`].
     #[allow(clippy::needless_pass_by_value)] // The hasher is consumed for one resource.
     #[inline]
-    pub fn insert(&mut self, resource: String, hash: ResponseHasher) {
+    pub fn insert(&mut self, resource: String, hash: ResponseHash) {
         self.0
             .hashes
-            .insert(resource, hash.0.digest128().to_le_bytes());
+            .insert(resource, hash);
     }
     /// Unwind the resources before creating a `hash` for [`Self::insert`].
     ///
     /// Call this for every resource.
+    #[inline]
     pub fn unwinder(&mut self) -> &mut event::Unwinder<'a> {
         self.1.clear_unwound();
         &mut self.1
@@ -201,6 +212,12 @@ impl<'a> ResponseBuilder<'a> {
     #[inline]
     pub fn finish(self) -> Response {
         self.0
+    }
+    /// Test if `resource` is included in the requested hash check.
+    #[inline]
+    #[must_use]
+    pub fn matches(&self, resource: &str) -> bool {
+        self.0.resources.matches(resource)
     }
 }
 /// A hash builder for adding the hashed signature of a `resource`.
@@ -224,6 +241,11 @@ impl ResponseHasher {
     #[inline(always)]
     pub fn write(&mut self, bytes: &[u8]) {
         self.0.update(bytes);
+    }
+    /// Digest this hash.
+    #[must_use]
+    pub fn finish(self) -> ResponseHash {
+        ResponseHash(self.0.digest128().to_le_bytes())
     }
 }
 
