@@ -22,6 +22,9 @@ serde = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rand = "0.8"
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

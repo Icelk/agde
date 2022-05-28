@@ -63,10 +63,14 @@ fn command() -> Command<'static> {
                 .validator(validate(|f: f64| f > 0.)),
         )
         .arg(
-            Arg::new("flush")
-                .long("flush-interval")
+            Arg::new("periodic")
+                .long("periodic-interval")
                 .default_value("30")
-                .help("Number of seconds (float) between writing cache to the FS.")
+                .help(
+                    "Number of seconds (float) between periodic actions. \
+                    The in-memory cache flushes each interval. \
+                    Event log and hash checks are also sent according to this interval.",
+                )
                 .validator(validate(|f: f64| f > 0.)),
         )
         .arg(

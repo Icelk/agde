@@ -458,6 +458,7 @@ pub enum Recipient {
 pub struct Manager {
     capabilities: Capabilities,
     rng: Mutex<rand::rngs::StdRng>,
+    /// Other piers, not including ourselves.
     piers: HashMap<Uuid, Capabilities>,
 
     event_log: log::Log,
@@ -502,10 +503,6 @@ impl Manager {
             cancelled_piers_last_changed: utils::dur_now(),
         }
     }
-    /// Get the UUID of this client.
-    pub fn uuid(&self) -> Uuid {
-        self.capabilities.uuid()
-    }
     /// Creates a [`Message`] with [`Self::uuid`] and a random message [`Uuid`].
     #[inline]
     fn process(&mut self, message: MessageKind) -> Message {
@@ -540,12 +537,14 @@ impl Manager {
 
         Ok(Message::new(MessageKind::Event(event), self.uuid(), uuid))
     }
-    /// May return a message with it's `count` set lower than this.
+    /// May return a message with it's the number of events less than `count`.
     ///
-    /// `count` should be around 1/4 of the limit of the event UUID log to maximise profits for all
+    /// `count` should be around 1/4 of the [limit](Manager::event_log_limit) of the event UUID log to maximise profits for all
     /// piers on the network.
     ///
     /// If there isn't enough events in the log, this returns [`None`].
+    ///
+    /// This also returns the conversation UUID.
     ///
     /// # Replies
     ///
@@ -558,12 +557,12 @@ impl Manager {
     /// # Memory leaks
     ///
     /// You must call [`Self::assure_event_uuid_log`] after calling this.
-    pub fn process_event_log_check(&mut self, count: u32) -> Option<Message> {
+    pub fn process_event_log_check(&mut self, count: u32) -> Option<(Message, Uuid)> {
         // after this call, we are guaranteed to have at least 1 event in the log.
         let (pos, cutoff_timestamp) = self.event_log.appropriate_cutoff()?;
-        // this should NEVER not fit inside an u32 as the limit is an u32.
+        // this should NEVER not fit inside an u32 as the limit for the log is an u32.
         #[allow(clippy::cast_possible_truncation)]
-        let possible_count = (self.event_log.len() - 1 - pos) as u32;
+        let possible_count = ((self.event_log.len() - 1).saturating_sub(pos)) as u32;
         // If possible_count is less than half the requested, return nothing.
         if possible_count * 2 < count {
             return None;
@@ -582,7 +581,10 @@ impl Manager {
         self.event_uuid_conversation_piers
             .insert(uuid, check.clone(), self.uuid());
 
-        Some(self.process(MessageKind::EventUuidLogCheck { uuid, check }))
+        Some((
+            self.process(MessageKind::EventUuidLogCheck { uuid, check }),
+            uuid,
+        ))
     }
     /// Constructs a message with `pier` as a destination for a full hash check.
     ///
@@ -1185,8 +1187,15 @@ impl Manager {
     }
 }
 impl Manager {
+    /// Get the UUID of this client.
+    #[inline]
+    pub fn uuid(&self) -> Uuid {
+        self.capabilities.uuid()
+    }
     /// Get the random number generator of this manager.
-    fn rng(&self) -> impl DerefMut<Target = impl rand::Rng> + '_ {
+    #[inline]
+    #[allow(clippy::missing_panics_doc)] // it's a mutex, it shouldn't be poisoned
+    pub fn rng(&self) -> impl DerefMut<Target = impl rand::Rng> + '_ {
         self.rng.lock().unwrap()
     }
     /// Generates a UUID using the internal [`rand::Rng`].
@@ -1196,13 +1205,37 @@ impl Manager {
         Uuid::with_rng(&mut *rng)
     }
     /// Get a reference to this manager's capabilities.
+    #[inline]
     pub fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+    /// The max capacity of the internal event log.
+    ///
+    /// Useful when calling [`Manager::process_event_log_check`].
+    #[inline]
+    pub fn event_log_limit(&self) -> u32 {
+        self.event_log.limit()
+    }
+
+    /// The number of piers we know of.
+    #[must_use]
+    #[inline]
+    pub fn pier_count(&self) -> usize {
+        self.piers.len()
+    }
+    /// The number of clients we know of.
+    ///
+    /// [`Self::pier_count`] + 1 (ourself)
+    #[must_use]
+    #[inline]
+    pub fn client_count(&self) -> usize {
+        self.pier_count() + 1
     }
 
     /// Attempts to get the modern name of the resource named `old_name` at `timestamp`.
     ///
     /// If `old_name` is valid, it's returned.
+    #[inline]
     pub fn modern_resource_name<'a>(
         &self,
         old_name: &'a str,
@@ -1217,6 +1250,7 @@ impl Manager {
     }
 
     /// Get an [`event::Unwinder`] to unwind a resource to `timestamp`.
+    #[inline]
     pub fn unwinder_to(&self, timestamp: SystemTime) -> event::Unwinder {
         let events_start = self
             .event_log
@@ -1238,6 +1272,7 @@ impl Manager {
     ///
     /// The [`event::Rewinder`] can be reused for several resources.
     // `TODO`: use a list of the events that we haven't yet integrated with the public storage.
+    #[inline]
     pub fn rewind_from_last_commit(&self) -> event::Rewinder {
         let cutoff = self
             .event_log
@@ -1251,29 +1286,34 @@ impl Manager {
         event::Rewinder::new(slice, self)
     }
     /// Get the time of the last call to [`Self::update_last_commit`].
+    #[inline]
     pub fn last_commit(&self) -> Option<SystemTime> {
         self.event_log
             .required_event_timestamp
             .map(utils::dur_to_systime)
     }
     /// The [last commit](Self::last_commit) or [`SystemTime::UNIX_EPOCH`].
+    #[inline]
     pub fn last_commit_or_epoch(&self) -> SystemTime {
         self.last_commit().unwrap_or(SystemTime::UNIX_EPOCH)
     }
     /// Update the inner timestamp of the last commit.
     ///
     /// See [`Self::rewind_from_last_commit`] for more details.
+    #[inline]
     pub fn update_last_commit(&mut self) {
         self.event_log.required_event_timestamp = Some(utils::dur_now());
     }
     /// Set the time of the last commit. Should be used with care in rare circumstances
     /// (e.g. when fast forwarding).
+    #[inline]
     pub fn set_last_commit(&mut self, timestamp: SystemTime) {
         self.event_log.required_event_timestamp = Some(utils::systime_to_dur(timestamp));
     }
 
     /// Returns true if we are in a fast forward. You shouldn't commit under these circumstances.
     #[must_use]
+    #[inline]
     pub fn is_fast_forwarding(&self) -> bool {
         self.fast_forward != fast_forward::State::NotRunning
     }
@@ -1281,6 +1321,7 @@ impl Manager {
     ///
     /// Returns [`SystemTime::UNIX_EPOCH`] if no changes to `resource` are in the log, or if the resource
     /// doesn't exist.
+    #[inline]
     pub fn last_change_to_resource(&self, resource: &str) -> SystemTime {
         self.event_log
             .list
@@ -1297,12 +1338,14 @@ impl Manager {
     /// Call [`Manager::process_hash_check`] with the returned [`SelectedPier`].
     /// It is [`None`] if no other piers (which have not returned [`MessageKind::Cancelled`])
     /// are in the network. If that's the case, do nothing.
+    #[inline]
     pub fn hash_check_persistent(&mut self) -> Option<SelectedPier> {
         self.clean_cancelled_piers();
         self.choose_pier(|uuid, capabilities| {
             capabilities.persistent() && !self.cancelled_piers.contains(&uuid)
         })
     }
+    #[inline]
     fn clean_cancelled_piers(&mut self) {
         if utils::dur_now().saturating_sub(self.cancelled_piers_last_changed)
             > Duration::from_secs(60).saturating_sub(
@@ -1317,11 +1360,14 @@ impl Manager {
     }
     /// Returns the pier we're currently asking to check our resource's hashes against.
     #[must_use]
+    #[inline]
     pub fn hash_checking(&self) -> Option<Uuid> {
         self.hash_checking
     }
 
     /// Get an iterator of the piers filtered by `filter`.
+    ///
+    /// If you need the number of piers, use [`Self::pier_count`] or [`Self::client_count`].
     pub fn filter_piers<'a>(
         &'a self,
         mut filter: impl FnMut(Uuid, &Capabilities) -> bool + 'a,

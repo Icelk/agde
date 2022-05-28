@@ -13,10 +13,11 @@ use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
 use agde::Manager;
 use futures::{Future, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_tungstenite::tungstenite;
 
 pub mod native;
+pub mod periodic;
 
 pub type DynError = Box<dyn Error>;
 pub type WsStream =
@@ -110,15 +111,13 @@ pub struct Options {
     /// For how long to wait for welcomes.
     startup_timeout: Duration,
     sync_interval: Duration,
-    flush_interval: Duration,
+    periodic_interval: Duration,
 
     force_pull: bool,
     /// Verifies outgoing Modify events to be correct.
     /// A bit of a performance hit, but generally recommended.
     verify_diffs: bool,
 }
-// `TODO`: Add option to write new resource changes to `Current` if that resource hasn't been
-// changed in current.
 impl Options {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -143,7 +142,7 @@ impl Options {
             file_cache: Arc::new(std::sync::Mutex::new(FileCache::new(1024 * 8))),
             startup_timeout,
             sync_interval,
-            flush_interval: Duration::from_secs(30),
+            periodic_interval: Duration::from_secs(30),
             force_pull,
             verify_diffs,
         }
@@ -162,7 +161,7 @@ impl Options {
         self
     }
     pub fn with_flush_interval(mut self, flush_interval: Duration) -> Self {
-        self.flush_interval = flush_interval;
+        self.periodic_interval = flush_interval;
         self
     }
     pub fn with_file_cache_max_size(self, max_size: usize) -> Self {
@@ -850,28 +849,16 @@ pub async fn run(
     }
     info!("Began fast forwarding.");
 
-    let flush_handle = {
+    let periodic_handle = {
         let options = Arc::clone(&options);
+        let mgr = Arc::clone(&manager);
+        let write = Arc::clone(&write);
+
         tokio::spawn(async move {
-            let mut i = 0;
-            loop {
-                let r = if i >= 10 {
-                    i = 0;
-                    options.flush_out().await
-                } else {
-                    options.flush().await
-                };
-                if let Err(err) = r {
-                    error!("Error while flushing data: {err:?}");
-                };
-                tokio::time::sleep(options.flush_interval).await;
-                i += 1;
-            }
+            periodic::start(&options, &mgr, &write).await;
         })
     };
 
-    // `TODO`: periodic calls (`clean_event_uuid_log_checks`, periodic (hash, event log) checks)
-    // Make sure we check that we aren't fast forwarding.
     let (oneshot_sender, oneshot_receiver) = futures::channel::oneshot::channel();
 
     tokio::spawn(async move {
@@ -879,7 +866,7 @@ pub async fn run(
             .await
             .into_inner();
 
-        flush_handle.abort();
+        periodic_handle.abort();
         other.abort();
         let result = result.expect("task panicked");
 
@@ -1044,6 +1031,7 @@ async fn handle_message(
 
             let sync_request = sync_request.finish();
             let msg = manager.process_sync(sync_request, Some(changes));
+            drop(manager);
             send(write, &msg).await?;
         }
         agde::MessageKind::Sync(sync) => {
@@ -1068,7 +1056,7 @@ async fn handle_message(
             send(write, &msg).await?;
         }
         agde::MessageKind::SyncReply(sync) => {
-            handle_sync_reply(&mut manager, options, write, sync, sender).await?;
+            handle_sync_reply(manager, options, write, sync, sender).await?;
             // cursors: we hopefully aren't reading this currently.
             //  if we are, then this probably contains many Unknown segments.
             //  The user also shouldn't edit a resource at the same time as it gets synced.
@@ -1549,7 +1537,7 @@ async fn rewind_current(
 }
 
 async fn handle_sync_reply(
-    manager: &mut Manager,
+    mut manager: MutexGuard<'_, Manager>,
     options: &Options,
     write: &Mutex<WriteHalf>,
     mut sync: agde::sync::Response,
@@ -1650,6 +1638,7 @@ async fn handle_sync_reply(
                     "BUG: Internal agde state error when \
                     trying fast forward again after pier failed us",
                 ) {
+                    drop(manager);
                     send(write, &ff).await?;
                 }
                 return Ok(());

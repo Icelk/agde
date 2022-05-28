@@ -230,7 +230,7 @@ impl Log {
         None
     }
     /// Returns an appropriate cutoff for [`Self::get_uuid_hash`] represented as
-    /// it's position from the start (front) of the list and the target cutoff timestamp.
+    /// it's position from the start (temporally) of the list and the target cutoff timestamp.
     ///
     /// Returns [`None`] if `self.list` has no elements.
     #[inline]
