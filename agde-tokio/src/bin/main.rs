@@ -64,6 +64,7 @@ fn command() -> Command<'static> {
         )
         .arg(
             Arg::new("periodic")
+                .short('p')
                 .long("periodic-interval")
                 .default_value("30")
                 .help(
@@ -97,9 +98,9 @@ async fn main() {
     let startup_duration = matches
         .value_of_t("startup")
         .expect("--startup-duration takes a float value");
-    let flush_interval = matches
-        .value_of_t("flush")
-        .expect("--flush-interval takes a float value");
+    let periodic_interval = matches
+        .value_of_t("periodic")
+        .expect("--periodic-interval takes a float value");
 
     let compress = match matches
         .value_of("compress")
