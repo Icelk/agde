@@ -1137,7 +1137,7 @@ impl Manager {
             return Err(fast_forward::Error::ExpectedWaitingForMeta);
         };
         self.fast_forward = fast_forward::State::WaitingForDiffs {
-            pier: reply.pier,
+            pier: sender,
             latest_event: reply.current_event_uuid,
             fast_forward_metadata: reply.metadata,
             // this will be populated when using [`Self::process_sync`]
