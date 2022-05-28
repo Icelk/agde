@@ -160,7 +160,84 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
     Ok(Metadata::new(map))
 }
 
-pub fn catch_ctrlc(handle: StateHandle) {
+async fn flush(
+    manager: &mut Manager,
+    options: &Options,
+    write: &Mutex<WriteHalf>,
+) -> Result<(), ApplicationError> {
+    // ignore error on send if the connection is closed.
+    let _ = send(write, &manager.process_disconnect()).await;
+
+    let clean = options.read_clean().await?;
+    if clean.as_deref() != Some(b"y") && clean.is_some() && !options.public_storage_disabled() {
+        error!("State not clean. Trying to apply diffs to current buffer.");
+
+        let diff = options.diff().await?;
+
+        {
+            for diff in diff {
+                let modern = manager.modern_resource_name(
+                    diff.resource(),
+                    manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH),
+                );
+                if modern.is_some() {
+                    match diff {
+                        MetadataChange::Delete(_) => {}
+                        MetadataChange::Modify(resource, created, _) => {
+                            let mut current =
+                                options.read(&resource, Storage::Current).await?.expect(
+                                    "configuration should not return Modified \
+                                            if the Current storage version doesn't exist.",
+                                );
+
+                            let public = options
+                                .read(&resource, Storage::Public)
+                                .await?
+                                .unwrap_or_default();
+
+                            // cursors: we're catching ctrlc, so this isn't our highest
+                            // priority
+                            current = if let Some(current) = rewind_current(
+                                &mut *manager,
+                                created,
+                                &resource,
+                                public,
+                                current,
+                                &mut [],
+                            )
+                            .await
+                            {
+                                current
+                            } else {
+                                // since we keep track of the incoming events and
+                                // which resources have been changed, this will get
+                                // copied below.
+                                continue;
+                            };
+
+                            options
+                                .write(resource, WriteStorage::current(), current, true)
+                                .await?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    options.flush_out().await?;
+    options.sync_metadata(Storage::Public).await?;
+    options.sync_metadata(Storage::Current).await?;
+    info!("Successfully flushed caches.");
+
+    // we are clean again!
+    options.write_clean("y", true).await?;
+
+    Ok::<(), ApplicationError>(())
+}
+
+#[allow(clippy::await_holding_lock)]
+pub async fn catch_ctrlc(handle: StateHandle) {
     let manager = Arc::clone(&handle.manager);
     let options = Arc::clone(&handle.options);
     let write = Arc::clone(&handle.write);
@@ -177,78 +254,7 @@ pub fn catch_ctrlc(handle: StateHandle) {
             .expect("failed to start tokio when handling ctrlc");
         let returned = runtime.block_on(async move {
             let mut manager = manager.lock().await;
-
-            let _ = send(&write, &manager.process_disconnect()).await;
-
-            let clean = options.read_clean().await?;
-            if clean.as_deref() != Some(b"y")
-                && clean.is_some()
-                && !options.public_storage_disabled()
-            {
-                error!("State not clean. Trying to apply diffs to current buffer.");
-
-                let diff = options.diff().await?;
-
-                {
-                    for diff in diff {
-                        let modern = manager.modern_resource_name(
-                            diff.resource(),
-                            manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH),
-                        );
-                        if modern.is_some() {
-                            match diff {
-                                MetadataChange::Delete(_) => {}
-                                MetadataChange::Modify(resource, created, _) => {
-                                    let mut current =
-                                        options.read(&resource, Storage::Current).await?.expect(
-                                            "configuration should not return Modified \
-                                            if the Current storage version doesn't exist.",
-                                        );
-
-                                    let public = options
-                                        .read(&resource, Storage::Public)
-                                        .await?
-                                        .unwrap_or_default();
-
-                                    // cursors: we're catching ctrlc, so this isn't our highest
-                                    // priority
-                                    current = if let Some(current) = rewind_current(
-                                        &mut *manager,
-                                        created,
-                                        &resource,
-                                        public,
-                                        current,
-                                        &mut [],
-                                    )
-                                    .await
-                                    {
-                                        current
-                                    } else {
-                                        // since we keep track of the incoming events and
-                                        // which resources have been changed, this will get
-                                        // copied below.
-                                        continue;
-                                    };
-
-                                    options
-                                        .write(resource, WriteStorage::current(), current, true)
-                                        .await?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            options.flush_out().await?;
-            options.sync_metadata(Storage::Public).await?;
-            options.sync_metadata(Storage::Current).await?;
-            info!("Successfully flushed caches.");
-
-            // we are clean again!
-            options.write_clean("y", true).await?;
-
-            Ok::<(), ApplicationError>(())
+            flush(&mut manager, &options, &write).await
         });
 
         if let Err(err) = returned {
@@ -262,10 +268,16 @@ pub fn catch_ctrlc(handle: StateHandle) {
     match handler {
         Err(ctrlc::Error::MultipleHandlers) => {
             let mut lock = STATE.lock().unwrap();
-            if lock.is_none() {
-                warn!("Failed to set ctrlc handler: another handler has been set");
+            if let Some(lock) = lock.as_mut() {
+                {
+                    let mut manager = lock.manager.lock().await;
+                    if let Err(err) = flush(&mut manager, &lock.options, &lock.write).await {
+                        error!("Error when trying to flush previous manager: {err:?}");
+                    }
+                }
+                *lock = handle;
             } else {
-                *lock = Some(handle);
+                warn!("Failed to set ctrlc handler: another handler has been set");
             }
         }
         Err(_) => {
