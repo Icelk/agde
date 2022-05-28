@@ -37,7 +37,7 @@ pub mod utils;
 
 use std::cmp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::{self, Display};
+use std::fmt::{self, Display, Debug};
 use std::ops::DerefMut;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -156,7 +156,7 @@ impl Capabilities {
 }
 
 /// A UUID.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize, Hash)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize, Hash)]
 #[must_use]
 pub struct Uuid(u64);
 impl Uuid {
@@ -179,6 +179,11 @@ impl Uuid {
 impl Default for Uuid {
     fn default() -> Self {
         Self::new()
+    }
+}
+impl Debug for Uuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self, f)
     }
 }
 impl Display for Uuid {

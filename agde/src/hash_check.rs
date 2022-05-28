@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt::{self, Debug};
 use std::time::Duration;
 
 use crate::{event, resource, utils, Manager, SelectedPier, Uuid};
@@ -81,9 +82,14 @@ impl PartialEq for Request {
 impl Eq for Request {}
 
 /// The hash data for the response.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ResponseHash([u8; 16]);
+impl Debug for ResponseHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:x}", u128::from_le_bytes(self.0))
+    }
+}
 
 /// A response to [`Request`].
 ///
