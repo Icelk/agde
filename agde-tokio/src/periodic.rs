@@ -92,6 +92,7 @@ async fn hash_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
     {
         let pier = manager.hash_check_persistent();
         if let Some(pier) = pier {
+            info!("Sending hash check to {}", pier.uuid());
             let msg = manager
                 .process_hash_check(pier)
                 .expect("BUG: Internal agde state error when trying to send a hash check");
@@ -117,6 +118,7 @@ async fn watch_hash_check(mut pier: agde::Uuid, mgr: &Mutex<Manager>, write: &Mu
 
         // we're still hash checking with the same pier
         if manager.hash_checking() == Some(pier) {
+            info!("Hash check with {pier} failed. Retrying.");
             let action = manager.apply_cancelled(pier);
 
             if let agde::CancelAction::HashCheck(hc_pier) = action {

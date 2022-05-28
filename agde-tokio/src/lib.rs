@@ -117,6 +117,7 @@ pub struct Options {
     /// Verifies outgoing Modify events to be correct.
     /// A bit of a performance hit, but generally recommended.
     verify_diffs: bool,
+    disable_public_storage: bool,
 }
 impl Options {
     #[allow(clippy::too_many_arguments)]
@@ -145,6 +146,7 @@ impl Options {
             periodic_interval: Duration::from_secs(30),
             force_pull,
             verify_diffs,
+            disable_public_storage: false,
         }
     }
 }
@@ -168,14 +170,21 @@ impl Options {
         self.file_cache.lock().unwrap().max_size = max_size;
         self
     }
+    pub fn with_no_public_storage(mut self) -> Self {
+        self.disable_public_storage = true;
+        self
+    }
     #[must_use]
     pub fn sync_interval(&self) -> Duration {
         self.sync_interval
     }
-
     #[must_use]
     pub fn startup_timeout(&self) -> Duration {
         self.startup_timeout
+    }
+    #[must_use]
+    pub fn public_storage_disabled(&self) -> bool {
+        self.disable_public_storage
     }
 
     /// The metadata of both the public and current storage.
@@ -193,8 +202,11 @@ impl Options {
     pub async fn read(
         &self,
         resource: impl Into<String> + AsRef<str>,
-        storage: Storage,
+        mut storage: Storage,
     ) -> Result<Option<Vec<u8>>, ApplicationError> {
+        if self.disable_public_storage && storage == Storage::Current {
+            storage = Storage::Current;
+        }
         match {
             let mut lock = self.file_cache.lock().unwrap();
             let v = lock.read_owned(resource, storage);
@@ -223,6 +235,9 @@ impl Options {
         data: impl Into<Vec<u8>>,
         flush: bool,
     ) -> Result<(), ApplicationError> {
+        if self.disable_public_storage && matches!(storage, WriteStorage::Current(_)) {
+            return Ok(());
+        }
         match {
             let mut lock = self.file_cache.lock().unwrap();
             let v = lock.write(resource, data, storage, flush);
@@ -248,6 +263,9 @@ impl Options {
         resource: impl Into<String> + AsRef<str>,
         storage: Storage,
     ) -> Result<(), ApplicationError> {
+        if self.disable_public_storage && storage == Storage::Current {
+            return Ok(());
+        }
         match {
             let mut lock = self.file_cache.lock().unwrap();
             let v = lock.delete(resource, storage);
@@ -269,6 +287,10 @@ impl Options {
     }
     /// The rough diff calculated by the difference between the metadata collections.
     pub async fn diff(&self) -> Result<Vec<MetadataChange>, ApplicationError> {
+        if self.disable_public_storage {
+            return Ok(vec![]);
+        }
+
         (self.rough_resource_diff)()
             .await
             .map_err(|_| ApplicationError::StoragePermissions)
@@ -322,6 +344,10 @@ impl Options {
         data: impl Into<Vec<u8>>,
         flush: bool,
     ) -> Result<(), ApplicationError> {
+        // if we disabled public storage, we don't care about the state of merging with public!
+        if self.disable_public_storage {
+            return Ok(());
+        }
         self.write("clean", WriteStorage::Meta, data, flush).await
     }
 
@@ -601,7 +627,8 @@ pub async fn run(
 ) -> Result<Handle, DynError> {
     let state = options.read_clean().await?;
 
-    if state.as_deref() != Some(b"y") && state.is_some() {
+    // if we disabled public storage, we don't care about the state of merging with public!
+    if state.as_deref() != Some(b"y") && state.is_some() && !options.disable_public_storage {
         error!("State isn't clean.");
 
         let changes = options.diff().await?;
@@ -797,6 +824,7 @@ pub async fn run(
             .process_fast_forward()
             .expect("BUG: Internal agde state error when trying to fast forward.")
         {
+            drop(mgr);
             let manager = Arc::clone(&manager);
             let write2 = Arc::clone(&write);
             let pier = if let agde::Recipient::Selected(pier) = msg.recipient() {
@@ -812,6 +840,7 @@ pub async fn run(
 
                     // we're still fast forwarding
                     if manager.is_fast_forwarding() {
+                        info!("Pier didn't respond to fast forward. Trying again.");
                         let action = manager.apply_cancelled(pier);
 
                         if let agde::CancelAction::FastForward = action {
@@ -839,7 +868,6 @@ pub async fn run(
                     break;
                 }
             });
-            drop(mgr);
             send(&write, &msg).await?;
         } else {
             drop(mgr);
@@ -993,6 +1021,7 @@ async fn handle_message(
         }
         // `TODO`: handle cancelled fast forwards
         agde::MessageKind::FastForward(_ff) => {
+            info!("Helping {sender} fast forward.");
             let meta = options.metadata().lock().await;
             let msg = manager.process_fast_forward_response(meta.clone(), sender);
             drop(manager);
@@ -1030,6 +1059,7 @@ async fn handle_message(
             }
 
             let sync_request = sync_request.finish();
+            info!("We sent a sync request after fast forwarding.");
             let msg = manager.process_sync(sync_request, Some(changes));
             drop(manager);
             send(write, &msg).await?;
@@ -1053,9 +1083,11 @@ async fn handle_message(
             let response = builder.finish(&manager);
             let msg = manager.process_sync_reply(response);
             drop(manager);
+            info!("We sent a sync response to {sender}.");
             send(write, &msg).await?;
         }
         agde::MessageKind::SyncReply(sync) => {
+            info!("We received sync response from {sender}.");
             handle_sync_reply(manager, options, write, sync, sender).await?;
             // cursors: we hopefully aren't reading this currently.
             //  if we are, then this probably contains many Unknown segments.
@@ -1063,6 +1095,7 @@ async fn handle_message(
             commit_and_send(mgr, options, write, changed, &mut []).await?;
         }
         agde::MessageKind::HashCheck(hc) => {
+            info!("Got hash check request from {sender}.");
             let mut builder = manager.apply_hash_check(hc, sender);
             {
                 let metadata = options.metadata().lock().await;
@@ -1102,6 +1135,8 @@ async fn handle_message(
                 );
                 return Ok(());
             }
+            info!("Got hash check response from {sender}.");
+            debug!("Hash check from {sender}: {:#?}", hc.hashes());
 
             let mut our_hashes = BTreeMap::new();
 
@@ -1131,6 +1166,7 @@ async fn handle_message(
                     }
                 }
             }
+            debug!("Our hashes: {:#?}", our_hashes);
 
             let (sync, delete) = manager
                 .apply_hash_check_reply(&hc, sender, &our_hashes)
@@ -1743,7 +1779,9 @@ async fn handle_sync_reply(
                 options.delete(resource, Storage::Public).await?;
             }
         }
-        agde::SyncReplyAction::UnexpectedPier => return Ok(()),
+        agde::SyncReplyAction::UnexpectedPier => {
+            info!("Agde told us to ignore the sync reply.");
+        }
     }
 
     Ok(())

@@ -81,6 +81,10 @@ fn command() -> Command<'static> {
                 .possible_values(["none", "snappy", "zstd"])
                 .default_value("zstd"),
         )
+        .arg(Arg::new("server").long("server").help(
+            "Run as a server. Disables the public storage \
+            (reduces FS usage) and enables periodic hash checks.",
+        ))
 }
 
 #[tokio::main]
@@ -111,24 +115,26 @@ async fn main() {
         "zstd" => Compression::Zstd,
         _ => unreachable!("we've covered all the possible values"),
     };
+    let server = matches.is_present("server");
 
     loop {
         let options = native::options_fs(force, compress)
             .await
             .expect("failed to read file system metadata");
-        let options = options
+        let mut options = options
             .with_startup_duration(Duration::from_secs_f64(startup_duration))
             .with_sync_interval(Duration::from_secs_f64(sync_interval))
-            .with_flush_interval(Duration::from_secs_f64(flush_interval))
-            .arc();
+            .with_flush_interval(Duration::from_secs_f64(periodic_interval));
+
+        if server {
+            options = options.with_no_public_storage();
+        }
+
+        let options = options.arc();
 
         let log_lifetime = Duration::from_secs(60);
 
-        if log_lifetime <= options.sync_interval() * 2 {
-            error!("Increase frequency of sync or increase log lifetime.");
-        }
-
-        let manager = Manager::new(false, 0, log_lifetime, 512);
+        let manager = Manager::new(server, 0, log_lifetime, 512);
 
         match run(url, manager, options).await {
             Ok(handle) => {

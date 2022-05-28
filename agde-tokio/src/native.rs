@@ -181,7 +181,10 @@ pub fn catch_ctrlc(handle: StateHandle) {
             let _ = send(&write, &manager.process_disconnect()).await;
 
             let clean = options.read_clean().await?;
-            if clean.as_deref() != Some(b"y") {
+            if clean.as_deref() != Some(b"y")
+                && clean.is_some()
+                && !options.public_storage_disabled()
+            {
                 error!("State not clean. Trying to apply diffs to current buffer.");
 
                 let diff = options.diff().await?;
