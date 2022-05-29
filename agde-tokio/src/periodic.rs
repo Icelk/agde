@@ -41,11 +41,12 @@ async fn flush(options: &Options, clear: bool) {
 }
 async fn event_log_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
     let mut manager = mgr.lock().await;
+    manager.clean_log_checks();
+
     if !manager.is_fast_forwarding()
         && manager.pier_count() > 0
         && one_in(manager.client_count() as f64, &mut *manager.rng())
     {
-        manager.clean_event_uuid_log_checks();
         let count = manager.event_log_limit() / 4;
         let msg = manager.process_event_log_check(count);
         drop(manager);
@@ -55,30 +56,36 @@ async fn event_log_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>
             } else {
                 let mgr = Arc::clone(mgr);
                 let write = Arc::clone(write);
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(8)).await;
-
-                    let mut manager = mgr.lock().await;
-                    if let Some(pier) = manager.assure_event_uuid_log(conversation_uuid) {
-                        let hc = manager.process_hash_check(pier).expect(
-                            "BUG: Internal agde state error, trying to send a \
-                            hash check after a event log check while fast forwarding.",
-                        );
-                        drop(manager);
-                        if let Err(err) = send(&write, &hc).await {
-                            error!("Error when trying to send hash check message: {err:?}");
-                        } else {
-                            // check that the pier responded.
-                            tokio::spawn(async move {
-                                let pier = pier.uuid();
-                                watch_hash_check(pier, &mgr, &write).await;
-                            });
-                        }
-                    }
-                });
+                assure_event_log_check(mgr, write, conversation_uuid).await;
             }
         }
     }
+}
+pub async fn assure_event_log_check(
+    mgr: Arc<Mutex<Manager>>,
+    write: Arc<Mutex<WriteHalf>>,
+    conversation_uuid: agde::Uuid,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let mut manager = mgr.lock().await;
+        if let Some(pier) = manager.assure_log_check(conversation_uuid) {
+            let hc = manager.process_hash_check(pier).expect(
+                "BUG: Internal agde state error, trying to send a \
+            hash check after a event log check while fast forwarding.",
+            );
+            drop(manager);
+            if let Err(err) = send(&write, &hc).await {
+                error!("Error when trying to send hash check message: {err:?}");
+            } else {
+                // check that the pier responded.
+                tokio::spawn(async move {
+                    let pier = pier.uuid();
+                    watch_hash_check(pier, &mgr, &write).await;
+                });
+            }
+        }
+    });
 }
 async fn hash_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
     let mut manager = mgr.lock().await;

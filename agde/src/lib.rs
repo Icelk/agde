@@ -8,7 +8,7 @@
 //!     May also be used to denote the location of a resource.
 //! - pier - another client on the network.
 //! - help desire - how much a pier wants to help others in the network.
-//! - conversation - a exchange of some related data (e.g. [`MessageKind::EventUuidLogCheck`]).
+//! - conversation - a exchange of some related data (e.g. [`MessageKind::LogCheck`]).
 //! - [`den::Difference`] a modification to a resource.
 //! - [UUID](Uuid) - a unique identifier for a unit (e.g. conversation, [`Message`])
 //! - log - internal list to compensate for inconsistencies in message arrival time.
@@ -37,7 +37,7 @@ pub mod utils;
 
 use std::cmp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::{self, Display, Debug};
+use std::fmt::{self, Debug, Display};
 use std::ops::DerefMut;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 
 pub use den;
 pub use event::{Event, IntoEvent, Kind as EventKind};
-pub use log::{UuidCheck, UuidCheckAction};
+pub use log::{Check as LogCheck, CheckAction as LogCheckAction};
 
 /// The current version of this `agde` library.
 pub const VERSION: semver::Version = semver::Version::new(0, 1, 0);
@@ -257,28 +257,28 @@ pub enum MessageKind {
     ///
     /// # Replies
     ///
-    /// Always send back a [`Self::EventUuidLogCheckReply`] to tell others which "version" you
+    /// Always send back a [`Self::LogCheckReply`] to tell others which "version" you
     /// have.
     ///
-    /// Wait a few seconds (e.g. 10) and then call [`Manager::assure_event_uuid_log`].
+    /// Wait a few seconds (e.g. 10) and then call [`Manager::assure_log_check`].
     /// If any discrepancy is found, you should send back a [`Self::HashCheck`].
     /// If everything is ok, don't respond.
-    EventUuidLogCheck {
+    LogCheck {
         /// The UUID of this check conversation.
-        uuid: Uuid,
+        conversation_uuid: Uuid,
         /// The data of the check.
-        check: UuidCheck,
+        check: LogCheck,
     },
-    /// A reply to [`Self::EventUuidLogCheck`].
+    /// A reply to [`Self::LogCheck`].
     ///
     /// This is used to determine which "version" of the data is the correct one.
     /// This should not be responded to, but maybe kept a few seconds to keep the piers with
     /// the "correct version".
-    EventUuidLogCheckReply {
+    LogCheckReply {
         /// The UUID of this check conversation.
-        uuid: Uuid,
+        conversation_uuid: Uuid,
         /// The data of the check.
-        check: UuidCheck,
+        check: LogCheck,
     },
     /// The target client cancelled the request.
     ///
@@ -553,15 +553,15 @@ impl Manager {
     ///
     /// # Replies
     ///
-    /// After sending this, wait a few seconds and then run [`Self::assure_event_uuid_log`]
+    /// After sending this, wait a few seconds and then run [`Self::assure_log_check`]
     /// which checks if you have the "correct" version.
     ///
     /// When you call [`Self::apply_event_uuid_log_check`], the manager notes the
-    /// [`MessageKind::EventUuidLogCheckReply`] messages.
+    /// [`MessageKind::LogCheckReply`] messages.
     ///
     /// # Memory leaks
     ///
-    /// You must call [`Self::assure_event_uuid_log`] after calling this.
+    /// You must call [`Self::assure_log_check`] after calling this.
     pub fn process_event_log_check(&mut self, count: u32) -> Option<(Message, Uuid)> {
         // after this call, we are guaranteed to have at least 1 event in the log.
         let (pos, cutoff_timestamp) = self.event_log.appropriate_cutoff()?;
@@ -587,9 +587,23 @@ impl Manager {
             .insert(uuid, check.clone(), self.uuid());
 
         Some((
-            self.process(MessageKind::EventUuidLogCheck { uuid, check }),
+            self.process(MessageKind::LogCheck {
+                conversation_uuid: uuid,
+                check,
+            }),
             uuid,
         ))
+    }
+    /// Get a message with the reply to a [`MessageKind::LogCheck`].
+    pub fn process_event_log_check_reply(
+        &mut self,
+        event_log_check: log::Check,
+        conversation_uuid: Uuid,
+    ) -> Message {
+        self.process(MessageKind::LogCheckReply {
+            conversation_uuid,
+            check: event_log_check,
+        })
     }
     /// Constructs a message with `pier` as a destination for a full hash check.
     ///
@@ -751,27 +765,27 @@ impl Manager {
             Err(log::Error::FastForwardInProgress)
         }
     }
-    /// Handles a [`MessageKind::EventUuidLogCheck`].
-    /// This will return an [`UuidCheckAction`] which tells you what to do.
+    /// Handles a [`MessageKind::LogCheck`].
+    /// This will return an [`LogCheckAction`] which tells you what to do.
     ///
     /// # Memory leaks
     ///
-    /// You must call [`Self::assure_event_uuid_log`] after calling this.
+    /// You must call [`Self::assure_log_check`] after calling this.
     pub fn apply_event_uuid_log_check(
         &mut self,
-        check: UuidCheck,
+        check: LogCheck,
         conversation_uuid: Uuid,
-        remote_uuid: Uuid,
-    ) -> UuidCheckAction {
-        fn new_cutoff(log: &log::Log, cutoff: Duration, count: u32) -> UuidCheckAction {
+        sender: Uuid,
+    ) -> LogCheckAction {
+        fn new_cutoff(log: &log::Log, cutoff: Duration, count: u32) -> LogCheckAction {
             let pos = if let Some(pos) = log.cutoff_from_time(cutoff) {
                 pos
             } else {
-                return UuidCheckAction::Nothing;
+                return LogCheckAction::Nothing;
             };
             match log.get_uuid_hash(count, pos, cutoff) {
-                Ok(check) => UuidCheckAction::SendAndFurtherCheck(check),
-                Err(log::UuidError::CountTooBig) => UuidCheckAction::Nothing,
+                Ok(check) => LogCheckAction::Send(check),
+                Err(log::UuidError::CountTooBig) => LogCheckAction::Nothing,
                 Err(log::UuidError::CutoffMissing) => {
                     unreachable!("we got the cutoff above, this must exist in the log.")
                 }
@@ -779,7 +793,7 @@ impl Manager {
         }
 
         if self.is_fast_forwarding() {
-            return UuidCheckAction::Nothing;
+            return LogCheckAction::Nothing;
         }
 
         let cutoff = if let Some(cutoff) = self.event_log.cutoff_from_uuid(check.cutoff()) {
@@ -792,11 +806,11 @@ impl Manager {
                 .event_log
                 .get_uuid_hash(check.count(), cutoff, check.cutoff_timestamp())
             {
-                Ok(check) => UuidCheckAction::Send(check),
+                Ok(check) => LogCheckAction::Send(check),
                 Err(err) => match err {
                     // We don't have a large enough log. Ignore.
-                    // See comment in [`Self::process_event_uuid_log_check`].
-                    log::UuidError::CountTooBig => UuidCheckAction::Nothing,
+                    // See comment in [`Self::process_log_check`].
+                    log::UuidError::CountTooBig => LogCheckAction::Nothing,
                     // We don't have the UUID of the cutoff!
                     log::UuidError::CutoffMissing => {
                         new_cutoff(&self.event_log, check.cutoff_timestamp(), check.count())
@@ -804,10 +818,20 @@ impl Manager {
                 },
             };
 
-        self.event_uuid_conversation_piers
-            .insert(conversation_uuid, check, remote_uuid);
+        self.apply_log_check_reply(check, conversation_uuid, sender);
 
         action
+    }
+    /// Apply a reply to the [`MessageKind::LogCheck`].
+    /// This tracks the `check` from `sender` to be used in the next [`Manager::assure_log_check`].
+    pub fn apply_log_check_reply(
+        &mut self,
+        check: LogCheck,
+        conversation_uuid: Uuid,
+        sender: Uuid,
+    ) {
+        self.event_uuid_conversation_piers
+            .insert(conversation_uuid, check, sender);
     }
     /// Trims the memory usage of the cache used by [`Self::apply_event_uuid_log_check`].
     ///
@@ -817,7 +841,7 @@ impl Manager {
     /// This removes conversations not used by agde for 5 minutes. This is a implementation detail
     /// and can not be relied upon.
     #[inline]
-    pub fn clean_event_uuid_log_checks(&mut self) {
+    pub fn clean_log_checks(&mut self) {
         self.event_uuid_conversation_piers.clean();
     }
     /// Assures you are using the "correct" version of the files.
@@ -828,7 +852,7 @@ impl Manager {
     ///
     /// This will clear the conversation with `conversation_uuid`.
     #[allow(clippy::missing_panics_doc)] // It's safe.
-    pub fn assure_event_uuid_log(&mut self, conversation_uuid: Uuid) -> Option<SelectedPier> {
+    pub fn assure_log_check(&mut self, conversation_uuid: Uuid) -> Option<SelectedPier> {
         self.event_uuid_conversation_piers.update(conversation_uuid);
         let conversation = self.event_uuid_conversation_piers.get(conversation_uuid)?;
         let total_reponses = conversation.len();
@@ -1037,7 +1061,7 @@ impl Manager {
     ///
     /// Returns [`fast_forward::Error::ExpectedWaitingForDiffs`] if we're syncing non-fast forward
     /// data in a fast forward. Since [`Self::apply_event_uuid_log_check`] returns
-    /// [`UuidCheckAction::Nothing`] when trying to execute it when fast forwarding,
+    /// [`LogCheckAction::Nothing`] when trying to execute it when fast forwarding,
     /// this is an issue with you accepting a bad message.
     pub fn apply_sync_reply<'a>(
         &'a mut self,

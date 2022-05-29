@@ -261,7 +261,7 @@ impl Log {
         count: u32,
         cutoff: usize,
         cutoff_timestamp: Duration,
-    ) -> Result<UuidCheck, UuidError> {
+    ) -> Result<Check, UuidError> {
         let uuid = if let Some(ev) = self.list.get(cutoff) {
             ev.message_uuid
         } else {
@@ -281,7 +281,7 @@ impl Log {
         }
         let hash = hasher.digest128();
 
-        let check = UuidCheck {
+        let check = Check {
             log_hash: hash.to_le_bytes(),
             count,
             cutoff: uuid,
@@ -528,13 +528,13 @@ pub(crate) enum UuidError {
 /// Often, a [`crate::MessageKind::HashCheck`] is sent if that's the case.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
 #[must_use]
-pub struct UuidCheck {
+pub struct Check {
     log_hash: [u8; 16],
     count: u32,
     cutoff: Uuid,
     cutoff_timestamp: Duration,
 }
-impl UuidCheck {
+impl Check {
     /// Get the count of events to be included, temporally before the [`Self::cutoff`].
     #[must_use]
     #[inline]
@@ -559,23 +559,23 @@ impl UuidCheck {
         &self.log_hash
     }
 }
-/// The action to execute after receiving a [`crate::MessageKind::EventUuidLogCheck`].
+/// The action to execute after receiving a [`crate::MessageKind::LogCheck`].
 #[derive(Debug)]
 #[must_use]
-pub enum UuidCheckAction {
-    /// The logs match. Send a [`crate::MessageKind::EventUuidLogCheckReply`] with this
-    /// [`UuidCheck`].
-    Send(UuidCheck),
-    /// The logs don't match. Do the same as with [`Self::Send`] AND wait a few seconds (e.g. 10)
-    /// and then do a full check of the files. Something's not adding up.
-    SendAndFurtherCheck(UuidCheck),
+pub enum CheckAction {
+    ///  Send a [`crate::MessageKind::LogCheckReply`] with this
+    /// [`Check`].
+    ///
+    /// Run [`Manager::assure_log_check`] after a few seconds, to check our hash against other
+    /// piers' hashes.
+    Send(Check),
     /// Our log was too small. We can therefore not participate in this exchange.
     /// Do nothing.
     Nothing,
 }
 #[derive(Debug)]
 struct Conversation {
-    messages: HashMap<Uuid, UuidCheck>,
+    messages: HashMap<Uuid, Check>,
     last_modified: Duration,
 }
 impl Conversation {
@@ -598,7 +598,7 @@ impl UuidReplies {
     }
     /// `conversation` is the UUID of the current conversation. `check` is the data `source` sent.
     #[inline]
-    pub(crate) fn insert(&mut self, conversation: Uuid, check: UuidCheck, source: Uuid) {
+    pub(crate) fn insert(&mut self, conversation: Uuid, check: Check, source: Uuid) {
         let conversation = self
             .conversations
             .entry(conversation)
@@ -612,7 +612,7 @@ impl UuidReplies {
             c.last_modified = utils::dur_now();
         }
     }
-    pub(crate) fn get(&self, conversation: Uuid) -> Option<&HashMap<Uuid, UuidCheck>> {
+    pub(crate) fn get(&self, conversation: Uuid) -> Option<&HashMap<Uuid, Check>> {
         let conversation = self.conversations.get(&conversation);
         conversation.map(|c| &c.messages)
     }

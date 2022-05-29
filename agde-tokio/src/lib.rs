@@ -920,9 +920,9 @@ pub async fn run(
 
 async fn handle_message(
     message: agde::Message,
-    mgr: &Mutex<Manager>,
+    mgr: &Arc<Mutex<Manager>>,
     options: &Options,
-    write: &Mutex<WriteHalf>,
+    write: &Arc<Mutex<WriteHalf>>,
     changed: &Mutex<HashSet<String>>,
 ) -> Result<(), ApplicationError> {
     let mut manager = mgr.lock().await;
@@ -1219,9 +1219,31 @@ async fn handle_message(
                 send(write, &msg).await?;
             }
         }
-        agde::MessageKind::EventUuidLogCheck { uuid: _, check: _ } => todo!(),
-        agde::MessageKind::EventUuidLogCheckReply { uuid: _, check: _ } => {
-            todo!()
+        agde::MessageKind::LogCheck {
+            conversation_uuid,
+            check,
+        } => {
+            let action = manager.apply_event_uuid_log_check(check, conversation_uuid, sender);
+            match action {
+                agde::LogCheckAction::Send(ec) => {
+                    let msg = manager.process_event_log_check_reply(ec, conversation_uuid);
+                    drop(manager);
+                    send(write, &msg).await?;
+                    periodic::assure_event_log_check(
+                        Arc::clone(mgr),
+                        Arc::clone(write),
+                        conversation_uuid,
+                    )
+                    .await;
+                }
+                agde::LogCheckAction::Nothing => {}
+            }
+        }
+        agde::MessageKind::LogCheckReply {
+            conversation_uuid,
+            check,
+        } => {
+            manager.apply_log_check_reply(check, conversation_uuid, sender);
         }
         agde::MessageKind::Cancelled(_) => match manager.apply_cancelled(sender) {
             agde::CancelAction::Nothing => {}
