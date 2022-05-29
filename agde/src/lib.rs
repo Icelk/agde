@@ -195,7 +195,6 @@ impl Display for Uuid {
 /// The kinds of messages with their data. Part of a [`Message`].
 ///
 /// On direct messages, send a conversation UUID which can be [`Self::Cancelled`].
-// `TODO`: implement the rest of these.
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum MessageKind {
@@ -234,7 +233,6 @@ pub enum MessageKind {
     Event(Event),
     /// A client tries to get the most recent data.
     /// Contains the list of which documents were edited and size at last session.
-    /// `TODO`: Only sync the public storage, as that's what we want to sync so we can commit.
     ///
     /// # Replies
     ///
@@ -909,11 +907,14 @@ impl Manager {
             }
             highest.map(|(uuid, _)| SelectedPier::new(uuid))
         } else {
-            // if we for some reason didn't set our results, `TODO`: warn in else clause.
+            // if we for some reason didn't set our results (our log isn't long enough)
             if let Some(ours) = conversation.get(&self.uuid()) {
                 if most_popular.0 == ours.hash() {
                     return None;
                 }
+            } else {
+                // our log wasn't long enough, don't attend this conversation.
+                return None;
             }
             let pier = self.choose_pier(|uuid, _| {
                 let pier_check = if let Some(check) = conversation.get(&uuid) {
@@ -1301,6 +1302,9 @@ impl Manager {
     ///
     /// The [`event::Rewinder`] can be reused for several resources.
     // `TODO`: use a list of the events that we haven't yet integrated with the public storage.
+    // This would mean only the non committed events would be applied, instead of all after the
+    // last commit. Say we got an event with a timestamp before the previous commit. With the
+    // current system, it wouldn't be applied.
     #[inline]
     pub fn rewind_from_last_commit(&self) -> event::Rewinder {
         let cutoff = self

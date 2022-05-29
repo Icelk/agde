@@ -450,7 +450,6 @@ impl<'a> EventApplier<'a> {
         let current_resource_name = if let Some(name) = self.modern_resource_name {
             name
         } else {
-            // `TODO`: remove the `.to_vec`
             return Ok(resource.into());
         };
 

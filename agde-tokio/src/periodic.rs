@@ -39,7 +39,7 @@ async fn flush(options: &Options, clear: bool) {
         error!("Error while flushing data: {err:?}");
     };
 }
-async fn event_log_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
+pub async fn event_log_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
     let mut manager = mgr.lock().await;
     manager.clean_log_checks();
 

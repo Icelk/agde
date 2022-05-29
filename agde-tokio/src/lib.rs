@@ -992,7 +992,7 @@ async fn handle_message(
                                         )
                                         .await?;
                                 } else {
-                                    // `TODO`: log check
+                                    periodic::event_log_check(mgr, write).await;
                                     warn!(
                                         "Got Modify event, but resource doesn't exist. \
                                         Reconnecting might help, but this could be an \
@@ -1018,13 +1018,16 @@ async fn handle_message(
                         // do nothing, as the doc says
                     }
                 }
-                Err(err) => {
-                    warn!("Slow pier. Got error from internal log: {err:?}. Running a log check.");
-                    // `TODO`: Log check!
-                }
+                Err(err) => match err {
+                    agde::log::Error::EventInFuture => {
+                        warn!("Pier {sender} send an event from the future. Running a log check.");
+                        periodic::event_log_check(mgr, write).await;
+                    }
+                    // if in ff, then do nothing.
+                    agde::log::Error::FastForwardInProgress => {}
+                },
             };
         }
-        // `TODO`: handle cancelled fast forwards
         agde::MessageKind::FastForward(_ff) => {
             info!("Helping {sender} fast forward.");
             let meta = options.metadata().lock().await;
