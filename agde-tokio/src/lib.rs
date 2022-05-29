@@ -190,10 +190,15 @@ impl Options {
     /// The metadata of both the public and current storage.
     /// Calling [`Metadata::changes`] on `this.changes(offline_metadata)`
     /// gets you the changes to get current storage the same as the public.
+    ///
+    /// Can be thought as the metadata of the `remote` in git.
     pub fn metadata(&self) -> &Mutex<Metadata> {
         &self.metadata
     }
     /// The metadata of the [`Storage::Current`].
+    ///
+    /// Can be thought as the metadata of our local state in git,
+    /// that has not yet been committed (if it's not clean).
     pub fn metadata_offline(&self) -> &Mutex<Metadata> {
         &self.offline_metadata
     }

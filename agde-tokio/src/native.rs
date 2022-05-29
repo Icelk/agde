@@ -380,8 +380,9 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
     let offline_metadata = initial_metadata(
         "metadata-offline",
         || {
-            let r = Ok(metadata.clone());
-            futures::future::ready(r)
+            // start of empty, as we aren't tracking any files yet.
+            let meta = Metadata::new(HashMap::new());
+            futures::future::ready(Ok(meta))
         },
         force_pull,
         |res| read(res, Storage::Meta),

@@ -155,7 +155,7 @@ async fn main() {
                     error!("Failed to start listening. Falling back to commit interval.");
                 }
 
-                native::catch_ctrlc(handle.state().clone());
+                native::catch_ctrlc(handle.state().clone()).await;
 
                 let r = handle.wait().await;
 
