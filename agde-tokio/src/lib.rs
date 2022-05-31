@@ -1213,7 +1213,6 @@ async fn handle_message(
             }
             info!("Got hash check response from {sender}.");
             debug!("Hash check from {sender}: {:#?}", hc.hashes());
-            debug!("Our metadata now: {:#?}", options.metadata().lock().await);
 
             let mut our_hashes = BTreeMap::new();
 
@@ -1249,7 +1248,6 @@ async fn handle_message(
 
                                 let mut hash = agde::hash_check::ResponseHasher::new();
                                 hash.write(&data);
-                                hash.write(&manager.uuid().inner().to_le_bytes());
                                 our_hashes.insert(resource.to_owned(), hash.finish());
                             }
                         } else {
@@ -1267,14 +1265,6 @@ async fn handle_message(
 
             // free memory
             drop(our_hashes);
-
-            if !delete.is_empty() {
-                info!("Deleting resources after hash check: {delete:?}");
-                debug!(
-                    "Metadata when deleting: {:#?}",
-                    options.metadata().lock().await
-                );
-            }
 
             // delete all in parallell
             futures::future::try_join_all(delete.into_iter().map(|r| {

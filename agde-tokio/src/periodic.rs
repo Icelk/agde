@@ -21,7 +21,7 @@ pub async fn start(options: &Options, mgr: &Arc<Mutex<Manager>>, write: &Arc<Mut
             event_log_check(mgr, write).await;
         }
         // hash check
-        if i % 60 == 0 {
+        if i % 30 == 0 {
             hash_check(mgr, write).await;
         }
 
