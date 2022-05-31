@@ -76,6 +76,13 @@ impl WriteStorage {
     pub fn current_without_update() -> Self {
         Self::Current(WriteMtime::No)
     }
+    pub fn to_storage(self) -> Storage {
+        match self {
+            WriteStorage::Public(_, _) => Storage::Public,
+            WriteStorage::Current(_) => Storage::Current,
+            WriteStorage::Meta => Storage::Meta,
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMtime {
@@ -93,7 +100,7 @@ pub type ReadFn = Box<dyn Fn(String, Storage) -> ReadFuture + Send + Sync>;
 /// The [`SystemTime`] is the timestamp of the event that caused this, or (if an event didn't cause
 /// it) [`SystemTime::UNIX_EPOCH`].
 /// Both the [`WriteMtime`] and [`SystemTime`] are useless unless [`Storage`] is [`Storage::Public`].
-pub type WriteFn = Box<dyn Fn(String, WriteStorage, Vec<u8>) -> WriteFuture + Send + Sync>;
+pub type WriteFn = Box<dyn Fn(String, WriteStorage, Arc<Vec<u8>>) -> WriteFuture + Send + Sync>;
 pub type DeleteFn = Box<dyn Fn(String, Storage) -> DeleteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
 #[must_use]
@@ -208,18 +215,39 @@ impl Options {
         &self,
         resource: impl Into<String> + AsRef<str>,
         mut storage: Storage,
-    ) -> Result<Option<Vec<u8>>, ApplicationError> {
+    ) -> Result<Option<Arc<Vec<u8>>>, ApplicationError> {
+        info!("Cached read from {:?} in {storage:?}", resource.as_ref());
         if self.disable_public_storage && storage == Storage::Current {
-            storage = Storage::Current;
+            storage = Storage::Public;
         }
         match {
             let mut lock = self.file_cache.lock().unwrap();
-            let v = lock.read_owned(resource, storage);
+            let v = lock.read(resource, storage);
             drop(lock);
             v
         } {
             Ok(v) => v,
-            Err(res) => self._read(res, storage).await,
+            Err(res) => {
+                let file = self._read(res.clone(), storage).await?;
+                let file = file.map(Arc::new);
+                {
+                    let mut lock = self.file_cache.lock().unwrap();
+                    if let Some(file) = file.as_ref() {
+                        // this data will never be written!
+                        let storage = match storage {
+                            Storage::Public => {
+                                WriteStorage::Public(WriteMtime::No, SystemTime::UNIX_EPOCH)
+                            }
+                            Storage::Current => WriteStorage::Current(WriteMtime::No),
+                            Storage::Meta => WriteStorage::Meta,
+                        };
+                        let _ = lock.write(res, Arc::clone(file), storage, false, true);
+                    } else {
+                        lock.delete(res, storage).unwrap();
+                    }
+                }
+                Ok(file)
+            }
         }
     }
     async fn _read(
@@ -235,21 +263,26 @@ impl Options {
     /// [`Storage::Public`].
     pub async fn write(
         &self,
-        resource: impl Into<String>,
+        resource: impl Into<String> + AsRef<str>,
         storage: WriteStorage,
-        data: impl Into<Vec<u8>>,
+        data: Arc<Vec<u8>>,
         flush: bool,
     ) -> Result<(), ApplicationError> {
+        info!(
+            "Cached write to {:?} in {:?}",
+            resource.as_ref(),
+            storage.to_storage()
+        );
         if self.disable_public_storage && matches!(storage, WriteStorage::Current(_)) {
             return Ok(());
         }
         match {
             let mut lock = self.file_cache.lock().unwrap();
-            let v = lock.write(resource, data, storage, flush);
+            let v = lock.write(resource.into(), data, storage, flush, false);
             drop(lock);
             v
         } {
-            Ok(v) => v,
+            Ok(()) => Ok(()),
             Err((res, data)) => self._write(res, storage, data).await,
         }
     }
@@ -257,9 +290,9 @@ impl Options {
         &self,
         resource: impl Into<String>,
         storage: WriteStorage,
-        data: impl Into<Vec<u8>>,
+        data: Arc<Vec<u8>>,
     ) -> Result<(), ApplicationError> {
-        (self.write)(resource.into(), storage, data.into())
+        (self.write)(resource.into(), storage, data)
             .await
             .map_err(|_| ApplicationError::StoragePermissions)
     }
@@ -268,6 +301,7 @@ impl Options {
         resource: impl Into<String> + AsRef<str>,
         storage: Storage,
     ) -> Result<(), ApplicationError> {
+        info!("Cached delete to {:?} in {storage:?}", resource.as_ref());
         if self.disable_public_storage && storage == Storage::Current {
             return Ok(());
         }
@@ -277,7 +311,7 @@ impl Options {
             drop(lock);
             v
         } {
-            Ok(v) => v,
+            Ok(()) => Ok(()),
             Err(res) => self._delete(res, storage).await,
         }
     }
@@ -318,8 +352,13 @@ impl Options {
                     bincode::config::standard().write_fixed_array_length(),
                 )
                 .expect("failed to serialize metadata");
-                self.write("metadata".to_owned(), WriteStorage::Meta, data, true)
-                    .await?;
+                self.write(
+                    "metadata".to_owned(),
+                    WriteStorage::Meta,
+                    Arc::new(data),
+                    true,
+                )
+                .await?;
             }
             Storage::Current => {
                 let lock = self.metadata_offline().lock().await;
@@ -331,7 +370,7 @@ impl Options {
                 self.write(
                     "metadata-offline".to_owned(),
                     WriteStorage::Meta,
-                    data,
+                    Arc::new(data),
                     true,
                 )
                 .await?;
@@ -341,7 +380,7 @@ impl Options {
         Ok(())
     }
 
-    pub async fn read_clean(&self) -> Result<Option<Vec<u8>>, ApplicationError> {
+    pub async fn read_clean(&self) -> Result<Option<Arc<Vec<u8>>>, ApplicationError> {
         self.read("clean", Storage::Meta).await
     }
     pub async fn write_clean(
@@ -353,7 +392,8 @@ impl Options {
         if self.disable_public_storage {
             return Ok(());
         }
-        self.write("clean", WriteStorage::Meta, data, flush).await
+        self.write("clean", WriteStorage::Meta, Arc::new(data.into()), flush)
+            .await
     }
 
     pub async fn flush(&self) -> Result<(), ApplicationError> {
@@ -366,11 +406,11 @@ impl Options {
             )
         };
 
-        let public_iter = public.iter().map(|(resource, (data, changed))| async move {
-            if !*changed {
+        let public_iter = public.iter().map(|(resource, (data, status))| async move {
+            if *status != FileStatus::Cached {
                 return Ok(());
             }
-            if let Some((vec, mtime, event_mtime)) = data {
+            if let Some(PublicFile(vec, mtime, event_mtime)) = data {
                 self._write(
                     resource,
                     WriteStorage::Public(*mtime, *event_mtime),
@@ -382,8 +422,8 @@ impl Options {
             }
             Ok(())
         });
-        let meta_iter = meta.iter().map(|(resource, (data, changed))| async move {
-            if !*changed {
+        let meta_iter = meta.iter().map(|(resource, (data, status))| async move {
+            if *status != FileStatus::Cached {
                 return Ok(());
             }
             if let Some(vec) = data {
@@ -399,11 +439,11 @@ impl Options {
         // batch them up in 1 job to complete IO in one go
         futures::future::try_join(public_future, meta_future).await?;
 
-        for (_, changed) in &mut public.values_mut() {
-            *changed = false;
+        for (_, status) in &mut public.values_mut() {
+            *status = FileStatus::Flushed;
         }
-        for (_, changed) in &mut meta.values_mut() {
-            *changed = false;
+        for (_, status) in &mut meta.values_mut() {
+            *status = FileStatus::Flushed;
         }
 
         {
@@ -428,15 +468,21 @@ impl Options {
             )
         };
 
-        for (resource, (data, _)) in public.drain() {
-            if let Some((vec, mtime, event_mtime)) = data {
+        for (resource, (data, status)) in public.drain() {
+            if status == FileStatus::Read {
+                continue;
+            }
+            if let Some(PublicFile(vec, mtime, event_mtime)) = data {
                 self._write(resource, WriteStorage::Public(mtime, event_mtime), vec)
                     .await?;
             } else {
                 self._delete(resource, Storage::Public).await?;
             }
         }
-        for (resource, (data, _)) in meta.drain() {
+        for (resource, (data, status)) in meta.drain() {
+            if status == FileStatus::Read {
+                continue;
+            }
             if let Some(vec) = data {
                 self._write(resource, WriteStorage::Meta, vec).await?;
             } else {
@@ -457,11 +503,37 @@ impl Options {
     }
 }
 
-type PublicFile = (Vec<u8>, WriteMtime, SystemTime);
+struct PublicFile(Arc<Vec<u8>>, WriteMtime, SystemTime);
+impl PartialEq for PublicFile {
+    fn eq(&self, other: &Self) -> bool {
+        *self.0 == *other.0 && self.1 == other.1 && self.2 == other.2
+    }
+}
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum FileStatus {
+    Cached,
+    Flushed,
+    /// Read from the FS
+    Read,
+}
+impl FileStatus {
+    fn from_fs(from_fs: bool) -> Self {
+        if from_fs {
+            Self::Read
+        } else {
+            Self::Cached
+        }
+    }
+}
 struct FileCache {
-    // data the same as [`WriteStorage::Public`]
-    public: HashMap<String, (Option<PublicFile>, bool)>,
-    meta: HashMap<String, (Option<Vec<u8>>, bool)>,
+    /// data the same as [`WriteStorage::Public`]
+    ///
+    /// The bool is whether or not this has changed since last flush.
+    /// If the option is [`None`], the resource is not present (deleted).
+    public: HashMap<String, (Option<PublicFile>, FileStatus)>,
+    /// data the same as [`WriteStorage::Meta`]
+    #[allow(clippy::type_complexity)]
+    meta: HashMap<String, (Option<Arc<Vec<u8>>>, FileStatus)>,
     max_size: usize,
 }
 impl FileCache {
@@ -472,26 +544,27 @@ impl FileCache {
             max_size,
         }
     }
+    #[allow(clippy::type_complexity)] // internal API
     fn write(
         &mut self,
-        resource: impl Into<String>,
-        data: impl Into<Vec<u8>>,
+        resource: String,
+        data: Arc<Vec<u8>>,
         storage: WriteStorage,
         flush: bool,
-    ) -> Result<Result<(), ApplicationError>, (String, Vec<u8>)> {
-        let resource = resource.into();
-        let data = data.into();
+        from_fs: bool,
+    ) -> Result<(), (String, Arc<Vec<u8>>)> {
         match storage {
             WriteStorage::Public(mtime, event_mtime) => {
                 if data.len() < self.max_size && !flush {
-                    let tuple = (data, mtime, event_mtime);
+                    let file = PublicFile(data, mtime, event_mtime);
                     if let Some(previous) = self.public.get(&resource) {
-                        if previous.0.as_ref() == Some(&tuple) {
-                            return Ok(Ok(()));
+                        if previous.0.as_ref() == Some(&file) && previous.1 != FileStatus::Read {
+                            return Ok(());
                         }
                     }
-                    self.public.insert(resource, (Some(tuple), true));
-                    return Ok(Ok(()));
+                    self.public
+                        .insert(resource, (Some(file), FileStatus::from_fs(from_fs)));
+                    return Ok(());
                 } else {
                     // if previous instance of this resource in cache, remove it.
                     self.public.remove(&resource);
@@ -501,11 +574,12 @@ impl FileCache {
                 if data.len() < self.max_size && !flush {
                     if let Some(previous) = self.meta.get(&resource) {
                         if previous.0.as_ref() == Some(&data) {
-                            return Ok(Ok(()));
+                            return Ok(());
                         }
                     }
-                    self.meta.insert(resource, (Some(data), true));
-                    return Ok(Ok(()));
+                    self.meta
+                        .insert(resource, (Some(data), FileStatus::from_fs(from_fs)));
+                    return Ok(());
                 } else {
                     // if previous instance of this resource in cache, remove it.
                     self.meta.remove(&resource);
@@ -516,56 +590,54 @@ impl FileCache {
 
         Err((resource, data))
     }
-    fn read_owned(
-        &mut self,
-        resource: impl Into<String> + AsRef<str>,
-        storage: Storage,
-    ) -> Result<Result<Option<Vec<u8>>, ApplicationError>, String> {
-        self.read(resource, storage)
-            .map(|r| r.map(|o| o.map(|v| v.to_vec())))
-    }
+    #[allow(clippy::type_complexity)] // internal API
     fn read(
         &mut self,
         resource: impl Into<String> + AsRef<str>,
         storage: Storage,
-    ) -> Result<Result<Option<&'_ [u8]>, ApplicationError>, String> {
+    ) -> Result<Result<Option<Arc<Vec<u8>>>, ApplicationError>, String> {
         match storage {
             Storage::Public => {
                 if let Some(v) = self.public.get(resource.as_ref()) {
-                    return Ok(Ok(v.0.as_ref().map(|(v, _, _)| v.as_slice())));
+                    return Ok(Ok(v.0.as_ref().map(|file| Arc::clone(&file.0))));
                 }
             }
             Storage::Current => {}
             Storage::Meta => {
                 if let Some(v) = self.meta.get(resource.as_ref()) {
-                    return Ok(Ok(v.0.as_deref()));
+                    return Ok(Ok(v.0.as_ref().map(Arc::clone)));
                 }
             }
         }
         Err(resource.into())
     }
+    /// # Errors
+    ///
+    /// Returns `resource` if `storage` is [`Storage::Current`].
     fn delete(
         &mut self,
         resource: impl Into<String> + AsRef<str>,
         storage: Storage,
-    ) -> Result<Result<(), ApplicationError>, String> {
+    ) -> Result<(), String> {
         match storage {
             Storage::Public => {
                 if let Some(v) = self.public.get_mut(resource.as_ref()) {
                     v.0 = None;
                 } else {
-                    self.public.insert(resource.into(), (None, true));
+                    self.public
+                        .insert(resource.into(), (None, FileStatus::Cached));
                 }
-                Ok(Ok(()))
+                Ok(())
             }
             Storage::Current => Err(resource.into()),
             Storage::Meta => {
                 if let Some(v) = self.meta.get_mut(resource.as_ref()) {
                     v.0 = None;
                 } else {
-                    self.meta.insert(resource.into(), (None, true));
+                    self.meta
+                        .insert(resource.into(), (None, FileStatus::Cached));
                 }
-                Ok(Ok(()))
+                Ok(())
             }
         }
     }
@@ -633,7 +705,7 @@ pub async fn run(
     let state = options.read_clean().await?;
 
     // if we disabled public storage, we don't care about the state of merging with public!
-    if state.as_deref() != Some(b"y") && state.is_some() && !options.disable_public_storage {
+    if state.map_or(false, |state| &**state != b"y") && !options.disable_public_storage {
         error!("State isn't clean.");
 
         let changes = options.diff().await?;
@@ -980,6 +1052,7 @@ async fn handle_message(
                                 let resource_data = options.read(resource, Storage::Public).await?;
 
                                 if let Some(data) = resource_data {
+                                    let data = data.as_ref().clone();
                                     let resource = resource.to_owned();
                                     let data =
                                         applier.apply(data).map_or_else(|(_e, v)| v, identity);
@@ -987,7 +1060,7 @@ async fn handle_message(
                                         .write(
                                             resource,
                                             WriteStorage::Public(WriteMtime::No, event.timestamp()),
-                                            data,
+                                            Arc::new(data),
                                             false,
                                         )
                                         .await?;
@@ -1005,7 +1078,7 @@ async fn handle_message(
                                     .write(
                                         resource,
                                         WriteStorage::Public(WriteMtime::No, event.timestamp()),
-                                        Vec::new(),
+                                        Arc::new(Vec::new()),
                                         false,
                                     )
                                     .await?;
@@ -1158,15 +1231,31 @@ async fn handle_message(
                         // without reading the whole thing into memory.
                         let data = options.read(resource, Storage::Public).await?;
                         if let Some(data) = data {
+                            let data = data.as_ref().clone();
+                            if data.len() < 200 {
+                                debug!("Read {resource:?}: {:?}", std::str::from_utf8(&data));
+                            }
                             // unwind the data
                             let unwinder = unwinder.unwinder();
                             let data = unwinder
                                 .unwind(data, resource)
-                                .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
+                                .or_else(|e| e.ignore_apply_err(()))
+                                .ok();
 
-                            let mut hash = agde::hash_check::ResponseHasher::new();
-                            hash.write(&data);
-                            our_hashes.insert(resource.to_owned(), hash.finish());
+                            // if resource was just created, ignore
+                            if let Some(data) = data {
+                                if data.len() < 200 {
+                                    debug!(
+                                        "Unwound {resource:?}: {:?}",
+                                        std::str::from_utf8(&data)
+                                    );
+                                }
+
+                                let mut hash = agde::hash_check::ResponseHasher::new();
+                                hash.write(&data);
+                                hash.write(&manager.uuid().inner().to_le_bytes());
+                                our_hashes.insert(resource.to_owned(), hash.finish());
+                            }
                         } else {
                             // do nothing, by just not adding to the response, we signal we don't
                             // have it when the pier later checks the differences.
@@ -1198,6 +1287,7 @@ async fn handle_message(
                 for resource in resources {
                     let data = options.read(&resource, Storage::Public).await?;
                     if let Some(data) = data {
+                        let data = data.as_ref().clone();
                         // unwind the data
                         let unwinder = unwinder.unwinder();
                         let data = match unwinder
@@ -1323,7 +1413,7 @@ async fn commit_and_send(
                             None
                         };
 
-                        let mut current =
+                        let current =
                             if let Some(data) = options.read(resource, Storage::Current).await? {
                                 data
                             } else {
@@ -1334,11 +1424,13 @@ async fn commit_and_send(
                                 );
                                 continue;
                             };
+                        let mut current = current.as_ref().clone();
 
                         let public = options
                             .read(resource, Storage::Public)
                             .await?
                             .unwrap_or_default();
+                        let public = public.as_ref().clone();
 
                         info!(
                             "Last check: {:?}, now {:?}",
@@ -1447,10 +1539,11 @@ async fn commit_and_send(
 
             match applier.event().inner() {
                 agde::EventKind::Modify(_ev) => {
-                    let mut resource_data = options.read(&resource, Storage::Public).await?.expect(
+                    let resource_data = options.read(&resource, Storage::Public).await?.expect(
                         "we trust our own data - there must \
                         have been a create event before modify",
                     );
+                    let mut resource_data = resource_data.as_ref().clone();
 
                     resource_data = applier
                         .apply(resource_data)
@@ -1460,7 +1553,7 @@ async fn commit_and_send(
                         .write(
                             resource,
                             WriteStorage::Public(WriteMtime::LookUpCurrent, event.timestamp()),
-                            resource_data,
+                            Arc::new(resource_data),
                             false,
                         )
                         .await?;
@@ -1470,7 +1563,7 @@ async fn commit_and_send(
                         .write(
                             resource,
                             WriteStorage::Public(WriteMtime::LookUpCurrent, event.timestamp()),
-                            "",
+                            Arc::new(Vec::new()),
                             false,
                         )
                         .await?;
@@ -1628,10 +1721,11 @@ async fn handle_sync_reply(
             for (resource, diff) in sync.diff() {
                 let resource = resource.as_ref();
                 let public = async {
-                    let mut data = options
+                    let data = options
                         .read(resource, Storage::Public)
                         .await?
                         .unwrap_or_default();
+                    let mut data = data.as_ref().clone();
 
                     let result = if diff.apply_overlaps(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
@@ -1654,17 +1748,18 @@ async fn handle_sync_reply(
                                 WriteMtime::No,
                                 public_rewinder.last_change_to_resource(resource),
                             ),
-                            data,
+                            Arc::new(data),
                             false,
                         )
                         .await?;
                     Ok(())
                 };
                 let current = async {
-                    let mut data = options
+                    let data = options
                         .read(resource, Storage::Current)
                         .await?
                         .unwrap_or_default();
+                    let mut data = data.as_ref().clone();
 
                     let result = if diff.apply_overlaps_adaptive_end(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
@@ -1681,7 +1776,7 @@ async fn handle_sync_reply(
                         return Err(ApplicationError::PiersRejected);
                     }
                     options
-                        .write(resource, WriteStorage::current(), data, true)
+                        .write(resource, WriteStorage::current(), Arc::new(data), true)
                         .await?;
                     Ok(())
                 };
@@ -1731,9 +1826,12 @@ async fn handle_sync_reply(
             info!("Fast forward complete.");
             {
                 let mut metadata = options.metadata().lock().await;
+                let mut offline_metadata = options.metadata_offline().lock().await;
                 metadata_applier.apply(&mut metadata);
+                metadata_applier.apply(&mut offline_metadata);
             }
             options.sync_metadata(Storage::Public).await?;
+            options.sync_metadata(Storage::Current).await?;
         }
         agde::SyncReplyAction::HashCheck { unwinder } => {
             let mut public_unwinder = unwinder;
@@ -1746,10 +1844,11 @@ async fn handle_sync_reply(
                         .read(resource, Storage::Public)
                         .await?
                         .unwrap_or_default();
+                    let data = data.as_ref().clone();
 
                     let mut data = public_unwinder
                         .unwind(data, resource)
-                        .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
+                        .unwrap_or_else(|e| e.into_data());
 
                     if diff.apply_overlaps(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);
@@ -1769,7 +1868,7 @@ async fn handle_sync_reply(
                                 WriteMtime::No,
                                 public_unwinder.last_change_to_resource(resource),
                             ),
-                            data,
+                            Arc::new(data),
                             false,
                         )
                         .await?;
@@ -1780,6 +1879,7 @@ async fn handle_sync_reply(
                         .read(resource, Storage::Current)
                         .await?
                         .unwrap_or_default();
+                    let data = data.as_ref().clone();
 
                     let mut data = current_unwinder
                         .unwind(data, resource)
@@ -1797,7 +1897,7 @@ async fn handle_sync_reply(
                         .rewind(data)
                         .map_or_else(|(_err, vec)| vec, identity);
                     options
-                        .write(resource, WriteStorage::current(), data, true)
+                        .write(resource, WriteStorage::current(), Arc::new(data), true)
                         .await?;
                     Ok(())
                 };
