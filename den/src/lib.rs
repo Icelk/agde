@@ -1358,6 +1358,32 @@ impl Difference {
     }
 }
 impl<S: ExtendVec> Difference<S> {
+    /// Create an empty diff that does nothing when applied.
+    ///
+    /// `len` is the length of the data, both before and after.
+    /// If this is smaller than the target, it'll truncate it
+    /// (in whole `block_size` segments). If `len` is longer,
+    /// applying will return an error.
+    ///
+    /// `block_size` is simply the size of the blocks.
+    /// Not that relevant here, but used by other methods on [`Difference`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `block_size` is `0`.
+    pub fn empty(len: usize, block_size: usize) -> Self {
+        assert!(block_size > 0);
+        // (len/block_size).ceil
+        let block_count = (len + block_size - 1) / block_size;
+        Self {
+            block_size,
+            original_data_len: len,
+            segments: vec![Segment::Ref(SegmentRef {
+                start: 0,
+                block_count,
+            })],
+        }
+    }
     /// Returns a reference to all the internal [`Segment`]s.
     ///
     /// This can be used for implementing algorithms other than [`Self::apply`] to apply the data.

@@ -1148,18 +1148,32 @@ async fn handle_message(
         agde::MessageKind::Sync(sync) => {
             let mut builder = manager.apply_sync(&sync, sender);
             // `TODO`: do this in parallel, but that uses more memory! Requires a streaming API.
-            while let Some((resource, signature)) = builder.next_signature() {
+            while let Some((resource, signature, unwinder)) = builder.next_signature() {
                 let data = options.read(resource, Storage::Public).await?;
-                let data = if let Some(d) = data {
-                    d
+                let data = data.as_deref().cloned();
+                let mut data = if let Some(d) = data {
+                    Some(d)
                 } else {
                     continue;
                 };
-                let diff = signature.diff(&data);
                 // so we don't call builder ↓, as that would be multiple
                 // mutable borrows.
                 let resource = resource.to_owned();
-                builder.add_diff(resource, diff);
+                let data_len = data.as_ref().unwrap().len();
+                if let Some(unwinder) = unwinder {
+                    data = unwinder
+                        .unwind(data.unwrap(), &resource)
+                        .or_else(|e| e.ignore_apply_err(()))
+                        .ok();
+                }
+                if let Some(data) = data {
+                    let diff = signature.diff(&data);
+                    builder.add_diff(resource, diff);
+                } else {
+                    // if the resource has since been destroyed, return something so they don't
+                    // delete ut, but make sure the diff doesn't change anything (`empty`).
+                    builder.add_diff(resource, agde::den::Difference::empty(data_len, 8));
+                }
             }
             let response = builder.finish(&manager);
             let msg = manager.process_sync_reply(response);
@@ -1187,15 +1201,20 @@ async fn handle_message(
                         // without reading the whole thing into memory.
                         let data = options.read(resource, Storage::Public).await?;
                         if let Some(data) = data {
+                            let data = data.as_ref().clone();
                             // unwind the data
                             let unwinder = builder.unwinder();
                             let data = unwinder
                                 .unwind(data, resource)
-                                .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
+                                .or_else(|e| e.ignore_apply_err(()))
+                                .ok();
 
-                            let mut hash = agde::hash_check::ResponseHasher::new();
-                            hash.write(&data);
-                            builder.insert(resource.to_owned(), hash.finish());
+                            // if resource was just created, ignore
+                            if let Some(data) = data {
+                                let mut hash = agde::hash_check::ResponseHasher::new();
+                                hash.write(&data);
+                                builder.insert(resource.to_owned(), hash.finish());
+                            }
                         } else {
                             // do nothing, by just not adding to the response, we signal we don't
                             // have it when the pier later checks the differences.
@@ -1218,6 +1237,7 @@ async fn handle_message(
             }
             info!("Got hash check response from {sender}.");
             debug!("Hash check from {sender}: {:#?}", hc.hashes());
+            debug!("Our metadata now: {:#?}", options.metadata().lock().await);
 
             let mut our_hashes = BTreeMap::new();
 
@@ -1272,6 +1292,14 @@ async fn handle_message(
             // free memory
             drop(our_hashes);
 
+            if !delete.is_empty() {
+                info!("Deleting resources after hash check: {delete:?}");
+                debug!(
+                    "Metadata when deleting: {:#?}",
+                    options.metadata().lock().await
+                );
+            }
+
             // delete all in parallell
             futures::future::try_join_all(delete.into_iter().map(|r| {
                 futures::future::try_join(
@@ -1292,9 +1320,15 @@ async fn handle_message(
                         let unwinder = unwinder.unwinder();
                         let data = match unwinder
                             .unwind(data, &resource)
-                            .or_else(|e| e.into_data(()))
+                            .or_else(|e| e.ignore_apply_err(()))
                         {
                             Ok(data) => data,
+                            // if `resource` was created since the beginning of the hash check's
+                            // event log reach.
+                            //
+                            // If we don't add a signature here, the worst that will happen is that
+                            // the responding pier will send the whole resource, as if we don't
+                            // have it.
                             Err(()) => continue,
                         };
 
@@ -1308,6 +1342,7 @@ async fn handle_message(
                     }
                 }
                 let msg = manager.process_sync(sync.finish(), None);
+                info!("The hash check doesn't match. Send sync message.");
                 drop(manager);
                 send(write, &msg).await?;
             }
@@ -1585,6 +1620,10 @@ async fn commit_and_send(
                         .write(resource, WriteStorage::current(), actual, true)
                         .await?;
                 } else {
+                    info!(
+                        "Deleting {resource:?} when moving to current, \
+                        as the resource doesn't exist in public!"
+                    );
                     options.delete(resource, Storage::Current).await?;
                 }
             }
@@ -1883,7 +1922,7 @@ async fn handle_sync_reply(
 
                     let mut data = current_unwinder
                         .unwind(data, resource)
-                        .or_else(|e| e.into_data(ApplicationError::PiersRejected))?;
+                        .unwrap_or_else(agde::event::UnwindError::into_data);
 
                     if diff.apply_overlaps_adaptive_end(data.len()) {
                         let mut other = Vec::with_capacity(data.len() + 64);

@@ -168,8 +168,8 @@ async fn flush(
     // ignore error on send if the connection is closed.
     let _ = send(write, &manager.process_disconnect()).await;
 
-    let clean = options.read_clean().await?;
-    if clean.as_deref() != Some(b"y") && clean.is_some() && !options.public_storage_disabled() {
+    let state = options.read_clean().await?;
+    if state.map_or(false, |state| &**state != b"y") && !options.public_storage_disabled() {
         error!("State not clean. Trying to apply diffs to current buffer.");
 
         let diff = options.diff().await?;
@@ -184,16 +184,17 @@ async fn flush(
                     match diff {
                         MetadataChange::Delete(_) => {}
                         MetadataChange::Modify(resource, created, _) => {
-                            let mut current =
-                                options.read(&resource, Storage::Current).await?.expect(
-                                    "configuration should not return Modified \
+                            let current = options.read(&resource, Storage::Current).await?.expect(
+                                "configuration should not return Modified \
                                             if the Current storage version doesn't exist.",
-                                );
+                            );
+                            let mut current = current.as_ref().clone();
 
                             let public = options
                                 .read(&resource, Storage::Public)
                                 .await?
                                 .unwrap_or_default();
+                            let public = public.as_ref().clone();
 
                             // cursors: we're catching ctrlc, so this isn't our highest
                             // priority
@@ -216,7 +217,7 @@ async fn flush(
                             };
 
                             options
-                                .write(resource, WriteStorage::current(), current, true)
+                                .write(resource, WriteStorage::current(), Arc::new(current), true)
                                 .await?;
                         }
                     }
@@ -398,7 +399,7 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
     let diff_metadata = Arc::clone(&metadata);
     let diff_offline_metadata = Arc::clone(&offline_metadata);
 
-    let write = move |resource: String, storage, data: Vec<u8>| {
+    let write = move |resource: String, storage, data: Arc<Vec<u8>>| {
         let metadata = Arc::clone(&write_metadata);
         let offline_metadata = Arc::clone(&write_offline_metadata);
         Box::pin(async move {
@@ -530,12 +531,11 @@ pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Op
                 };
                 if storage == Storage::Current {
                     let mut metadata = offline_metadata.lock().await;
-                    debug!("Removing {resource} from metdata cache.");
+                    debug!("Removing {resource} from metadata cache.");
                     metadata.remove(&resource);
                 }
                 {
                     let mut metadata = metadata.lock().await;
-                    debug!("Removing {resource} from metadata cache.");
                     metadata.remove(&resource);
                 }
                 let file_metadata = match tokio::fs::metadata(&path).await {

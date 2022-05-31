@@ -322,7 +322,9 @@ impl<S: ExtendVec + 'static> Event<S> {
 #[derive(Debug)]
 pub enum UnwindError {
     /// The resource has previously been destroyed.
-    ResourceDestroyed,
+    ///
+    /// The returned byte array contains the unchanged data passed to the function.
+    ResourceDestroyed(Vec<u8>),
     /// An error during an application of a section.
     ///
     /// The rewound resource is also returned, if you want to use it.
@@ -330,11 +332,18 @@ pub enum UnwindError {
     Apply(den::ApplyError, Vec<u8>),
 }
 impl UnwindError {
-    /// Get the data of [`Self::Apply`] or, if [`Self::ResourceDestroyed`], return `default_err`.
-    #[allow(clippy::missing_errors_doc)]
-    pub fn into_data<E>(self, default_err: E) -> Result<Vec<u8>, E> {
+    /// Get the data of this error.
+    #[must_use]
+    pub fn into_data(self) -> Vec<u8> {
         match self {
-            UnwindError::ResourceDestroyed => Err(default_err),
+            UnwindError::Apply(_, vec) | UnwindError::ResourceDestroyed(vec) => vec,
+        }
+    }
+    /// Get the data from [`Self::Apply`] or return `resource_destroyed_err`.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn ignore_apply_err<E>(self, resource_destroyed_err: E) -> Result<Vec<u8>, E> {
+        match self {
+            UnwindError::ResourceDestroyed(_) => Err(resource_destroyed_err),
             UnwindError::Apply(_, vec) => Ok(vec),
         }
     }
@@ -363,34 +372,34 @@ impl<'a> Unwinder<'a> {
             manager,
         }
     }
-    /// # Errors
-    ///
-    /// Will never return [`UnwindError::Apply`].
-    pub(crate) fn check_name(&self, modern_resource_name: &str) -> Result<(), UnwindError> {
+    /// Returns `true` if `modern_resource_name` is valid and hasn't been recreated since the start
+    /// of the event log we're tracking.
+    pub(crate) fn check_name(&self, modern_resource_name: &str) -> bool {
         for log_event in self.events {
             if log_event.event.resource() == modern_resource_name {
                 match &log_event.event.inner() {
                     EventKind::Delete(_) | EventKind::Create(_) => {
-                        return Err(UnwindError::ResourceDestroyed)
+                        return false;
                     }
                     // Do nothing; the file is just modified.
                     EventKind::Modify(_) => {}
                 }
             }
         }
-        Ok(())
+        true
     }
     /// Get an iterator over the [`Difference`]s to `modern_resource_name`.
     ///
-    /// # Errors
-    ///
-    /// Returns [`UnwindError::ResourceDestroyed`] if `modern_resource_name` was destroyed/created
-    /// again.
+    /// Returns [`None`] if `modern_resource_name` was destroyed/created
+    /// during the events we're tracking.
+    #[must_use]
     pub fn sections<'b>(
         &'b self,
         modern_resource_name: &'b str,
-    ) -> Result<impl Iterator<Item = &Difference> + 'b, UnwindError> {
-        Unwinder::new(self.events, None).check_name(modern_resource_name)?;
+    ) -> Option<impl Iterator<Item = &Difference> + 'b> {
+        if !self.check_name(modern_resource_name) {
+            return None;
+        }
 
         let iter = self.events.iter().rev().filter_map(move |received_ev| {
             if received_ev.event.resource() != modern_resource_name {
@@ -404,7 +413,7 @@ impl<'a> Unwinder<'a> {
                 ),
             }
         });
-        Ok(iter)
+        Some(iter)
     }
     /// Get an iterator over the events stored in this unwinder.
     /// The first item is the oldest one. The last is the most recent.
@@ -445,7 +454,9 @@ impl<'a> Unwinder<'a> {
             "The rewinding stack must be empty!"
         );
 
-        Unwinder::new(self.events, None).check_name(modern_resource_name)?;
+        if !self.check_name(modern_resource_name) {
+            return Err(UnwindError::ResourceDestroyed(resource.into()));
+        }
 
         let mut error = None;
 

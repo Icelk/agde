@@ -307,8 +307,7 @@ impl Log {
 
         event::Unwinder::new(slice, None)
             .check_name(old_name)
-            .ok()
-            .map(|()| old_name)
+            .then(|| old_name)
     }
 
     /// Rewinds to `timestamp` or as far as we can.
@@ -380,8 +379,7 @@ impl Log {
         // This check is required for the code at [`EventApplier::apply`] to not panic.
         let resource = event::Unwinder::new(slice, None)
             .check_name(event.resource())
-            .ok()
-            .map(|_| event.resource());
+            .then(|| event.resource());
         // Upholds the contracts described in the comment before [`EventApplier`].
         EventApplier {
             events: slice,
@@ -463,7 +461,7 @@ impl<'a> EventApplier<'a> {
                 error = Some(err);
                 vec
             }
-            Err(event::UnwindError::ResourceDestroyed) => {
+            Err(event::UnwindError::ResourceDestroyed(_)) => {
                 unreachable!("This is guaranteed by the check in [`EventLog::event_applier`].");
             }
         };

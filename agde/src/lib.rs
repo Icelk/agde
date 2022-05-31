@@ -1020,11 +1020,13 @@ impl Manager {
         let request = if differing_data.is_empty() {
             None
         } else {
-            let cutoff = self
+            let revert_to = self
                 .event_log
                 .cutoff_from_time(response.cutoff_timestamp())
-                .unwrap_or(0);
-            let revert_to = sync::RevertTo::To(self.event_log.list[cutoff].message_uuid);
+                .map_or(sync::RevertTo::Origin, |cutoff| {
+                    sync::RevertTo::To(self.event_log.list[cutoff].message_uuid)
+                });
+
             Some((
                 sync::RequestBuilder::new(
                     sender,
@@ -1450,6 +1452,7 @@ impl Manager {
 ///
 /// Used for methods of [`Manager`] to send data to specific piers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "you should probably send some message to this pier"]
 pub struct SelectedPier {
     uuid: Uuid,
 }
@@ -1466,6 +1469,7 @@ impl SelectedPier {
 
 /// The action to perform after calling [`Manager::apply_sync_reply`].
 #[derive(Debug)]
+#[must_use]
 pub enum SyncReplyAction<'a> {
     /// Rewind the public and current storage with `rewinder`.
     ///
@@ -1496,6 +1500,7 @@ pub enum SyncReplyAction<'a> {
 }
 /// The action to follow after calling [`Manager::apply_cancelled`].
 #[derive(Debug, Clone, Copy)]
+#[must_use]
 pub enum CancelAction {
     /// Do nothing.
     Nothing,

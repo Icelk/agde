@@ -153,10 +153,14 @@ impl<'a> ResponseBuilder<'a> {
     ///
     /// If you don't have a resource, just don't call [`Self::add_diff`]. Agde will then automatically
     /// send a delete event then.
-    pub fn next_signature(&mut self) -> Option<(&str, &den::Signature)> {
-        self.signature_iter.next().map(|(k, v)| (&**k, v))
+    pub fn next_signature(
+        &mut self,
+    ) -> Option<(&str, &den::Signature, Option<&mut event::Unwinder<'a>>)> {
+        self.unwinder();
+        let unwinder = self.unwinder.as_mut();
+        self.signature_iter.next().map(|(k, v)| (&**k, v, unwinder))
     }
-    /// Return the unwinder (if any) to use for the `resource` before [adding](Self::add_diff) it.
+    /// Returns the unwinder (if any) to use for the `resource` before [adding](Self::add_diff) it.
     pub fn unwinder(&mut self) -> Option<&mut event::Unwinder<'a>> {
         self.unwinder.as_mut().map(|unwinder| {
             unwinder.clear_unwound();
@@ -165,7 +169,7 @@ impl<'a> ResponseBuilder<'a> {
     }
     /// Tell the requester their `resource` needs to apply `diff` to get our data.
     ///
-    /// You have to rewind `resource` before getting the `diff` if [`Self::unwinder`] returns
+    /// You have to unwind `resource` before getting the `diff` if [`Self::unwinder`] returns
     /// [`Some`].
     ///
     /// # Panics
