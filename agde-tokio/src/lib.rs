@@ -243,7 +243,7 @@ impl Options {
                         };
                         let _ = lock.write(res, Arc::clone(file), storage, false, true);
                     } else {
-                        lock.delete(res, storage).unwrap();
+                        let _ = lock.delete(res, storage);
                     }
                 }
                 Ok(file)
