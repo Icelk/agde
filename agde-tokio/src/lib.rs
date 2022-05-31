@@ -399,11 +399,8 @@ impl Options {
     pub async fn flush(&self) -> Result<(), ApplicationError> {
         info!("Flushing.");
         let (mut public, mut meta) = {
-            let mut lock = self.file_cache.lock().unwrap();
-            (
-                core::mem::take(&mut lock.public),
-                core::mem::take(&mut lock.meta),
-            )
+            let lock = self.file_cache.lock().unwrap();
+            (lock.public.clone(), lock.meta.clone())
         };
 
         let public_iter = public.iter().map(|(resource, (data, status))| async move {
@@ -461,11 +458,8 @@ impl Options {
     pub async fn flush_out(&self) -> Result<(), ApplicationError> {
         info!("Flushing out cache.");
         let (mut public, mut meta) = {
-            let mut lock = self.file_cache.lock().unwrap();
-            (
-                core::mem::take(&mut lock.public),
-                core::mem::take(&mut lock.meta),
-            )
+            let lock = self.file_cache.lock().unwrap();
+            (lock.public.clone(), lock.meta.clone())
         };
 
         for (resource, (data, status)) in public.drain() {
@@ -503,6 +497,7 @@ impl Options {
     }
 }
 
+#[derive(Debug, Clone)]
 struct PublicFile(Arc<Vec<u8>>, WriteMtime, SystemTime);
 impl PartialEq for PublicFile {
     fn eq(&self, other: &Self) -> bool {
