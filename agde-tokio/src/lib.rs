@@ -113,7 +113,7 @@ pub struct Options {
 
     metadata: Arc<Mutex<Metadata>>,
     offline_metadata: Arc<Mutex<Metadata>>,
-    file_cache: Arc<std::sync::Mutex<FileCache>>,
+    file_cache: Arc<Mutex<FileCache>>,
 
     /// For how long to wait for welcomes.
     startup_timeout: Duration,
@@ -147,7 +147,7 @@ impl Options {
             rough_resource_diff,
             metadata,
             offline_metadata,
-            file_cache: Arc::new(std::sync::Mutex::new(FileCache::new(1024 * 8))),
+            file_cache: Arc::new(Mutex::new(FileCache::new(1024 * 8))),
             startup_timeout,
             sync_interval,
             periodic_interval: Duration::from_secs(30),
@@ -173,8 +173,8 @@ impl Options {
         self.periodic_interval = flush_interval;
         self
     }
-    pub fn with_file_cache_max_size(self, max_size: usize) -> Self {
-        self.file_cache.lock().unwrap().max_size = max_size;
+    pub async fn with_file_cache_max_size(self, max_size: usize) -> Self {
+        self.file_cache.lock().await.max_size = max_size;
         self
     }
     pub fn with_no_public_storage(mut self) -> Self {
@@ -221,7 +221,7 @@ impl Options {
             storage = Storage::Public;
         }
         match {
-            let mut lock = self.file_cache.lock().unwrap();
+            let mut lock = self.file_cache.lock().await;
             let v = lock.read(resource, storage);
             drop(lock);
             v
@@ -231,7 +231,7 @@ impl Options {
                 let file = self._read(res.clone(), storage).await?;
                 let file = file.map(Arc::new);
                 {
-                    let mut lock = self.file_cache.lock().unwrap();
+                    let mut lock = self.file_cache.lock().await;
                     if let Some(file) = file.as_ref() {
                         // this data will never be written!
                         let storage = match storage {
@@ -277,7 +277,7 @@ impl Options {
             return Ok(());
         }
         match {
-            let mut lock = self.file_cache.lock().unwrap();
+            let mut lock = self.file_cache.lock().await;
             let v = lock.write(resource.into(), data, storage, flush, false);
             drop(lock);
             v
@@ -306,7 +306,7 @@ impl Options {
             return Ok(());
         }
         match {
-            let mut lock = self.file_cache.lock().unwrap();
+            let mut lock = self.file_cache.lock().await;
             let v = lock.delete(resource, storage);
             drop(lock);
             v
@@ -398,8 +398,15 @@ impl Options {
 
     pub async fn flush(&self) -> Result<(), ApplicationError> {
         info!("Flushing.");
-        let (mut public, mut meta) = {
-            let lock = self.file_cache.lock().unwrap();
+        let (public, meta) = {
+            let mut lock = self.file_cache.lock().await;
+            for (_, status) in &mut lock.public.values_mut() {
+                *status = FileStatus::Flushed;
+            }
+            for (_, status) in &mut lock.meta.values_mut() {
+                *status = FileStatus::Flushed;
+            }
+
             (lock.public.clone(), lock.meta.clone())
         };
 
@@ -436,33 +443,16 @@ impl Options {
         // batch them up in 1 job to complete IO in one go
         futures::future::try_join(public_future, meta_future).await?;
 
-        for (_, status) in &mut public.values_mut() {
-            *status = FileStatus::Flushed;
-        }
-        for (_, status) in &mut meta.values_mut() {
-            *status = FileStatus::Flushed;
-        }
-
-        {
-            let mut lock = self.file_cache.lock().unwrap();
-            {
-                public.extend(lock.public.drain());
-                meta.extend(lock.meta.drain());
-                lock.public = public;
-                lock.meta = meta;
-            }
-        }
         Ok(())
     }
     /// Also clears the caches.
     pub async fn flush_out(&self) -> Result<(), ApplicationError> {
         info!("Flushing out cache.");
-        let (mut public, mut meta) = {
-            let lock = self.file_cache.lock().unwrap();
-            (lock.public.clone(), lock.meta.clone())
-        };
+        // keep the lock so nobody else reads while we are flushing.
+        let mut lock = self.file_cache.lock().await;
+        // clear the caches
 
-        for (resource, (data, status)) in public.drain() {
+        for (resource, (data, status)) in lock.public.drain() {
             if status == FileStatus::Read {
                 continue;
             }
@@ -473,7 +463,7 @@ impl Options {
                 self._delete(resource, Storage::Public).await?;
             }
         }
-        for (resource, (data, status)) in meta.drain() {
+        for (resource, (data, status)) in lock.meta.drain() {
             if status == FileStatus::Read {
                 continue;
             }
@@ -484,15 +474,6 @@ impl Options {
             }
         }
 
-        {
-            let mut lock = self.file_cache.lock().unwrap();
-            {
-                public.extend(lock.public.drain());
-                meta.extend(lock.meta.drain());
-                lock.public = public;
-                lock.meta = meta;
-            }
-        }
         Ok(())
     }
 }
