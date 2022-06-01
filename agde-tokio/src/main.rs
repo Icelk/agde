@@ -1,4 +1,5 @@
 use agde::Manager;
+use agde_tokio::Compression;
 use clap::{command, Arg, Command};
 use log::error;
 use notify::Watcher;
@@ -6,7 +7,6 @@ use std::process;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use agde_tokio::Compression;
 
 fn validate<T: FromStr>(validate: impl Fn(T) -> bool) -> impl Fn(&str) -> Result<(), String> {
     move |v| {
