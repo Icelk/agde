@@ -1,20 +1,19 @@
-name: agde-tokio CI
+name: agde-io CI
 
 on:
     push:
         paths:
-            - "agde-tokio/**"
             - "agde-io/**"
             - "agde/**"
             - "Cargo.toml"
-            - ".github/workflows/agde-tokio.yml"
+            - ".github/workflows/agde-io.yml"
 
 env:
     CARGO_TERM_COLOR: always
 
 defaults:
     run:
-        working-directory: agde-tokio
+        working-directory: agde-io
 
 jobs:
     check:
@@ -37,25 +36,5 @@ jobs:
               run: cargo test
             - uses: Icelk/rustdoc-link-check@v1
               with:
-                  working-directory: agde-tokio
+                  working-directory: agde-io
                   private: true
-
-    build:
-        needs: [check]
-        runs-on: ubuntu-latest
-        steps:
-            - name: Checking out sources
-              uses: actions/checkout@v1
-            - name: Installing Rust toolchain
-              uses: actions-rs/toolchain@v1
-              with:
-                  toolchain: stable
-                  profile: minimal
-            - uses: Swatinem/rust-cache@v1
-            - name: Compiling
-              run: cargo rustc --profile distribution
-            - name: Upload bin artefact
-              uses: actions/upload-artifact@v2
-              with:
-                  name: agde-tokio
-                  path: target/distribution/agde-tokio
