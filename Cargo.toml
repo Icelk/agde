@@ -4,6 +4,7 @@ members = [
     "agde",
     "den",
     "agde-tokio",
+    "agde-io",
 ]
 
 # profile for binary sub-crates.
