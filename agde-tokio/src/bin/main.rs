@@ -136,7 +136,7 @@ async fn main() {
 
         let manager = Manager::new(server, 0, log_lifetime, 512);
 
-        match run(url, manager, options).await {
+        match run(manager, options, || native::connect_ws(url)).await {
             Ok(handle) => {
                 let watch_handle = Arc::new(handle.state().clone());
                 let mut watcher = native::watch_changes(move || {

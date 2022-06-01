@@ -4,26 +4,92 @@ use std::convert::identity;
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::io;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
 use std::time::{Duration, SystemTime};
 
 use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
 use agde::Manager;
-use futures::{Future, FutureExt, SinkExt, StreamExt, TryFutureExt};
+use futures::lock::{Mutex, MutexGuard};
+use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
-use tokio::sync::{Mutex, MutexGuard};
 use tokio_tungstenite::tungstenite;
 
 pub mod native;
 pub mod periodic;
 
+pub enum Message {
+    Text(String),
+    Binary(Vec<u8>),
+}
+impl From<Vec<u8>> for Message {
+    fn from(msg: Vec<u8>) -> Self {
+        Self::Binary(msg)
+    }
+}
+impl From<String> for Message {
+    fn from(msg: String) -> Self {
+        Self::Text(msg)
+    }
+}
+#[derive(Debug)]
+pub struct JoinError;
+
+pub trait TaskHandle<T>: Future<Output = Result<T, JoinError>> + Unpin + Send {
+    fn abort(&mut self);
+}
+pub trait Runtime {
+    type Sleep: Future<Output = ()> + Send + Sync;
+
+    // we use a dyn future as GATs are not stabilized: https://github.com/rust-lang/rust/issues/44265
+    fn spawn<T: Send + 'static, F: Future<Output = T> + Send + 'static>(
+        future: F,
+    ) -> Box<dyn TaskHandle<T>>;
+    fn sleep(duration: Duration) -> Self::Sleep;
+}
+// `TODO`: make the sender handle mutexes, as some senders might not want to lock every channel (if
+// we're doing P2P)
+pub trait Sender: Sink<Message> + Unpin + Send + Sync {}
+pub trait Receiver: Stream<Item = Result<Message, ()>> + Unpin + Send + Sync {}
+pub trait Platform: Clone + Send + Sync + 'static {
+    type Sender: Sender;
+    type Receiver: Receiver;
+    type Rt: Runtime;
+
+    fn sender(&self) -> &Mutex<Self::Sender>;
+    fn receiver(&self) -> &Mutex<Self::Receiver>;
+}
+#[derive(Debug, Clone)]
+pub struct PlatformExt<P: Platform>(pub P);
+impl<P: Platform> From<P> for PlatformExt<P> {
+    fn from(p: P) -> Self {
+        Self(p)
+    }
+}
+impl<P: Platform> PlatformExt<P> {
+    pub async fn send(&self, msg: &agde::Message) -> Result<(), ApplicationError> {
+        let buffer = to_compressed_bin(msg);
+        self.0
+            .sender()
+            .lock()
+            .await
+            .send(buffer.into())
+            .await
+            .map_err(|_| ApplicationError::StreamBroken)
+    }
+
+    pub fn sender(&self) -> &Mutex<P::Sender> {
+        self.0.sender()
+    }
+    pub fn receiver(&self) -> &Mutex<P::Receiver> {
+        self.0.receiver()
+    }
+}
+
 pub type DynError = Box<dyn Error>;
-pub type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-pub type WriteHalf = futures::stream::SplitSink<WsStream, tungstenite::Message>;
-pub type ReadHalf = futures::stream::SplitStream<WsStream>;
 
 #[derive(Debug, PartialEq)]
 pub enum ApplicationError {
@@ -31,6 +97,7 @@ pub enum ApplicationError {
     StoragePermissions,
     StreamBroken,
     PiersRejected,
+    ConnectionFailed(String),
 }
 impl Error for ApplicationError {}
 impl Display for ApplicationError {
@@ -43,6 +110,7 @@ impl Display for ApplicationError {
                 f,
                 "the other clients rejected you because of invalid UUID / version"
             ),
+            Self::ConnectionFailed(err) => write!(f, "connecting to the network failed: {err}"),
         }
     }
 }
@@ -104,7 +172,7 @@ pub type WriteFn = Box<dyn Fn(String, WriteStorage, Arc<Vec<u8>>) -> WriteFuture
 pub type DeleteFn = Box<dyn Fn(String, Storage) -> DeleteFuture + Send + Sync>;
 pub type DiffFn = Box<dyn Fn() -> DiffFuture + Send + Sync>;
 #[must_use]
-pub struct Options {
+pub struct Options<P: Platform> {
     read: ReadFn,
     write: WriteFn,
     delete: DeleteFn,
@@ -125,8 +193,10 @@ pub struct Options {
     /// A bit of a performance hit, but generally recommended.
     verify_diffs: bool,
     disable_public_storage: bool,
+
+    _platform: PhantomData<P>,
 }
-impl Options {
+impl<P: Platform> Options<P> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         read: ReadFn,
@@ -154,10 +224,11 @@ impl Options {
             force_pull,
             verify_diffs,
             disable_public_storage: false,
+            _platform: PhantomData,
         }
     }
 }
-impl Options {
+impl<P: Platform> Options<P> {
     pub fn arc(self) -> Arc<Self> {
         Arc::new(self)
     }
@@ -210,7 +281,7 @@ impl Options {
         &self.offline_metadata
     }
 }
-impl Options {
+impl<P: Platform> Options<P> {
     pub async fn read(
         &self,
         resource: impl Into<String> + AsRef<str>,
@@ -620,14 +691,13 @@ impl FileCache {
 }
 
 #[derive(Clone)]
-pub struct StateHandle {
+pub struct StateHandle<P: Platform> {
     pub manager: Arc<Mutex<Manager>>,
-    pub options: Arc<Options>,
-    pub write: Arc<Mutex<WriteHalf>>,
-    pub read: Arc<Mutex<ReadHalf>>,
+    pub options: Arc<Options<P>>,
+    pub platform: PlatformExt<P>,
     changed: Arc<Mutex<HashSet<String>>>,
 }
-impl StateHandle {
+impl<P: Platform> StateHandle<P> {
     /// Commit and send our changes.
     /// This also pulls the changes from others to the `current` storage.
     ///
@@ -643,19 +713,19 @@ impl StateHandle {
         commit_and_send(
             &self.manager,
             &self.options,
-            &self.write,
+            &self.platform,
             &self.changed,
             cursors,
         )
         .await
     }
 }
-pub struct Handle {
-    inner: StateHandle,
+pub struct Handle<P: Platform> {
+    inner: StateHandle<P>,
     waiter: futures::channel::oneshot::Receiver<Result<(), ApplicationError>>,
 }
-impl Handle {
-    pub fn state(&self) -> &StateHandle {
+impl<P: Platform> Handle<P> {
+    pub fn state(&self) -> &StateHandle<P> {
         &self.inner
     }
     pub async fn wait(self) -> Result<(), ApplicationError> {
@@ -673,11 +743,11 @@ pub struct Cursor<'a> {
     pub index: usize,
 }
 
-pub async fn run(
-    url: &str,
+pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, ApplicationError>>>(
     mut manager: Manager,
-    options: Arc<Options>,
-) -> Result<Handle, DynError> {
+    options: Arc<Options<P>>,
+    connect: impl FnOnce() -> ConnectFuture,
+) -> Result<Handle<P>, DynError> {
     let state = options.read_clean().await?;
 
     // if we disabled public storage, we don't care about the state of merging with public!
@@ -712,15 +782,15 @@ pub async fn run(
         }
     }
 
-    let (mut write, mut read) = native::connect_ws(url).await?;
+    let platform = PlatformExt(connect().await?);
 
     // changes since last Storage sync
     let changed = Arc::new(Mutex::new(HashSet::new()));
 
     {
         let message = { manager.process_hello() };
-        write
-            .send(to_compressed_bin(&message).into())
+        platform
+            .send(&message)
             .await
             .map_err(|_| ApplicationError::UnexpectedServerClose)?;
 
@@ -733,8 +803,9 @@ pub async fn run(
         );
 
         loop {
-            let sleep = Box::pin(tokio::time::sleep(options.startup_timeout));
-            match futures::future::select(sleep, read.next()).await {
+            let sleep = Box::pin(P::Rt::sleep(options.startup_timeout()));
+            let mut receiver = platform.receiver().lock().await;
+            match futures::future::select(sleep, receiver.next()).await {
                 // Sleep timeout
                 futures::future::Either::Left(((), _)) => {
                     break;
@@ -748,10 +819,10 @@ pub async fn run(
                     };
 
                     match message {
-                        tungstenite::Message::Text(text) => {
+                        Message::Text(text) => {
                             warn!("Recieved text from server: {text:?}");
                         }
-                        tungstenite::Message::Binary(data) => {
+                        Message::Binary(data) => {
                             if let Ok(message) = from_compressed_bin(&data) {
                                 total += 1;
                                 match message.inner() {
@@ -759,8 +830,7 @@ pub async fn run(
                                         // copied from loop below.
                                         info!("Pier {} joined the network.", hello.uuid());
                                         let msg = manager.apply_hello(hello);
-                                        if write.send(to_compressed_bin(&msg).into()).await.is_err()
-                                        {
+                                        if platform.send(&msg).await.is_err() {
                                             return Err(Box::new(ApplicationError::StreamBroken));
                                         }
                                     }
@@ -783,7 +853,6 @@ pub async fn run(
                                 }
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -799,34 +868,31 @@ pub async fn run(
         }
     }
 
-    let write = Arc::new(Mutex::new(write));
-    let read = Arc::new(Mutex::new(read));
     let manager = Arc::new(Mutex::new(manager));
 
     let accept_handle = {
         let mgr = Arc::clone(&manager);
-        let write = Arc::clone(&write);
-        let read = Arc::clone(&read);
+        let platform = platform.clone();
         let options = Arc::clone(&options);
         let changed = Arc::clone(&changed);
 
         // event handler
-        tokio::spawn(async move {
-            let mut read = read.lock().await;
+        P::Rt::spawn(async move {
+            let mut read = platform.receiver().lock().await;
 
             while let Some(message) = read.next().await {
                 let message = match message {
                     Ok(m) => m,
-                    Err(err) => {
-                        error!("Got error from WebSocket: {err}");
+                    Err(()) => {
+                        error!("Got error from communications channel.");
                         continue;
                     }
                 };
                 match message {
-                    tungstenite::Message::Text(text) => {
+                    Message::Text(text) => {
                         warn!("Recieved text from server: {text:?}");
                     }
-                    tungstenite::Message::Binary(data) => {
+                    Message::Binary(data) => {
                         let message = from_compressed_bin(&data);
                         let message = if let Ok(m) = message {
                             m
@@ -838,14 +904,8 @@ pub async fn run(
                             continue;
                         };
 
-                        handle_message(message, &mgr, &options, &write, &changed).await?;
+                        handle_message(message, &mgr, &options, &platform, &changed).await?;
                     }
-                    tungstenite::Message::Close(_) => {
-                        return Err(ApplicationError::UnexpectedServerClose);
-                    }
-                    // ping/pong frames
-                    // raw frame isn't possible when receiving, see https://docs.rs/tungstenite/0.17.2/tungstenite/enum.Message.html#variant.Frame
-                    _ => {}
                 }
             }
             Err(ApplicationError::UnexpectedServerClose)
@@ -856,16 +916,16 @@ pub async fn run(
 
     // `TODO`: move this out of the run function, so people can pass the `cursors` to
     // `commit_and_send`.
-    let local_watcher: tokio::task::JoinHandle<Result<(), ApplicationError>> = {
+    let local_watcher = {
         let options = Arc::clone(&options);
         let manager = Arc::clone(&manager);
-        let write = Arc::clone(&write);
+        let platform = platform.clone();
         let changed = Arc::clone(&changed);
-        tokio::spawn(async move {
+        P::Rt::spawn(async move {
             loop {
-                tokio::time::sleep(options.sync_interval).await;
+                P::Rt::sleep(options.sync_interval()).await;
                 // `TODO`: cursors, see above
-                commit_and_send(&manager, &options, &write, &changed, &mut []).await?;
+                commit_and_send(&manager, &options, &platform, &changed, &mut []).await?;
             }
         })
     };
@@ -879,16 +939,16 @@ pub async fn run(
         {
             drop(mgr);
             let manager = Arc::clone(&manager);
-            let write2 = Arc::clone(&write);
+            let platform2 = platform.clone();
             let pier = if let agde::Recipient::Selected(pier) = msg.recipient() {
                 pier.uuid()
             } else {
                 unreachable!("A fast forward message has to have a recipient")
             };
-            tokio::spawn(async move {
+            P::Rt::spawn(async move {
                 let mut pier = pier;
                 loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    P::Rt::sleep(Duration::from_secs(5)).await;
                     let mut manager = manager.lock().await;
 
                     // we're still fast forwarding
@@ -911,7 +971,7 @@ pub async fn run(
                                     unreachable!("A fast forward message has to have a recipient")
                                 };
 
-                                if let Err(err) = send(&write2, &ff).await {
+                                if let Err(err) = platform2.send(&ff).await {
                                     error!("Error when trying to fast forward to other piers after one failed: {err:?}");
                                 };
                                 continue;
@@ -921,29 +981,29 @@ pub async fn run(
                     break;
                 }
             });
-            send(&write, &msg).await?;
+            platform.send(&msg).await?;
         } else {
             drop(mgr);
             // cursors: we hopefully aren't reading this currently
-            commit_and_send(&manager, &options, &write, &changed, &mut []).await?;
+            commit_and_send(&manager, &options, &platform, &changed, &mut []).await?;
         }
     }
     info!("Began fast forwarding.");
 
-    let periodic_handle = {
+    let mut periodic_handle = {
         let options = Arc::clone(&options);
         let mgr = Arc::clone(&manager);
-        let write = Arc::clone(&write);
+        let platform = platform.clone();
 
-        tokio::spawn(async move {
-            periodic::start(&options, &mgr, &write).await;
+        P::Rt::spawn(async move {
+            periodic::start(&options, &mgr, &platform).await;
         })
     };
 
     let (oneshot_sender, oneshot_receiver) = futures::channel::oneshot::channel();
 
-    tokio::spawn(async move {
-        let (result, other) = futures::future::select(accept_handle, local_watcher)
+    P::Rt::spawn(async move {
+        let (result, mut other) = futures::future::select(accept_handle, local_watcher)
             .await
             .into_inner();
 
@@ -958,19 +1018,18 @@ pub async fn run(
         inner: StateHandle {
             manager,
             options,
-            write,
-            read,
+            platform,
             changed,
         },
         waiter: oneshot_receiver,
     })
 }
 
-async fn handle_message(
+async fn handle_message<P: Platform>(
     message: agde::Message,
     mgr: &Arc<Mutex<Manager>>,
-    options: &Options,
-    write: &Arc<Mutex<WriteHalf>>,
+    options: &Options<P>,
+    platform: &PlatformExt<P>,
     changed: &Mutex<HashSet<String>>,
 ) -> Result<(), ApplicationError> {
     let mut manager = mgr.lock().await;
@@ -989,7 +1048,7 @@ async fn handle_message(
             info!("Pier {} joined the network.", hello.uuid());
             let msg = manager.apply_hello(&hello);
             drop(manager);
-            if send(write, &msg).await.is_err() {
+            if platform.send(&msg).await.is_err() {
                 return Err(ApplicationError::StreamBroken);
             }
         }
@@ -1041,7 +1100,7 @@ async fn handle_message(
                                         )
                                         .await?;
                                 } else {
-                                    periodic::event_log_check(mgr, write).await;
+                                    periodic::event_log_check(mgr, platform).await;
                                     warn!(
                                         "Got Modify event, but resource doesn't exist. \
                                         Reconnecting might help, but this could be an \
@@ -1070,7 +1129,7 @@ async fn handle_message(
                 Err(err) => match err {
                     agde::log::Error::EventInFuture => {
                         warn!("Pier {sender} send an event from the future. Running a log check.");
-                        periodic::event_log_check(mgr, write).await;
+                        periodic::event_log_check(mgr, platform).await;
                     }
                     // if in ff, then do nothing.
                     agde::log::Error::FastForwardInProgress => {}
@@ -1082,7 +1141,7 @@ async fn handle_message(
             let meta = options.metadata().lock().await;
             let msg = manager.process_fast_forward_response(meta.clone(), sender);
             drop(manager);
-            send(write, &msg).await?;
+            platform.send(&msg).await?;
         }
         agde::MessageKind::FastForwardReply(ff) => {
             let changes = {
@@ -1119,7 +1178,7 @@ async fn handle_message(
             info!("We sent a sync request after fast forwarding.");
             let msg = manager.process_sync(sync_request, Some(changes));
             drop(manager);
-            send(write, &msg).await?;
+            platform.send(&msg).await?;
         }
         agde::MessageKind::Sync(sync) => {
             let mut builder = manager.apply_sync(&sync, sender);
@@ -1155,15 +1214,15 @@ async fn handle_message(
             let msg = manager.process_sync_reply(response);
             drop(manager);
             info!("We sent a sync response to {sender}.");
-            send(write, &msg).await?;
+            platform.send(&msg).await?;
         }
         agde::MessageKind::SyncReply(sync) => {
             info!("We received sync response from {sender}.");
-            handle_sync_reply(manager, options, write, sync, sender).await?;
+            handle_sync_reply(manager, options, platform, sync, sender).await?;
             // cursors: we hopefully aren't reading this currently.
             //  if we are, then this probably contains many Unknown segments.
             //  The user also shouldn't edit a resource at the same time as it gets synced.
-            commit_and_send(mgr, options, write, changed, &mut []).await?;
+            commit_and_send(mgr, options, platform, changed, &mut []).await?;
         }
         agde::MessageKind::HashCheck(hc) => {
             info!("Got hash check request from {sender}.");
@@ -1202,7 +1261,7 @@ async fn handle_message(
             let response = builder.finish();
             let msg = manager.process_hash_check_reply(response);
             drop(manager);
-            send(write, &msg).await?;
+            platform.send(&msg).await?;
         }
         agde::MessageKind::HashCheckReply(hc) => {
             if manager.is_fast_forwarding() {
@@ -1310,7 +1369,7 @@ async fn handle_message(
                 let msg = manager.process_sync(sync.finish(), None);
                 info!("The hash check doesn't match. Send sync message.");
                 drop(manager);
-                send(write, &msg).await?;
+                platform.send(&msg).await?;
             }
         }
         agde::MessageKind::LogCheck {
@@ -1322,10 +1381,10 @@ async fn handle_message(
                 agde::LogCheckAction::Send(ec) => {
                     let msg = manager.process_event_log_check_reply(ec, conversation_uuid);
                     drop(manager);
-                    send(write, &msg).await?;
+                    platform.send(&msg).await?;
                     periodic::assure_event_log_check(
                         Arc::clone(mgr),
-                        Arc::clone(write),
+                        platform.clone(),
                         conversation_uuid,
                     )
                     .await;
@@ -1347,7 +1406,7 @@ async fn handle_message(
                     .process_hash_check(pier)
                     .expect("BUG: Internal agde state error when accepting cancel event.");
                 drop(manager);
-                send(write, &msg).await?;
+                platform.send(&msg).await?;
             }
             agde::CancelAction::FastForward => {
                 // UNWRAP: see the docs of `apply_cancelled`.
@@ -1356,7 +1415,7 @@ async fn handle_message(
                     .expect("BUG: Internal agde state error when accepting cancel event.");
                 drop(manager);
                 if let Some(msg) = msg {
-                    send(write, &msg).await?;
+                    platform.send(&msg).await?;
                 }
             }
         },
@@ -1368,10 +1427,10 @@ async fn handle_message(
     Ok(())
 }
 /// Just returns `Ok(())` if the manager is fast forwarding.
-async fn commit_and_send(
+async fn commit_and_send<P: Platform>(
     manager: &Mutex<Manager>,
-    options: &Options,
-    write: &Mutex<WriteHalf>,
+    options: &Options<P>,
+    platform: &PlatformExt<P>,
     changed: &Mutex<HashSet<String>>,
     cursors: &mut [Cursor<'_>],
 ) -> Result<(), ApplicationError> {
@@ -1600,7 +1659,7 @@ async fn commit_and_send(
     };
     // Execute `apply` and `send` at the same time!
     let send = async {
-        let mut write = write.lock().await;
+        let mut write = platform.sender().lock().await;
         for message in &messages {
             let message = to_compressed_bin(message);
 
@@ -1700,10 +1759,10 @@ async fn rewind_current(
     r
 }
 
-async fn handle_sync_reply(
+async fn handle_sync_reply<P: Platform>(
     mut manager: MutexGuard<'_, Manager>,
-    options: &Options,
-    write: &Mutex<WriteHalf>,
+    options: &Options<P>,
+    platform: &PlatformExt<P>,
     mut sync: agde::sync::Response,
     sender: agde::Uuid,
 ) -> Result<(), ApplicationError> {
@@ -1805,7 +1864,7 @@ async fn handle_sync_reply(
                     trying fast forward again after pier failed us",
                 ) {
                     drop(manager);
-                    send(write, &ff).await?;
+                    platform.send(&ff).await?;
                 }
                 return Ok(());
             }
@@ -1944,15 +2003,6 @@ fn to_compressed_bin(message: &agde::Message) -> Vec<u8> {
 
     compressor.into_inner().expect("failed to write to a vec");
     buffer
-}
-async fn send(stream: &Mutex<WriteHalf>, message: &agde::Message) -> Result<(), ApplicationError> {
-    let buffer = to_compressed_bin(message);
-    stream
-        .lock()
-        .await
-        .send(buffer.into())
-        .await
-        .map_err(|_| ApplicationError::UnexpectedServerClose)
 }
 /// Sanitizes `ev`, treating it as a file system resource.
 /// Returns `true` if allowed.

@@ -8,7 +8,11 @@ fn one_in(denominator: f64, rng: &mut impl rand::Rng) -> bool {
     random *= denominator;
     random < 1.0
 }
-pub async fn start(options: &Options, mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
+pub async fn start<P: Platform>(
+    options: &Options<P>,
+    mgr: &Arc<Mutex<Manager>>,
+    platform: &PlatformExt<P>,
+) {
     // start at 1 so no matches below don't trigger at the first iteration
     let mut i: u64 = 1;
     loop {
@@ -18,18 +22,18 @@ pub async fn start(options: &Options, mgr: &Arc<Mutex<Manager>>, write: &Arc<Mut
         }
         // event log
         if i % 10 == 0 {
-            event_log_check(mgr, write).await;
+            event_log_check(mgr, platform).await;
         }
         // hash check
         if i % 30 == 0 {
-            hash_check(mgr, write).await;
+            hash_check(mgr, platform).await;
         }
 
-        tokio::time::sleep(options.periodic_interval).await;
+        P::Rt::sleep(options.periodic_interval).await;
         i += 1;
     }
 }
-async fn flush(options: &Options, clear: bool) {
+async fn flush<P: Platform>(options: &Options<P>, clear: bool) {
     let r = if clear {
         options.flush_out().await
     } else {
@@ -39,7 +43,7 @@ async fn flush(options: &Options, clear: bool) {
         error!("Error while flushing data: {err:?}");
     };
 }
-pub async fn event_log_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
+pub async fn event_log_check(mgr: &Arc<Mutex<Manager>>, platform: &PlatformExt<impl Platform>) {
     let mut manager = mgr.lock().await;
     manager.clean_log_checks();
 
@@ -51,23 +55,22 @@ pub async fn event_log_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteH
         let msg = manager.process_event_log_check(count);
         drop(manager);
         if let Some((msg, conversation_uuid)) = msg {
-            if let Err(err) = send(write, &msg).await {
+            if let Err(err) = platform.send(&msg).await {
                 error!("Error when trying to send event log check message: {err:?}");
             } else {
                 let mgr = Arc::clone(mgr);
-                let write = Arc::clone(write);
-                assure_event_log_check(mgr, write, conversation_uuid).await;
+                assure_event_log_check(mgr, platform.clone(), conversation_uuid).await;
             }
         }
     }
 }
-pub async fn assure_event_log_check(
+pub async fn assure_event_log_check<P: Platform>(
     mgr: Arc<Mutex<Manager>>,
-    write: Arc<Mutex<WriteHalf>>,
+    platform: PlatformExt<P>,
     conversation_uuid: agde::Uuid,
 ) {
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(8)).await;
+    P::Rt::spawn(async move {
+        P::Rt::sleep(Duration::from_secs(8)).await;
         let mut manager = mgr.lock().await;
         if let Some(pier) = manager.assure_log_check(conversation_uuid) {
             let hc = manager.process_hash_check(pier).expect(
@@ -75,19 +78,19 @@ pub async fn assure_event_log_check(
             hash check after a event log check while fast forwarding.",
             );
             drop(manager);
-            if let Err(err) = send(&write, &hc).await {
+            if let Err(err) = platform.send(&hc).await {
                 error!("Error when trying to send hash check message: {err:?}");
             } else {
                 // check that the pier responded.
-                tokio::spawn(async move {
+                P::Rt::spawn(async move {
                     let pier = pier.uuid();
-                    watch_hash_check(pier, &mgr, &write).await;
+                    watch_hash_check(pier, &mgr, &platform).await;
                 });
             }
         }
     });
 }
-async fn hash_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
+async fn hash_check<P: Platform>(mgr: &Arc<Mutex<Manager>>, platform: &PlatformExt<P>) {
     let mut manager = mgr.lock().await;
     let other_persistent = manager
         .filter_piers(|_, capabilities| capabilities.persistent())
@@ -104,23 +107,27 @@ async fn hash_check(mgr: &Arc<Mutex<Manager>>, write: &Arc<Mutex<WriteHalf>>) {
                 .process_hash_check(pier)
                 .expect("BUG: Internal agde state error when trying to send a hash check");
             drop(manager);
-            if let Err(err) = send(write, &msg).await {
+            if let Err(err) = platform.send(&msg).await {
                 error!("Error when trying to send hash check message: {err:?}");
             } else {
                 let mgr = Arc::clone(mgr);
-                let write = Arc::clone(write);
+                let platform = platform.clone();
                 // check that the pier responded.
-                tokio::spawn(async move {
+                P::Rt::spawn(async move {
                     let pier = pier.uuid();
-                    watch_hash_check(pier, &mgr, &write).await;
+                    watch_hash_check(pier, &mgr, &platform).await;
                 });
             }
         }
     }
 }
-async fn watch_hash_check(mut pier: agde::Uuid, mgr: &Mutex<Manager>, write: &Mutex<WriteHalf>) {
+async fn watch_hash_check<P: Platform>(
+    mut pier: agde::Uuid,
+    mgr: &Mutex<Manager>,
+    platform: &PlatformExt<P>,
+) {
     loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        P::Rt::sleep(Duration::from_secs(30)).await;
         let mut manager = mgr.lock().await;
 
         // we're still hash checking with the same pier
@@ -137,7 +144,7 @@ async fn watch_hash_check(mut pier: agde::Uuid, mgr: &Mutex<Manager>, write: &Mu
 
                 pier = hc_pier.uuid();
 
-                if let Err(err) = send(write, &hc).await {
+                if let Err(err) = platform.send(&hc).await {
                     error!(
                         "Error when trying to fast forward to \
                         other piers after one failed: {err:?}"

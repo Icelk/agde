@@ -12,7 +12,108 @@ use crate::*;
 
 // OK to have lazy_static here since our native implementation only has one agde instance running.
 lazy_static::lazy_static! {
-    static ref STATE: std::sync::Mutex<Option<StateHandle>> = std::sync::Mutex::new(None);
+    static ref STATE: std::sync::Mutex<Option<StateHandle<Native>>> = std::sync::Mutex::new(None);
+}
+
+pub struct TokioRuntime;
+pub type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[derive(Debug)]
+pub struct WriteHalf(futures::stream::SplitSink<WsStream, tungstenite::Message>);
+#[derive(Debug)]
+pub struct ReadHalf(futures::stream::SplitStream<WsStream>);
+impl Sink<Message> for WriteHalf {
+    type Error = <WsStream as Sink<tungstenite::Message>>::Error;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.0.poll_ready_unpin(cx)
+    }
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        let item = match item {
+            Message::Text(msg) => tungstenite::Message::Text(msg),
+            Message::Binary(msg) => tungstenite::Message::Binary(msg),
+        };
+        self.0.start_send_unpin(item)
+    }
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.0.poll_flush_unpin(cx)
+    }
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.0.poll_close_unpin(cx)
+    }
+}
+impl Stream for ReadHalf {
+    type Item = Result<Message, ()>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let item = self.0.poll_next_unpin(cx);
+        match item {
+            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(match msg {
+                tungstenite::Message::Text(t) => Message::Text(t),
+                tungstenite::Message::Binary(b) => Message::Binary(b),
+                // ignore others
+                _ => return Poll::Pending,
+            }))),
+            Poll::Ready(Some(Err(_))) => Poll::Ready(Some(Err(()))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Native(Arc<Mutex<WriteHalf>>, Arc<Mutex<ReadHalf>>);
+pub struct TokioTaskHandle<T>(tokio::task::JoinHandle<T>);
+impl<T> Future for TokioTaskHandle<T> {
+    type Output = Result<T, JoinError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0.poll_unpin(cx).map_err(|_| JoinError)
+    }
+}
+impl<T: Send> TaskHandle<T> for TokioTaskHandle<T> {
+    fn abort(&mut self) {
+        tokio::task::JoinHandle::abort(&self.0);
+    }
+}
+impl Runtime for TokioRuntime {
+    type Sleep = tokio::time::Sleep;
+
+    fn spawn<T: Send + 'static, F: Future<Output = T> + Send + 'static>(
+        future: F,
+    ) -> Box<dyn TaskHandle<T>> {
+        Box::new(TokioTaskHandle(tokio::spawn(future)))
+    }
+
+    fn sleep(duration: Duration) -> Self::Sleep {
+        tokio::time::sleep(duration)
+    }
+}
+impl Sender for WriteHalf {}
+impl Receiver for ReadHalf {}
+impl Platform for Native {
+    type Sender = WriteHalf;
+    type Receiver = ReadHalf;
+    type Rt = TokioRuntime;
+
+    fn sender(&self) -> &Mutex<Self::Sender> {
+        &self.0
+    }
+
+    fn receiver(&self) -> &Mutex<Self::Receiver> {
+        &self.1
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -160,13 +261,13 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
     Ok(Metadata::new(map))
 }
 
-async fn flush(
+async fn flush<P: Platform>(
     manager: &mut Manager,
-    options: &Options,
-    write: &Mutex<WriteHalf>,
+    options: &Options<P>,
+    platform: &PlatformExt<P>,
 ) -> Result<(), ApplicationError> {
     // ignore error on send if the connection is closed.
-    let _ = send(write, &manager.process_disconnect()).await;
+    let _ = platform.send(&manager.process_disconnect()).await;
 
     let state = options.read_clean().await?;
     if state.map_or(false, |state| &**state != b"y") && !options.public_storage_disabled() {
@@ -238,16 +339,16 @@ async fn flush(
 }
 
 #[allow(clippy::await_holding_lock)]
-pub async fn catch_ctrlc(handle: StateHandle) {
+pub async fn catch_ctrlc(handle: StateHandle<Native>) {
     let manager = Arc::clone(&handle.manager);
     let options = Arc::clone(&handle.options);
-    let write = Arc::clone(&handle.write);
+    let platform = handle.platform.clone();
 
     let handler = ctrlc::set_handler(move || {
         info!("Caught ctrlc");
         let manager = Arc::clone(&manager);
         let options = Arc::clone(&options);
-        let write = Arc::clone(&write);
+        let platform = platform.clone();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(1)
@@ -255,7 +356,7 @@ pub async fn catch_ctrlc(handle: StateHandle) {
             .expect("failed to start tokio when handling ctrlc");
         let returned = runtime.block_on(async move {
             let mut manager = manager.lock().await;
-            flush(&mut manager, &options, &write).await
+            flush(&mut manager, &options, &platform).await
         });
 
         if let Err(err) = returned {
@@ -272,7 +373,7 @@ pub async fn catch_ctrlc(handle: StateHandle) {
             if let Some(lock) = lock.as_mut() {
                 {
                     let mut manager = lock.manager.lock().await;
-                    if let Err(err) = flush(&mut manager, &lock.options, &lock.write).await {
+                    if let Err(err) = flush(&mut manager, &lock.options, &lock.platform).await {
                         error!("Error when trying to flush previous manager: {err:?}");
                     }
                 }
@@ -291,7 +392,10 @@ pub async fn catch_ctrlc(handle: StateHandle) {
     }
 }
 
-pub async fn options_fs(force_pull: bool, compression: Compression) -> Result<Options, io::Error> {
+pub async fn options_fs(
+    force_pull: bool,
+    compression: Compression,
+) -> Result<Options<Native>, io::Error> {
     let read = |resource, storage| {
         Box::pin(async move {
             let path = match storage {
@@ -628,11 +732,15 @@ pub async fn watch_changes<CommitFut: Future<Output = ()> + Send>(
     watcher
 }
 
-pub async fn connect_ws(url: &str) -> Result<(WriteHalf, ReadHalf), DynError> {
+pub async fn connect_ws(url: &str) -> Result<Native, ApplicationError> {
     info!("Connecting to {url:?}.");
     let result = tokio_tungstenite::connect_async(url).await;
-    let conenction = result?;
-    Ok(conenction.0.split())
+    let conenction = result.map_err(|err| ApplicationError::ConnectionFailed(err.to_string()))?;
+    let (w, r) = conenction.0.split();
+    Ok(Native(
+        Arc::new(Mutex::new(WriteHalf(w))),
+        Arc::new(Mutex::new(ReadHalf(r))),
+    ))
 }
 async fn initial_metadata<
     F: Future<Output = Result<Metadata, io::Error>>,
