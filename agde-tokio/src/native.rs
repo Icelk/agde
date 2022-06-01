@@ -374,7 +374,7 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
                 {
                     let mut manager = lock.manager.lock().await;
                     if let Err(err) = flush(&mut manager, &lock.options, &lock.platform).await {
-                        error!("Error when trying to flush previous manager: {err:?}");
+                        error!("Error when trying to flush previous manager: {err:?}");
                     }
                 }
                 *lock = handle;

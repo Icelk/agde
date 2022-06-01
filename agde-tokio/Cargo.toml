@@ -14,23 +14,18 @@ license = "LGPL-3.0-or-later"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[[bin]]
-name = "agde-tokio"
-path = "src/bin/main.rs"
-
 [dependencies]
 agde = { path = "../agde" }
+agde-io = { path = "../agde-io" }
 
 bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
 clap = { version = "3.1", features = ["cargo"] }
 ctrlc = { version = "3.2", features = ["termination"] }
 env_logger = { version = "0.9", default-features = false, features = ["termcolor", "atty", "humantime"] }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
-lazy_static = "1.4.0"
+lazy_static = "1.4"
 log = "0.4"
 notify = "5.0.0-pre.15"
-rand = "0.8"
-serde = { version = "^1", features = ["derive"] }
 snap = "1.0.5"
 tokio = { version = "=1.17", features = ["macros", "rt-multi-thread", "parking_lot", "time", "sync", "fs"] }
 tokio-tungstenite = { version = "0.17", features = ["rustls-tls-webpki-roots"] }

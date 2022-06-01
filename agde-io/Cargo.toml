@@ -1,0 +1,25 @@
+[package]
+name = "agde-io"
+version = "0.1.0" # Also update `crate::VERSION`.
+authors = ["Icelk <main@icelk.dev>"]
+edition = "2021"
+rust-version = "1.56"
+description = "Client and server for generic data syncronization - IO abstraction."
+readme = "README.md"
+homepage = "https://agde.dev/"
+repository = "https://github.com/Icelk/agde/"
+license = "LGPL-3.0-or-later"
+# keywords = ["sync", "rsync", "live-share", "binary sync"]
+# categories = ["algorithms"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+agde = { path = "../agde" }
+
+bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+log = "0.4"
+rand = "0.8"
+serde = { version = "^1", features = ["derive"] }
+snap = "1.0.5"
