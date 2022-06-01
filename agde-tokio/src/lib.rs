@@ -3,12 +3,23 @@
 //! Already keeping this separate from the `agde-tokio` lib to make it easier to adapt this to the
 //! web.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::task::Poll;
+use std::collections::HashMap;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
 
+use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
+use agde::Manager;
+use futures::lock::Mutex;
+use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use log::{debug, error, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite;
 
-use crate::*;
+use agde_io::*;
 
 // OK to have lazy_static here since our native implementation only has one agde instance running.
 lazy_static::lazy_static! {
@@ -25,10 +36,7 @@ pub struct ReadHalf(futures::stream::SplitStream<WsStream>);
 impl Sink<Message> for WriteHalf {
     type Error = <WsStream as Sink<tungstenite::Message>>::Error;
 
-    fn poll_ready(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.0.poll_ready_unpin(cx)
     }
     fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
@@ -38,26 +46,17 @@ impl Sink<Message> for WriteHalf {
         };
         self.0.start_send_unpin(item)
     }
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.0.poll_flush_unpin(cx)
     }
-    fn poll_close(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.0.poll_close_unpin(cx)
     }
 }
 impl Stream for ReadHalf {
     type Item = Result<Message, ()>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let item = self.0.poll_next_unpin(cx);
         match item {
             Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(match msg {
@@ -137,9 +136,9 @@ struct AsyncReadBlocking<R: Read + Unpin>(R);
 impl<R: Read + Unpin> AsyncRead for AsyncReadBlocking<R> {
     fn poll_read(
         self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
+        _cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
+    ) -> Poll<io::Result<()>> {
         let mut filled = buf.filled().len();
         unsafe { buf.assume_init(buf.capacity()) };
         let unfilled = &mut buf.filled_mut()[filled..];
@@ -156,21 +155,15 @@ struct AsyncWriteBlocking<R: Write + Unpin>(R);
 impl<R: Write + Unpin> AsyncWrite for AsyncWriteBlocking<R> {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
+        _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
         Poll::Ready(self.get_mut().0.write(buf))
     }
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         Poll::Ready(self.get_mut().0.flush())
     }
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         Poll::Ready(self.get_mut().0.flush())
     }
 }
@@ -182,7 +175,7 @@ struct AsyncReadBuf<R: AsyncRead + Unpin> {
 impl<R: AsyncRead + Unpin> AsyncRead for AsyncReadBuf<R> {
     fn poll_read(
         self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
@@ -299,7 +292,7 @@ async fn flush<P: Platform>(
 
                             // cursors: we're catching ctrlc, so this isn't our highest
                             // priority
-                            current = if let Some(current) = rewind_current(
+                            current = if let Some(current) = agde_io::rewind_current(
                                 &mut *manager,
                                 created,
                                 &resource,
@@ -374,7 +367,7 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
                 {
                     let mut manager = lock.manager.lock().await;
                     if let Err(err) = flush(&mut manager, &lock.options, &lock.platform).await {
-                        error!("Error when trying to flush previous manager: {err:?}");
+                        error!("Error when trying to flush previous manager: {err:?}");
                     }
                 }
                 *lock = handle;

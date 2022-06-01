@@ -3,22 +3,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::identity;
 use std::error::Error;
 use std::fmt::{self, Display};
-use std::io;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Context;
 use std::time::{Duration, SystemTime};
 
-use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
+use agde::fast_forward::{Metadata, MetadataChange};
 use agde::Manager;
 use futures::lock::{Mutex, MutexGuard};
-use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use futures::{Future, Sink, SinkExt, Stream, StreamExt};
 use log::{debug, error, info, warn};
-use tokio_tungstenite::tungstenite;
 
-pub mod native;
 pub mod periodic;
 
 pub enum Message {
@@ -1682,7 +1678,7 @@ async fn commit_and_send<P: Platform>(
     Ok(())
 }
 /// Continue if this return [`None`] - then the resource is destroyed.
-async fn rewind_current(
+pub async fn rewind_current(
     manager: &mut Manager,
     created: bool,
     resource: &str,

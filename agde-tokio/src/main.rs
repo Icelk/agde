@@ -1,5 +1,4 @@
 use agde::Manager;
-use agde_tokio::native::Compression;
 use clap::{command, Arg, Command};
 use log::error;
 use notify::Watcher;
@@ -7,8 +6,7 @@ use std::process;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-
-use agde_tokio::*;
+use agde_tokio::Compression;
 
 fn validate<T: FromStr>(validate: impl Fn(T) -> bool) -> impl Fn(&str) -> Result<(), String> {
     move |v| {
@@ -118,7 +116,7 @@ async fn main() {
     let server = matches.is_present("server");
 
     loop {
-        let options = native::options_fs(force, compress)
+        let options = agde_tokio::options_fs(force, compress)
             .await
             .expect("failed to read file system metadata");
         let mut options = options
@@ -136,10 +134,10 @@ async fn main() {
 
         let manager = Manager::new(server, 0, log_lifetime, 512);
 
-        match run(manager, options, || native::connect_ws(url)).await {
+        match agde_io::run(manager, options, || agde_tokio::connect_ws(url)).await {
             Ok(handle) => {
                 let watch_handle = Arc::new(handle.state().clone());
-                let mut watcher = native::watch_changes(move || {
+                let mut watcher = agde_tokio::watch_changes(move || {
                     let handle = Arc::clone(&watch_handle);
                     async move {
                         if let Err(err) = handle.commit_and_send(&mut []).await {
@@ -155,7 +153,7 @@ async fn main() {
                     error!("Failed to start listening. Falling back to commit interval.");
                 }
 
-                native::catch_ctrlc(handle.state().clone()).await;
+                agde_tokio::catch_ctrlc(handle.state().clone()).await;
 
                 let r = handle.wait().await;
 
