@@ -198,16 +198,20 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncReadBuf<R> {
     }
 }
 
+fn path_from_storage(storage: Storage, resource: &str) -> String {
+    match storage {
+        Storage::Public => format!(".agde/files/{resource}"),
+        Storage::Current => resource.to_owned(),
+        Storage::Meta => format!(".agde/{resource}"),
+    }
+}
+
 async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
     let map: Result<HashMap<String, ResourceMeta>, io::Error> =
         tokio::task::spawn_blocking(move || {
             let mut map = HashMap::new();
 
-            let path = match storage {
-                Storage::Public => ".agde/files/",
-                Storage::Meta => ".agde/",
-                Storage::Current => "./",
-            };
+            let path = path_from_storage(storage, "");
 
             for entry in walkdir::WalkDir::new(path)
                 .follow_links(false)
@@ -389,13 +393,9 @@ pub async fn options_fs(
     force_pull: bool,
     compression: Compression,
 ) -> Result<Options<Native>, io::Error> {
-    let read = |resource, storage| {
+    let read = |resource: String, storage| {
         Box::pin(async move {
-            let path = match storage {
-                Storage::Public => format!(".agde/files/{resource}",),
-                Storage::Current => format!("./{resource}"),
-                Storage::Meta => format!(".agde/{resource}"),
-            };
+            let path = path_from_storage(storage, &resource);
             tokio::task::spawn_blocking(move || {
                 let mut file = match std::fs::File::open(&path) {
                     Ok(f) => BufReader::new(f),
@@ -454,7 +454,6 @@ pub async fn options_fs(
                         }
                     }
                 } else {
-                    println!("Dont");
                     let mut buf = Vec::with_capacity(1024);
                     file.read_to_end(&mut buf).map_err(|_| ())?;
                     buf
@@ -496,15 +495,11 @@ pub async fn options_fs(
     let diff_metadata = Arc::clone(&metadata);
     let diff_offline_metadata = Arc::clone(&offline_metadata);
 
-    let write = move |resource: String, storage, data: Arc<Vec<u8>>| {
+    let write = move |resource: String, storage: WriteStorage, data: Arc<Vec<u8>>| {
         let metadata = Arc::clone(&write_metadata);
         let offline_metadata = Arc::clone(&write_offline_metadata);
         Box::pin(async move {
-            let path = match storage {
-                WriteStorage::Public(_, _) => format!(".agde/files/{resource}",),
-                WriteStorage::Current(_) => format!("./{resource}"),
-                WriteStorage::Meta => format!(".agde/{resource}"),
-            };
+            let path = path_from_storage(storage.to_storage(), &resource);
 
             if let Some(path) = Path::new(&path).parent() {
                 tokio::fs::create_dir_all(path).await.map_err(|_| ())?;
@@ -548,68 +543,22 @@ pub async fn options_fs(
             .await
             .unwrap()?;
 
-            match storage {
-                // meta storage obviously doesn't affect the files' metadata.
-                WriteStorage::Meta => {}
-                WriteStorage::Public(write_mtime, mut event_mtime) => {
-                    let mut metadata = metadata.lock().await;
-
-                    let mut mtime = match write_mtime {
-                        WriteMtime::No => None,
-                        WriteMtime::LookUpCurrent => {
-                            if let Ok(metadata) = tokio::fs::metadata(format!("./{resource}")).await
-                            {
-                                let mtime = metadata.modified().map_err(|_| ())?;
-                                Some(mtime)
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    if let Some(meta) = metadata.get(&resource) {
-                        if meta.mtime_of_last_event() != SystemTime::UNIX_EPOCH {
-                            event_mtime = meta.mtime_of_last_event();
-                        }
-                    }
-                    if mtime.is_none() {
-                        let offline_meta = { offline_metadata.lock().await.get(&resource) };
-                        if let Some(meta) = offline_meta {
-                            mtime = meta.mtime_in_current();
-                        }
-                    }
-                    let meta = ResourceMeta::new_from_event(mtime, event_mtime, data_len as u64);
-                    metadata.insert(resource, meta);
-                }
-                WriteStorage::Current(write_mtime) => match write_mtime {
-                    WriteMtime::No => {}
-                    WriteMtime::LookUpCurrent => {
-                        let file_metadata = tokio::fs::metadata(&path).await.map_err(|_| ())?;
-                        let mtime = file_metadata.modified().map_err(|_| ())?;
-                        {
-                            let mut metadata = offline_metadata.lock().await;
-
-                            metadata.insert(
-                                resource.clone(),
-                                ResourceMeta::new(Some(mtime), data_len as u64),
-                            );
-                        }
-                        {
-                            let mut metadata = metadata.lock().await;
-
-                            let mut event_mtime = SystemTime::UNIX_EPOCH;
-                            if let Some(meta) = metadata.get(&resource) {
-                                event_mtime = meta.mtime_of_last_event();
-                            }
-                            let meta = ResourceMeta::new_from_event(
-                                Some(mtime),
-                                event_mtime,
-                                data_len as u64,
-                            );
-                            metadata.insert(resource, meta);
-                        }
-                    }
-                },
-            }
+            storage
+                .update_metadata(
+                    &metadata,
+                    &offline_metadata,
+                    resource,
+                    data_len,
+                    |storage, resource| async move {
+                        let path = path_from_storage(storage, &resource);
+                        tokio::fs::metadata(path).await.ok().and_then(|m| {
+                            m.modified()
+                                .map_err(|_| error!("Failed to get mtime of resource {resource}"))
+                                .ok()
+                        })
+                    },
+                )
+                .await?;
             Ok(())
         }) as WriteFuture
     };
@@ -621,20 +570,11 @@ pub async fn options_fs(
             let metadata = Arc::clone(&delete_metadata);
             let offline_metadata = Arc::clone(&delete_offline_metadata);
             Box::pin(async move {
-                let path = match storage {
-                    Storage::Public => format!(".agde/files/{resource}",),
-                    Storage::Current => format!("./{resource}"),
-                    Storage::Meta => format!(".agde/{resource}"),
-                };
-                if storage == Storage::Current {
-                    let mut metadata = offline_metadata.lock().await;
-                    debug!("Removing {resource} from metadata cache.");
-                    metadata.remove(&resource);
-                }
-                {
-                    let mut metadata = metadata.lock().await;
-                    metadata.remove(&resource);
-                }
+                let path = path_from_storage(storage, &resource);
+                debug!("Removing {resource} in {storage} from metadata cache.");
+                storage
+                    .delete_update_metadata(&metadata, &offline_metadata, &resource)
+                    .await;
                 let file_metadata = match tokio::fs::metadata(&path).await {
                     Ok(d) => d,
                     Err(err) => match err.kind() {
@@ -661,8 +601,7 @@ pub async fn options_fs(
                 let changed = offline_metadata.changes(&current_metadata, true);
                 let mut metadata = metadata.lock().await;
                 metadata.apply_changes(&changed, &current_metadata);
-                // `TODO`: Optimize this
-                *offline_metadata = metadata.clone();
+                offline_metadata.clone_from(&metadata);
                 debug!("Changed: {:?}", changed);
                 Ok(changed)
             }) as DiffFuture

@@ -120,7 +120,9 @@ impl ResourceMeta {
 /// The metadata for all files we're tracking.
 ///
 /// The implementations of agde need to provide methods to create and save this.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+///
+/// You can call [`Clone::clone_from`] for an optimized cloning method.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[must_use]
 pub struct Metadata {
     /// Associate resource to metadata
@@ -132,24 +134,29 @@ impl Metadata {
         Self { map }
     }
     /// Get an iterator over all the resources and their respective metadata.
+    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = (&str, ResourceMeta)> {
         self.map.iter().map(|(k, v)| (&**k, *v))
     }
     /// Get the metadata for `resource`.
     #[must_use]
+    #[inline]
     pub fn get(&self, resource: &str) -> Option<ResourceMeta> {
         self.map.get(resource).copied()
     }
     /// If the metadata contains `resource`.
     #[must_use]
+    #[inline]
     pub fn contains(&self, resource: &str) -> bool {
         self.map.contains_key(resource)
     }
     /// Remove the metadata for `resource`.
+    #[inline]
     pub fn remove(&mut self, resource: &str) {
         self.map.remove(resource);
     }
     /// Insert the `meta` for `resource`.
+    #[inline]
     pub fn insert(&mut self, resource: String, meta: ResourceMeta) {
         self.map.insert(resource, meta);
     }
@@ -243,6 +250,20 @@ impl Metadata {
         }
     }
 }
+impl Clone for Metadata {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            map: self.map.clone(),
+        }
+    }
+    #[inline]
+    fn clone_from(&mut self, source: &Self) {
+        self.map.clear();
+        self.map
+            .extend(source.map.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+}
 
 /// A single change between sets of metadata.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -261,6 +282,7 @@ pub enum MetadataChange {
 impl MetadataChange {
     /// The resource of the change.
     #[must_use]
+    #[inline]
     pub fn resource(&self) -> &str {
         match self {
             Self::Modify(r, _, _) | Self::Delete(r) => r,

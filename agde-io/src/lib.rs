@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use agde::fast_forward::{Metadata, MetadataChange};
+use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
 use agde::Manager;
 use futures::lock::{Mutex, MutexGuard};
 use futures::{Future, Sink, SinkExt, Stream, StreamExt};
@@ -120,6 +120,32 @@ pub enum Storage {
     /// Storage of metadata objects.
     Meta,
 }
+impl Storage {
+    pub async fn delete_update_metadata(
+        self,
+        metadata: &Mutex<Metadata>,
+        offline_metadata: &Mutex<Metadata>,
+        resource: &str,
+    ) {
+        if self == Storage::Current {
+            let mut metadata = offline_metadata.lock().await;
+            metadata.remove(resource);
+        }
+        {
+            let mut metadata = metadata.lock().await;
+            metadata.remove(resource);
+        }
+    }
+}
+impl Display for Storage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Storage::Public => write!(f, "public storage"),
+            Storage::Current => write!(f, "current storage"),
+            Storage::Meta => write!(f, "meta storage"),
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteStorage {
     /// The copy of data which is maintained to be equal to the others' public storages.
@@ -140,12 +166,90 @@ impl WriteStorage {
     pub fn current_without_update() -> Self {
         Self::Current(WriteMtime::No)
     }
-    pub fn to_storage(self) -> Storage {
+    pub fn to_storage(&self) -> Storage {
         match self {
             WriteStorage::Public(_, _) => Storage::Public,
             WriteStorage::Current(_) => Storage::Current,
             WriteStorage::Meta => Storage::Meta,
         }
+    }
+}
+impl WriteStorage {
+    /// Update the `metadata` and `offline_metadata` according to what storage you're writing to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `self` is [`WriteStorage::Current`] with [`WriteMtime::LookUpCurrent`]
+    /// and `mtime` returns [`None`] (the resource doesn't exist).
+    pub async fn update_metadata<MtimeFuture: Future<Output = Option<SystemTime>>>(
+        &self,
+        metadata: &Mutex<Metadata>,
+        offline_metadata: &Mutex<Metadata>,
+        resource: String,
+        data_len: usize,
+        mtime: impl FnOnce(Storage, String) -> MtimeFuture,
+    ) -> Result<(), ()> {
+        match self {
+            // meta storage obviously doesn't affect the files' metadata.
+            WriteStorage::Meta => {}
+            WriteStorage::Public(write_mtime, mut event_mtime) => {
+                let mut metadata = metadata.lock().await;
+
+                let mut mtime = match write_mtime {
+                    WriteMtime::No => None,
+                    WriteMtime::LookUpCurrent => mtime(Storage::Public, resource.clone()).await,
+                };
+                if let Some(meta) = metadata.get(&resource) {
+                    if meta.mtime_of_last_event() != SystemTime::UNIX_EPOCH {
+                        event_mtime = meta.mtime_of_last_event();
+                    }
+                }
+                if mtime.is_none() {
+                    let offline_meta = { offline_metadata.lock().await.get(&resource) };
+                    if let Some(meta) = offline_meta {
+                        mtime = meta.mtime_in_current();
+                    }
+                }
+                let meta = ResourceMeta::new_from_event(mtime, event_mtime, data_len as u64);
+                metadata.insert(resource, meta);
+            }
+            WriteStorage::Current(write_mtime) => match write_mtime {
+                WriteMtime::No => {}
+                WriteMtime::LookUpCurrent => {
+                    let mtime =
+                        if let Some(mtime) = mtime(self.to_storage(), resource.clone()).await {
+                            mtime
+                        } else {
+                            error!(
+                                "Getting mtime for {resource:?} in {:?} \
+                                when we're writing to current and updating metadata modify times.",
+                                self.to_storage()
+                            );
+                            return Err(());
+                        };
+                    {
+                        let mut metadata = offline_metadata.lock().await;
+
+                        metadata.insert(
+                            resource.clone(),
+                            ResourceMeta::new(Some(mtime), data_len as u64),
+                        );
+                    }
+                    {
+                        let mut metadata = metadata.lock().await;
+
+                        let mut event_mtime = SystemTime::UNIX_EPOCH;
+                        if let Some(meta) = metadata.get(&resource) {
+                            event_mtime = meta.mtime_of_last_event();
+                        }
+                        let meta =
+                            ResourceMeta::new_from_event(Some(mtime), event_mtime, data_len as u64);
+                        metadata.insert(resource, meta);
+                    }
+                }
+            },
+        }
+        Ok(())
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
