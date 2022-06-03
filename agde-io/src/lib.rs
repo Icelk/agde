@@ -41,7 +41,7 @@ pub trait Runtime {
     type Sleep: Future<Output = ()> + Send + Sync;
 
     // we use a dyn future as GATs are not stabilized: https://github.com/rust-lang/rust/issues/44265
-    fn spawn<T: Send + 'static, F: Future<Output = T> + Send + 'static>(
+    fn spawn<T: Send + Unpin + 'static, F: Future<Output = T> + Send + 'static>(
         future: F,
     ) -> Box<dyn TaskHandle<T>>;
     fn sleep(duration: Duration) -> Self::Sleep;
