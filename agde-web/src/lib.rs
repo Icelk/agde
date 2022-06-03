@@ -1,3 +1,4 @@
+#![allow(clippy::unused_unit)] // wasm_bindgen
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::io::{self, Read, Write};
@@ -14,12 +15,13 @@ use futures::future::Either;
 use futures::lock::Mutex;
 use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use gloo_net::websocket;
-use js_sys::{Array, Function, Promise, Reflect};
+use js_sys::{Array, Function, Object, Promise, Reflect};
 use log::{debug, error, info, warn};
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
 
 use agde_io::*;
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::JsFuture;
 
 pub struct WebRuntime;
 pub type WsStream = gloo_net::websocket::futures::WebSocket;
@@ -70,8 +72,6 @@ impl Stream for ReadHalf {
             Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(match msg {
                 websocket::Message::Text(t) => Message::Text(t),
                 websocket::Message::Bytes(b) => Message::Binary(b),
-                // ignore others
-                _ => return Poll::Pending,
             }))),
             Poll::Ready(Some(Err(_))) => Poll::Ready(Some(Err(()))),
             Poll::Ready(None) => Poll::Ready(None),
@@ -85,7 +85,7 @@ unsafe impl Sync for Sleep {}
 unsafe impl Send for Sleep {}
 impl Future for Sleep {
     type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.0.poll_unpin(cx)
     }
 }
@@ -94,7 +94,7 @@ impl Future for Sleep {
 pub struct Web(Arc<Mutex<WriteHalf>>, Arc<Mutex<ReadHalf>>);
 pub struct WebTaskHandle<T> {
     resolve: oneshot::Receiver<Option<T>>,
-    abort: oneshot::Sender<()>,
+    abort: Option<oneshot::Sender<()>>,
 }
 impl<T> Future for WebTaskHandle<T> {
     type Output = Result<T, JoinError>;
@@ -107,7 +107,9 @@ impl<T> Future for WebTaskHandle<T> {
 }
 impl<T: Send> TaskHandle<T> for WebTaskHandle<T> {
     fn abort(&mut self) {
-        self.abort.send(()).unwrap()
+        if let Some(abort) = self.abort.take() {
+            abort.send(()).unwrap()
+        }
     }
 }
 impl Runtime for WebRuntime {
@@ -128,8 +130,9 @@ impl Runtime for WebRuntime {
                 }
             }
         };
+        wasm_bindgen_futures::spawn_local(future);
         Box::new(WebTaskHandle {
-            abort: a_tx,
+            abort: Some(a_tx),
             resolve: r_rx,
         })
     }
@@ -159,22 +162,38 @@ impl Platform for Web {
 // new_manager(help_desire: number): Manager (wasm_bindgen)
 
 // resource is public/{resource} for Storage::Public, etc.
+// DB: {
+//      [resource: string]:
+//      {
+//          data: string (BASE64),
+//          compression: string("none"|"snappy"),
+//          mtime: number,
+//          size: number,
+//      }
+//  }
 //
 // async read_callback: (resource): null|{ compression: string, data: string (BASE64) }
 // this should update the mtime (the number of seconds since UNIX_EPOCH)
 // write_callback: (resource, data: string (base64), compression: string)
 // delete_callback: (resource)
 // async get_mtime: (resource): null | number (date)
-// async list_all: (): string[] (Box<[JsValue]>)
+// async list_all: (): { [resource: string]: { size: number } }
 //
 // new_options(read_callback, write_callback, delete_callback, get_mtime, list_all): Options
 // (wasm_bindgen)
 //
 // run(Options, Manager, url: string): null | Handle (error! the result)
 // commit_and_send(Handle)
+// flush(Handle)
 //
 // on run, return handle with commit_and_send() (async, js promise
 // <https://rustwasm.github.io/docs/wasm-bindgen/reference/js-promises-and-rust-futures.html>)
+
+#[wasm_bindgen]
+pub fn init() {
+    wasm_logger::init(wasm_logger::Config::new(log::Level::Info));
+    console_error_panic_hook::set_once();
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Compression {
@@ -200,54 +219,32 @@ impl FromStr for Compression {
     }
 }
 
-async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
-    let map: Result<HashMap<String, ResourceMeta>, io::Error> =
-        tokio::task::spawn_blocking(move || {
-            let mut map = HashMap::new();
+async fn metadata_new<MtimeFuture: Future<Output = Option<SystemTime>>>(
+    storage: Storage,
+    resources: impl Future<Output = Vec<(String, u64)>>,
+    mtime_of: &impl Fn(String, Storage) -> MtimeFuture,
+) -> Result<Metadata, io::Error> {
+    let resources = resources.await;
+    let mut map = HashMap::with_capacity(resources.len() / 2);
 
-            let path = path_from_storage(storage, "");
-
-            for entry in walkdir::WalkDir::new(path)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| {
-                    !(e.path().starts_with(".agde") || e.path().starts_with("./.agde"))
-                })
-                .filter_map(|e| e.ok())
-            {
-                if let Some(path) = entry.path().to_str() {
-                    let metadata = entry.metadata()?;
-                    if !metadata.is_file() {
-                        continue;
-                    }
-                    // > 1GiB
-                    if metadata.len() > 1024 * 1024 * 1024 {
-                        warn!(
-                            "Not tracking file {:?} because it's larger than 1 GiB",
-                            entry.path()
-                        );
-                        continue;
-                    }
-                    let modified = metadata.modified()?;
-
-                    map.insert(
-                        path.to_owned(),
-                        ResourceMeta::new(Some(modified), metadata.len()),
-                    );
-                } else {
-                    error!(
-                        "Directory contains non-UTF8 filename. Skipping {:?}",
-                        entry.path().to_string_lossy()
-                    );
-                }
-            }
-
-            Ok(map)
-        })
-        .await
-        .expect("walkdir thread panicked");
-
-    let map = map?;
+    for (resource, size) in resources {
+        let start_with = match storage {
+            Storage::Public => "public/",
+            Storage::Current => "current/",
+            Storage::Meta => "meta/",
+        };
+        let resource = if let Some(sufix) = resource.strip_prefix(start_with) {
+            sufix.to_owned()
+        } else {
+            continue;
+        };
+        if size > 1024 * 1024 * 1024 {
+            warn!("Not tracking file {resource:?} because it's larger than 1 GiB",);
+            continue;
+        }
+        let mtime = mtime_of(resource.clone(), storage).await;
+        map.insert(resource, ResourceMeta::new(mtime, size));
+    }
 
     Ok(Metadata::new(map))
 }
@@ -350,7 +347,7 @@ impl JsFn {
 struct SendPromise(JsFuture);
 impl Future for SendPromise {
     type Output = Result<JsValueSend, JsValueSend>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.0.poll_unpin(cx).map(|r| match r {
             Ok(v) => Ok(JsValueSend(v)),
             Err(v) => Err(JsValueSend(v)),
@@ -380,9 +377,85 @@ pub async fn options_js_callback(
     let write_callback = Arc::new(Mutex::new(JsFn(write_callback)));
     let write_write_callback = write_callback.clone();
     let get_mtime = Arc::new(Mutex::new(JsFn(get_mtime)));
-    let write_get_mtime = get_mtime.clone();
+    let mtime_get_mtime = get_mtime.clone();
     let delete_callback = Arc::new(Mutex::new(JsFn(delete_callback)));
     let delete_delete_callback = delete_callback.clone();
+    let list_all = Arc::new(Mutex::new(JsFn(list_all)));
+
+    let mtime_of = move |resource: String, storage| {
+        let path = path_from_storage(storage, &resource);
+        let get_mtime = mtime_get_mtime.clone();
+        async move {
+            let promise = {
+                let lock = get_mtime.lock().await;
+                let path = JsValue::from_str(&path);
+                let promise: Promise = lock
+                    .call(&[path])
+                    .expect("failed to get mtime")
+                    .dyn_into()
+                    .expect("get_mtime function didn't return promise");
+                SendPromise(JsFuture::from(promise))
+            };
+            let result = promise.await;
+            let result = result.expect("get_mtime js future threw");
+            if result.0.is_null() {
+                None
+            } else {
+                let seconds = result
+                    .0
+                    .as_f64()
+                    .expect("get_mtime didn't return null or a number");
+                Some(SystemTime::UNIX_EPOCH + Duration::from_secs_f64(seconds))
+            }
+        }
+    };
+    let mtime_of = Arc::new(mtime_of);
+    let write_mtime_of = mtime_of.clone();
+    let diff_mtime_of = mtime_of.clone();
+
+    let list_all = move || {
+        let list_all = list_all.clone();
+        async move {
+            let promise = {
+                let lock = list_all.lock().await;
+                let promise: Promise = lock
+                    .call(&[])
+                    .expect("failed to call list_all callback")
+                    .dyn_into()
+                    .expect("list_all function didn't return promise");
+                SendPromise(JsFuture::from(promise))
+            };
+            let result = promise.await;
+            let result = result.expect("list_all js future threw");
+            let object: Object = result
+                .0
+                .dyn_into()
+                .expect("list_all didn't return an object");
+            let size_key = JsValue::from_str("size");
+            Object::entries(&object)
+                .iter()
+                .map(|v| {
+                    let array: Array = v
+                        .dyn_into()
+                        .expect("Object.entries returns an array of arrays");
+                    let resource = array.get(0);
+                    let resource = resource
+                        .as_string()
+                        .expect("key of a object should be strings");
+                    let content = array.get(1);
+                    let object: Object = content
+                        .dyn_into()
+                        .expect("resource DB doesn't have associated data");
+                    let size = Reflect::get(&object, &size_key)
+                        .expect("resource DB doesn't have the size for a resource");
+                    let size = size.as_f64().expect("size of resource isn't a number") as u64;
+                    (resource, size)
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let list_all = Arc::new(list_all);
+    let diff_list_all = Arc::clone(&list_all);
 
     let read = move |resource: String, storage| {
         let read_callback = read_read_callback.clone();
@@ -444,9 +517,11 @@ pub async fn options_js_callback(
 
     let metadata = initial_metadata(
         "metadata",
-        || metadata_new(Storage::Current),
+        || metadata_new(Storage::Current, list_all(), &*mtime_of),
         force_pull,
         |res| read(res, Storage::Meta),
+        |res| mtime_of(res, Storage::Public),
+        async { !list_all().await.is_empty() },
     )
     .await?;
     // A metadata cache that is held constant between diff calls.
@@ -459,6 +534,8 @@ pub async fn options_js_callback(
         },
         force_pull,
         |res| read(res, Storage::Meta),
+        |res| mtime_of(res, Storage::Public),
+        async { !list_all().await.is_empty() },
     )
     .await?;
 
@@ -475,7 +552,7 @@ pub async fn options_js_callback(
         let metadata = Arc::clone(&write_metadata);
         let offline_metadata = Arc::clone(&write_offline_metadata);
         let write_callback = write_write_callback.clone();
-        let get_mtime = write_get_mtime.clone();
+        let mtime_of = write_mtime_of.clone();
         Box::pin(async move {
             let path = path_from_storage(storage.to_storage(), &resource);
 
@@ -521,34 +598,7 @@ pub async fn options_js_callback(
                     &offline_metadata,
                     resource,
                     data_len,
-                    |storage, resource| async move {
-                        let path = path_from_storage(storage, &resource);
-                        let mtime = {
-                            let promise = {
-                                let lock = get_mtime.lock().await;
-                                let path = JsValue::from_str(&path);
-                                let promise: Promise = lock
-                                    .call(&[path])
-                                    .expect("failed to get mtime")
-                                    .dyn_into()
-                                    .expect("get_mtime function didn't return promise");
-                                SendPromise(JsFuture::from(promise))
-                            };
-                            let result = promise.await;
-                            let result = result.expect("get_mtime js future threw");
-                            if result.0.is_null() {
-                                None
-                            } else {
-                                Some(
-                                    result
-                                        .0
-                                        .as_f64()
-                                        .expect("get_mtime didn't return null or a number"),
-                                )
-                            }
-                        };
-                        mtime.map(|f| SystemTime::UNIX_EPOCH + Duration::from_secs_f64(f))
-                    },
+                    |storage, resource| mtime_of(resource, storage),
                 )
                 .await?;
             Ok(())
@@ -569,8 +619,7 @@ pub async fn options_js_callback(
                     .delete_update_metadata(&metadata, &offline_metadata, &resource)
                     .await;
                 let lock = delete_callback.lock().await;
-                lock.0
-                    .call0(&JsValue::UNDEFINED)
+                lock.call(&[path.into()])
                     .expect("failed to call delete callback");
 
                 Ok(())
@@ -579,9 +628,13 @@ pub async fn options_js_callback(
         Box::new(move || {
             let metadata = Arc::clone(&diff_metadata);
             let offline_metadata = Arc::clone(&diff_offline_metadata);
+            let list_all = Arc::clone(&diff_list_all);
+            let mtime_of = Arc::clone(&diff_mtime_of);
             Box::pin(async move {
                 debug!("Getting diff");
-                let current_metadata = metadata_new(Storage::Current).await.map_err(|_| ())?;
+                let current_metadata = metadata_new(Storage::Current, list_all(), &*mtime_of)
+                    .await
+                    .map_err(|_| ())?;
                 let mut offline_metadata = offline_metadata.lock().await;
                 let changed = offline_metadata.changes(&current_metadata, true);
                 let mut metadata = metadata.lock().await;
@@ -613,13 +666,17 @@ pub async fn connect_ws(url: &str) -> Result<Web, ApplicationError> {
 async fn initial_metadata<
     F: Future<Output = Result<Metadata, io::Error>>,
     ReadF: Future<Output = Result<Option<Vec<u8>>, ()>>,
+    Mtime,
+    MtimeFuture: Future<Output = Option<Mtime>>,
+    PopulatedFuture: Future<Output = bool>,
 >(
     name: &str,
     new: impl Fn() -> F,
     force_pull: bool,
     read: impl Fn(String) -> ReadF,
+    mtime: impl Fn(String) -> MtimeFuture,
+    populated: PopulatedFuture,
 ) -> Result<Metadata, io::Error> {
-    tokio::fs::create_dir_all(".agde").await?;
     let metadata = read(name.to_owned())
         .then(|data| async move {
             match data {
@@ -642,23 +699,10 @@ async fn initial_metadata<
             let mut metadata: Metadata = metadata;
             let mut differing = Vec::new();
             for (resource, _metadata) in metadata.iter() {
-                let meta = tokio::fs::metadata(format!(".agde/files/{resource}")).await;
-                match meta {
-                    Ok(_meta) => {
-                        // don't do metadata checks, as compression changes the size
-                        //
-                        // if meta.len() != metadata.size() {
-                        // differing.push(resource.to_owned());
-                        // error!("File {resource} has different length in cached metadata and on disk.");
-                        // }
-                    }
-                    Err(err) => match err.kind() {
-                        io::ErrorKind::NotFound => {
-                            differing.push(resource.to_owned());
-                            error!("File {resource} is not found on disk.");
-                        }
-                        _ => return Err(err),
-                    },
+                let meta = mtime(resource.to_owned()).await;
+                if meta.is_none() {
+                    differing.push(resource.to_owned());
+                    error!("File {resource} is not found on disk.");
                 };
             }
 
@@ -673,21 +717,7 @@ async fn initial_metadata<
                 error!("Metadata corrupt. Recreating.");
             }
 
-            let populated = tokio::task::spawn_blocking(move || {
-                walkdir::WalkDir::new("./")
-                    .follow_links(false)
-                    .into_iter()
-                    .filter_entry(|e| {
-                        !(e.path().starts_with(".agde") || e.path().starts_with("./.agde"))
-                    })
-                    .any(|e| {
-                        e.as_ref()
-                            .map_or(true, |e| e.metadata().map_or(true, |meta| meta.is_file()))
-                    })
-            })
-            .await
-            .unwrap();
-
+            let populated = populated.await;
             if !populated || !hard_error || force_pull {
                 new().await
             } else {
