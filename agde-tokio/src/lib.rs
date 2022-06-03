@@ -258,7 +258,7 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
     Ok(Metadata::new(map))
 }
 
-async fn flush<P: Platform>(
+async fn shutdown<P: Platform>(
     manager: &mut Manager,
     options: &Options<P>,
     platform: &PlatformExt<P>,
@@ -353,7 +353,7 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
             .expect("failed to start tokio when handling ctrlc");
         let returned = runtime.block_on(async move {
             let mut manager = manager.lock().await;
-            flush(&mut manager, &options, &platform).await
+            shutdown(&mut manager, &options, &platform).await
         });
 
         if let Err(err) = returned {
@@ -370,7 +370,7 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
             if let Some(lock) = lock.as_mut() {
                 {
                     let mut manager = lock.manager.lock().await;
-                    if let Err(err) = flush(&mut manager, &lock.options, &lock.platform).await {
+                    if let Err(err) = shutdown(&mut manager, &lock.options, &lock.platform).await {
                         error!("Error when trying to flush previous manager: {err:?}");
                     }
                 }

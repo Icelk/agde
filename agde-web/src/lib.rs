@@ -257,11 +257,11 @@ fn path_from_storage(storage: Storage, resource: &str) -> String {
     }
 }
 
-async fn flush<P: Platform>(
-    manager: &mut Manager,
-    options: &Options<P>,
-    platform: &PlatformExt<P>,
-) -> Result<(), ApplicationError> {
+#[wasm_bindgen]
+pub async fn shutdown(handle: &StateHandle<Web>) -> Result<(), ApplicationError> {
+    let platform = &handle.platform;
+    let mut manager = handle.manager.lock().await;
+    let options = &handle.options;
     // ignore error on send if the connection is closed.
     let _ = platform.send(&manager.process_disconnect()).await;
 
