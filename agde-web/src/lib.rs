@@ -9,7 +9,6 @@ use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 
 use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
-use agde::Manager;
 use futures::channel::oneshot;
 use futures::future::Either;
 use futures::lock::Mutex;
@@ -22,6 +21,185 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use agde_io::*;
+
+#[wasm_bindgen]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Handle {
+    id: u64,
+}
+#[wasm_bindgen]
+impl Handle {
+    #[wasm_bindgen]
+    pub async fn wait_for_shutdown(self) {
+        let handle = {
+            HANDLES
+                .lock()
+                .await
+                .remove(&self)
+                .expect("shutting down a handle that doesn't exist")
+        };
+        handle
+            .wait()
+            .await
+            .expect("failed to wait for agde shutdown");
+    }
+    #[wasm_bindgen]
+    pub async fn commit_and_send(self, cursors: Box<[JsValue]>) -> Result<JsValue, JsValue> {
+        let handle = {
+            let lock = HANDLES.lock().await;
+            lock.get(&self)
+                .expect("shutting down a handle that doesn't exist")
+                .state()
+                .clone()
+        };
+        let resource_key = JsValue::from_str("resource");
+        let index_key = JsValue::from_str("index");
+        let cursors = cursors
+            .into_vec()
+            .into_iter()
+            .map(|f| {
+                let obj: Object = f.dyn_into().expect("cursors array doesn't contain objects");
+                let resource = Reflect::get(&obj, &resource_key)
+                    .expect("resource item missing from cursor object")
+                    .as_string()
+                    .expect("resource in cursors isn't a string");
+                let index = Reflect::get(&obj, &index_key)
+                    .expect("index item missing from cursor object")
+                    .as_f64()
+                    .expect("index in cursors isn't a string") as usize;
+                (resource, index)
+            })
+            .collect::<Vec<_>>();
+        let mut cursors = cursors
+            .iter()
+            .map(|(res, idx)| Cursor {
+                resource: res,
+                index: *idx,
+            })
+            .collect::<Vec<_>>();
+        handle
+            .commit_and_send(&mut cursors)
+            .await
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+
+        let cursors = cursors
+            .iter()
+            .map(|cursor| {
+                let object = Object::new();
+                Reflect::set(&object, &resource_key, &JsValue::from_str(cursor.resource)).unwrap();
+                let index = cursor.index.to_string();
+                Reflect::set(&object, &index_key, &JsValue::from_str(&index)).unwrap();
+                object.dyn_into::<JsValue>().unwrap()
+            })
+            .collect::<Array>();
+
+        Ok(AsRef::<JsValue>::as_ref(&cursors).clone())
+    }
+    #[wasm_bindgen]
+    pub async fn shutdown(self) -> Result<(), JsValue> {
+        async {
+            {
+                let handle = {
+                    HANDLES
+                        .lock()
+                        .await
+                        .remove(&self)
+                        .expect("shutting down a handle that doesn't exist")
+                };
+                let handle = handle.state();
+                let platform = &handle.platform;
+                let mut manager = handle.manager.lock().await;
+                let options = &handle.options;
+                // ignore error on send if the connection is closed.
+                let _ = platform.send(&manager.process_disconnect()).await;
+
+                let state = options.read_clean().await?;
+                if state.map_or(false, |state| &**state != b"y")
+                    && !options.public_storage_disabled()
+                {
+                    error!("State not clean. Trying to apply diffs to current buffer.");
+
+                    let diff = options.diff().await?;
+
+                    {
+                        for diff in diff {
+                            let modern = manager.modern_resource_name(
+                                diff.resource(),
+                                manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH),
+                            );
+                            if modern.is_some() {
+                                match diff {
+                                    MetadataChange::Delete(_) => {}
+                                    MetadataChange::Modify(resource, created, _) => {
+                                        let current = options
+                                            .read(&resource, Storage::Current)
+                                            .await?
+                                            .expect(
+                                                "configuration should not return Modified \
+                                            if the Current storage version doesn't exist.",
+                                            );
+                                        let mut current = current.as_ref().clone();
+
+                                        let public = options
+                                            .read(&resource, Storage::Public)
+                                            .await?
+                                            .unwrap_or_default();
+                                        let public = public.as_ref().clone();
+
+                                        // cursors: we're catching ctrlc, so this isn't our highest
+                                        // priority
+                                        current = if let Some(current) = agde_io::rewind_current(
+                                            &mut *manager,
+                                            created,
+                                            &resource,
+                                            public,
+                                            current,
+                                            &mut [],
+                                        )
+                                        .await
+                                        {
+                                            current
+                                        } else {
+                                            // since we keep track of the incoming events and
+                                            // which resources have been changed, this will get
+                                            // copied below.
+                                            continue;
+                                        };
+
+                                        options
+                                            .write(
+                                                resource,
+                                                WriteStorage::current(),
+                                                Arc::new(current),
+                                                true,
+                                            )
+                                            .await?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                options.flush_out().await?;
+                options.sync_metadata(Storage::Public).await?;
+                options.sync_metadata(Storage::Current).await?;
+                info!("Successfully flushed caches.");
+
+                // we are clean again!
+                options.write_clean("y", true).await?;
+
+                Ok(())
+            }
+        }
+        .await
+        .map_err(|err: ApplicationError| JsValue::from_str(&err.to_string()))
+    }
+}
+
+lazy_static::lazy_static!(
+    static ref HANDLES: Mutex<HashMap<Handle, agde_io::Handle<Web>>> = Mutex::new(HashMap::new());
+);
 
 pub struct WebRuntime;
 pub type WsStream = gloo_net::websocket::futures::WebSocket;
@@ -194,6 +372,42 @@ pub fn init() {
     wasm_logger::init(wasm_logger::Config::new(log::Level::Info));
     console_error_panic_hook::set_once();
 }
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    force_pull: bool,
+    compression: String,
+    read_callback: Function,
+    write_callback: Function,
+    delete_callback: Function,
+    get_mtime: Function,
+    list_all: Function,
+    url: String,
+    help_desire: i16,
+) -> Result<Handle, JsValue> {
+    use rand::Rng;
+
+    let compression = compression.parse().expect("invalid compression value");
+    let options = options_js_callback(
+        force_pull,
+        compression,
+        read_callback,
+        write_callback,
+        delete_callback,
+        get_mtime,
+        list_all,
+    )
+    .await
+    .map_err(|err| JsValue::from_str(&err.to_string()))?;
+    let manager = agde::Manager::new(false, help_desire, Duration::from_secs(60), 512);
+    let handle_id = manager.rng().gen();
+    let handle = agde_io::run(manager, options.arc(), || connect_ws(&url))
+        .await
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
+    let handle_id = Handle { id: handle_id };
+    HANDLES.lock().await.insert(handle_id.clone(), handle);
+    Ok(handle_id)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Compression {
@@ -255,83 +469,6 @@ fn path_from_storage(storage: Storage, resource: &str) -> String {
         Storage::Current => format!("current/{resource}"),
         Storage::Meta => format!("meta/{resource}"),
     }
-}
-
-#[wasm_bindgen]
-pub async fn shutdown(handle: &StateHandle<Web>) -> Result<(), ApplicationError> {
-    let platform = &handle.platform;
-    let mut manager = handle.manager.lock().await;
-    let options = &handle.options;
-    // ignore error on send if the connection is closed.
-    let _ = platform.send(&manager.process_disconnect()).await;
-
-    let state = options.read_clean().await?;
-    if state.map_or(false, |state| &**state != b"y") && !options.public_storage_disabled() {
-        error!("State not clean. Trying to apply diffs to current buffer.");
-
-        let diff = options.diff().await?;
-
-        {
-            for diff in diff {
-                let modern = manager.modern_resource_name(
-                    diff.resource(),
-                    manager.last_commit().unwrap_or(SystemTime::UNIX_EPOCH),
-                );
-                if modern.is_some() {
-                    match diff {
-                        MetadataChange::Delete(_) => {}
-                        MetadataChange::Modify(resource, created, _) => {
-                            let current = options.read(&resource, Storage::Current).await?.expect(
-                                "configuration should not return Modified \
-                                            if the Current storage version doesn't exist.",
-                            );
-                            let mut current = current.as_ref().clone();
-
-                            let public = options
-                                .read(&resource, Storage::Public)
-                                .await?
-                                .unwrap_or_default();
-                            let public = public.as_ref().clone();
-
-                            // cursors: we're catching ctrlc, so this isn't our highest
-                            // priority
-                            current = if let Some(current) = agde_io::rewind_current(
-                                &mut *manager,
-                                created,
-                                &resource,
-                                public,
-                                current,
-                                &mut [],
-                            )
-                            .await
-                            {
-                                current
-                            } else {
-                                // since we keep track of the incoming events and
-                                // which resources have been changed, this will get
-                                // copied below.
-                                continue;
-                            };
-
-                            options
-                                .write(resource, WriteStorage::current(), Arc::new(current), true)
-                                .await?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    options.flush_out().await?;
-    options.sync_metadata(Storage::Public).await?;
-    options.sync_metadata(Storage::Current).await?;
-    info!("Successfully flushed caches.");
-
-    // we are clean again!
-    options.write_clean("y", true).await?;
-
-    Ok::<(), ApplicationError>(())
 }
 
 struct JsFn(Function);

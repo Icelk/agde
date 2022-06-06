@@ -14,6 +14,9 @@ license = "LGPL-3.0-or-later"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 agde = { path = "../agde" }
 agde-io = { path = "../agde-io" }
@@ -27,6 +30,7 @@ gloo-timers = { version = "0.2", features = ["futures"] }
 js-sys = "0.3"
 lazy_static = "1.4"
 log = "0.4"
+rand = "0.8"
 snap = "1.0.5"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
