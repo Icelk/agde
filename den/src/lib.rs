@@ -99,7 +99,8 @@ struct LargeHashKey([u8; 8]);
 struct HashMap128Hasher([u8; 8]);
 impl Hasher for HashMap128Hasher {
     fn write(&mut self, bytes: &[u8]) {
-        self.0.copy_from_slice(bytes);
+        // for 32-bit architectures
+        self.0[..bytes.len()].copy_from_slice(bytes);
     }
     fn finish(&self) -> u64 {
         u64::from_le_bytes(self.0)
