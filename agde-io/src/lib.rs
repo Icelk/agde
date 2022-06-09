@@ -770,22 +770,14 @@ impl FileCache {
     ) -> Result<(), String> {
         match storage {
             Storage::Public => {
-                if let Some(v) = self.public.get_mut(resource.as_ref()) {
-                    v.0 = None;
-                } else {
-                    self.public
-                        .insert(resource.into(), (None, FileStatus::Cached));
-                }
+                self.public
+                    .insert(resource.into(), (None, FileStatus::Cached));
                 Ok(())
             }
             Storage::Current => Err(resource.into()),
             Storage::Meta => {
-                if let Some(v) = self.meta.get_mut(resource.as_ref()) {
-                    v.0 = None;
-                } else {
-                    self.meta
-                        .insert(resource.into(), (None, FileStatus::Cached));
-                }
+                self.meta
+                    .insert(resource.into(), (None, FileStatus::Cached));
                 Ok(())
             }
         }
