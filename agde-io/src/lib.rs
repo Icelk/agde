@@ -1157,7 +1157,7 @@ async fn handle_message<P: Platform>(
             info!(
                 "Got event from pier {}: {:?} {event:?}",
                 sender,
-                SystemTime::now()
+                agde::utils::now()
             );
             {
                 changed.lock().await.insert(event.resource().to_owned());
@@ -1561,7 +1561,7 @@ async fn commit_and_send<P: Platform>(
                                 &manager,
                             )
                             // schedule create event a bit before modify.
-                            .with_timestamp(SystemTime::now() - Duration::from_micros(10));
+                            .with_timestamp(agde::utils::now() - Duration::from_micros(10));
                             Some(event)
                         } else {
                             None
@@ -1589,7 +1589,7 @@ async fn commit_and_send<P: Platform>(
                         info!(
                             "Last check: {:?}, now {:?}",
                             manager.last_commit_or_epoch(),
-                            SystemTime::now()
+                            agde::utils::now()
                         );
 
                         current = if let Some(current) = rewind_current(

@@ -256,7 +256,7 @@ impl<S: ExtendVec + 'static> Event<S> {
             latest_event.map_or_else(|| Duration::ZERO, |ev| ev.event.timestamp_dur());
         Self {
             kind,
-            timestamp: utils::systime_to_dur(SystemTime::now()),
+            timestamp: utils::systime_to_dur(utils::now()),
             latest_event,
             sender: sender.uuid(),
         }

@@ -4,10 +4,29 @@ use den::{Difference, Segment};
 
 use crate::{utils, Duration, Event, EventKind, SystemTime, UNIX_EPOCH};
 
+static mut NOW: fn() -> SystemTime = SystemTime::now;
+
+/// Set the handler to get the current `SystemTime`.
+///
+/// # Safety
+///
+/// This should be called before calling any other agde functions.
+/// This unsafely changes global state.
+pub unsafe fn set_now_handler(f: fn() -> SystemTime) {
+    NOW = f;
+}
+/// Get the current time.
+/// This supports [changing](set_now_handler) the default [`SystemTime::now`], on platforms where
+/// that's not supported (`wasm32-unknown-unknown`).
+#[must_use]
+pub fn now() -> SystemTime {
+    unsafe { NOW() }
+}
+
 /// Returns the time since [`UNIX_EPOCH`].
 #[must_use]
 pub fn dur_now() -> Duration {
-    systime_to_dur(SystemTime::now())
+    systime_to_dur(now())
 }
 /// Convert `dur` (duration since [`UNIX_EPOCH`]) to [`SystemTime`].
 /// Very cheap conversion.
