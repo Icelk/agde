@@ -30,7 +30,7 @@ pub struct Handle {
 #[wasm_bindgen]
 impl Handle {
     #[wasm_bindgen]
-    pub async fn wait_for_shutdown(self) {
+    pub async fn wait_for_shutdown(self) -> Self {
         let handle = {
             HANDLES
                 .lock()
@@ -42,6 +42,7 @@ impl Handle {
             .wait()
             .await
             .expect("failed to wait for agde shutdown");
+        self
     }
     #[wasm_bindgen]
     pub async fn commit_and_send(self, cursors: Box<[JsValue]>) -> Result<JsValue, JsValue> {
@@ -93,10 +94,29 @@ impl Handle {
             })
             .collect::<Array>();
 
-        Ok(AsRef::<JsValue>::as_ref(&cursors).clone())
+        let obj = Object::new();
+        Reflect::set(&obj, &JsValue::from_str("handle"), &self.into()).unwrap();
+        Reflect::set(&obj, &JsValue::from_str("cursors"), &cursors).unwrap();
+
+        Ok(AsRef::<JsValue>::as_ref(&obj).clone())
     }
     #[wasm_bindgen]
-    pub async fn shutdown(self) -> Result<(), JsValue> {
+    pub async fn flush(self) -> Result<Handle, JsValue> {
+        info!("Got flush!");
+        let handle = HANDLES.lock().await;
+        let me = handle
+            .get(&self)
+            .expect("flushing a handle that doesn't exist");
+        info!("Got handle");
+        me.state()
+            .options
+            .flush_out()
+            .await
+            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+        Ok(self)
+    }
+    #[wasm_bindgen]
+    pub async fn shutdown(self) -> Result<Handle, JsValue> {
         async {
             {
                 let handle = {
@@ -194,6 +214,7 @@ impl Handle {
         }
         .await
         .map_err(|err: ApplicationError| JsValue::from_str(&err.to_string()))
+        .map(|()| self)
     }
 }
 
@@ -303,8 +324,12 @@ impl Runtime for WebRuntime {
                 Either::Left((t, _)) => {
                     let _ = r_tx.send(Some(t));
                 }
-                Either::Right((_, _)) => {
-                    let _ = r_tx.send(None);
+                Either::Right((r, other)) => {
+                    if let Err(futures::channel::oneshot::Canceled) = r {
+                        let _ = r_tx.send(Some(other.await));
+                    } else {
+                        let _ = r_tx.send(None);
+                    }
                 }
             }
         };
@@ -352,7 +377,7 @@ impl Platform for Web {
 //
 // async read_callback: (resource): null|{ compression: string, data: string (BASE64) }
 // this should update the mtime (the number of seconds since UNIX_EPOCH)
-// write_callback: (resource, data: string (base64), compression: string)
+// write_callback: (resource, data: string (base64), compression: string, size: number)
 // delete_callback: (resource)
 // async get_mtime: (resource): null | number (date)
 // async list_all: (): { [resource: string]: { size: number } }
@@ -368,9 +393,14 @@ impl Platform for Web {
 // <https://rustwasm.github.io/docs/wasm-bindgen/reference/js-promises-and-rust-futures.html>)
 
 #[wasm_bindgen]
-pub fn init() {
+pub fn init_agde() {
+    fn now_handler() -> SystemTime {
+        let s = js_sys::Date::now() / 1000.;
+        SystemTime::UNIX_EPOCH + Duration::from_secs_f64(s)
+    }
     wasm_logger::init(wasm_logger::Config::new(log::Level::Info));
     console_error_panic_hook::set_once();
+    unsafe { agde::utils::set_now_handler(now_handler) };
 }
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
@@ -399,6 +429,9 @@ pub async fn run(
     )
     .await
     .map_err(|err| JsValue::from_str(&err.to_string()))?;
+    let options = options
+        .with_startup_duration(Duration::from_secs(1))
+        .with_periodic_interval(Duration::from_secs(10));
     let manager = agde::Manager::new(false, help_desire, Duration::from_secs(60), 512);
     let handle_id = manager.rng().gen();
     let handle = agde_io::run(manager, options.arc(), || connect_ws(&url))
@@ -482,6 +515,11 @@ impl JsFn {
     }
 }
 struct SendPromise(JsFuture);
+impl SendPromise {
+    fn new(promise: JsFuture) -> Self {
+        Self(promise)
+    }
+}
 impl Future for SendPromise {
     type Output = Result<JsValueSend, JsValueSend>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -531,7 +569,7 @@ pub async fn options_js_callback(
                     .expect("failed to get mtime")
                     .dyn_into()
                     .expect("get_mtime function didn't return promise");
-                SendPromise(JsFuture::from(promise))
+                SendPromise::new(JsFuture::from(promise))
             };
             let result = promise.await;
             let result = result.expect("get_mtime js future threw");
@@ -560,7 +598,7 @@ pub async fn options_js_callback(
                     .expect("failed to call list_all callback")
                     .dyn_into()
                     .expect("list_all function didn't return promise");
-                SendPromise(JsFuture::from(promise))
+                SendPromise::new(JsFuture::from(promise))
             };
             let result = promise.await;
             let result = result.expect("list_all js future threw");
@@ -601,21 +639,20 @@ pub async fn options_js_callback(
             let read = read_callback.lock().await;
             let file_promise = {
                 let file = read
-                    .0
-                    .call1(&JsValue::UNDEFINED, &JsValue::from_str(&path))
+                    .call(&[JsValue::from_str(&path)])
                     .expect("reading a resource failed when calling a read function");
                 drop(read);
                 let promise: Promise = file
                     .dyn_into()
                     .expect("read function didn't return promise");
-                SendPromise(JsFuture::from(promise))
+                SendPromise::new(JsFuture::from(promise))
             };
             let file = file_promise.await.expect("the read future threw an error");
 
-            if file.0.is_null() {
+            if file.0.is_null() || file.0.is_undefined() {
                 return Ok(None);
             }
-            let data = Reflect::get(&file.0, &JsValue::from_str("file"))
+            let data = Reflect::get(&file.0, &JsValue::from_str("data"))
                 .expect("read promise didn't return an object with a file property")
                 .as_string()
                 .expect("file property isn't a string");
@@ -716,6 +753,7 @@ pub async fn options_js_callback(
                 data
             };
             {
+                let len = data.len();
                 let write = write_callback.lock().await;
                 let base64_data = base64::encode(data.as_slice());
                 let data = JsValue::from_str(&base64_data);
@@ -723,9 +761,10 @@ pub async fn options_js_callback(
                 drop(base64_data);
                 let compression = compression.to_str();
                 let compression = JsValue::from_str(compression);
+                let size = JsValue::from_f64(len as f64);
 
                 write
-                    .call(&[data, compression])
+                    .call(&[JsValue::from_str(&path), data, compression, size])
                     .expect("failed to call write function");
             }
 
