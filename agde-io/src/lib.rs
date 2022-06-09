@@ -501,6 +501,7 @@ impl<P: Platform> Options<P> {
         if self.disable_public_storage {
             return Ok(vec![]);
         }
+        self.flush().await?;
 
         (self.rough_resource_diff)()
             .await
