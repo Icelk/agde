@@ -211,7 +211,7 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
         tokio::task::spawn_blocking(move || {
             let mut map = HashMap::new();
 
-            let path = path_from_storage(storage, "");
+            let path = path_from_storage(storage, "./");
 
             for entry in walkdir::WalkDir::new(path)
                 .follow_links(false)
@@ -221,7 +221,7 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
                 })
                 .filter_map(|e| e.ok())
             {
-                if let Some(path) = entry.path().to_str() {
+                if let Some(mut path) = entry.path().to_str() {
                     let metadata = entry.metadata()?;
                     if !metadata.is_file() {
                         continue;
@@ -235,6 +235,10 @@ async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
                         continue;
                     }
                     let modified = metadata.modified()?;
+
+                    if let Some(p) = path.strip_prefix("./") {
+                        path = p
+                    }
 
                     map.insert(
                         path.to_owned(),
