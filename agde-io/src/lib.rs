@@ -17,6 +17,7 @@ use log::{debug, error, info, warn};
 
 pub mod periodic;
 
+#[derive(Debug)]
 pub enum Message {
     Text(String),
     Binary(Vec<u8>),
@@ -340,7 +341,7 @@ impl<P: Platform> Options<P> {
         self.sync_interval = sync_interval;
         self
     }
-    pub fn with_flush_interval(mut self, flush_interval: Duration) -> Self {
+    pub fn with_periodic_interval(mut self, flush_interval: Duration) -> Self {
         self.periodic_interval = flush_interval;
         self
     }

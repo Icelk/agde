@@ -122,7 +122,7 @@ async fn main() {
         let mut options = options
             .with_startup_duration(Duration::from_secs_f64(startup_duration))
             .with_sync_interval(Duration::from_secs_f64(sync_interval))
-            .with_flush_interval(Duration::from_secs_f64(periodic_interval));
+            .with_periodic_interval(Duration::from_secs_f64(periodic_interval));
 
         if server {
             options = options.with_no_public_storage();
