@@ -1,0 +1,15 @@
+{
+  "name": "agde-web.js",
+  "version": "0.1.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Icelk <main@icelk.dev>",
+  "license": "MIT",
+  "dependencies": {
+    "agde-web": "file:../agde-web/pkg",
+    "localforage": "^1.10.0"
+  }
+}
