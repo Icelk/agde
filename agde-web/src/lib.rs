@@ -127,6 +127,7 @@ impl Handle {
                         .expect("shutting down a handle that doesn't exist")
                 };
                 let handle = handle.state();
+                handle.abort_tasks();
                 let platform = &handle.platform;
                 let mut manager = handle.manager.lock().await;
                 let options = &handle.options;

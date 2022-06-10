@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use agde::fast_forward::{Metadata, MetadataChange, ResourceMeta};
 use agde::Manager;
 use futures::lock::{Mutex, MutexGuard};
-use futures::{Future, Sink, SinkExt, Stream, StreamExt};
+use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt};
 use log::{debug, error, info, warn};
 
 pub mod periodic;
@@ -35,7 +35,7 @@ impl From<String> for Message {
 #[derive(Debug)]
 pub struct JoinError;
 
-pub trait TaskHandle<T>: Future<Output = Result<T, JoinError>> + Unpin + Send {
+pub trait TaskHandle<T>: Future<Output = Result<T, JoinError>> + Unpin + Send + Sync {
     fn abort(&mut self);
 }
 pub trait Runtime {
@@ -790,6 +790,7 @@ pub struct StateHandle<P: Platform> {
     pub options: Arc<Options<P>>,
     pub platform: PlatformExt<P>,
     changed: Arc<Mutex<HashSet<String>>>,
+    tasks: Arc<std::sync::Mutex<TaskHandles>>,
 }
 impl<P: Platform> StateHandle<P> {
     /// Commit and send our changes.
@@ -813,6 +814,15 @@ impl<P: Platform> StateHandle<P> {
         )
         .await
     }
+    /// Abort all running tasks set up by agde.
+    ///
+    /// This disabled listening for new messages, committing our changes,
+    /// resolving the fast forward, and periodic events such as flushing and log checks.
+    ///
+    /// Use this when implementing shutdown.
+    pub fn abort_tasks(&self) {
+        self.tasks.lock().unwrap().abort_all();
+    }
 }
 pub struct Handle<P: Platform> {
     inner: StateHandle<P>,
@@ -835,6 +845,22 @@ impl<P: Platform> Handle<P> {
 pub struct Cursor<'a> {
     pub resource: &'a str,
     pub index: usize,
+}
+struct TaskHandles {
+    accept_handle: Box<dyn TaskHandle<Result<(), ApplicationError>>>,
+    ff_handle: Option<Box<dyn TaskHandle<()>>>,
+    commit_handle: Box<dyn TaskHandle<Result<(), ApplicationError>>>,
+    periodic_handle: Box<dyn TaskHandle<()>>,
+}
+impl TaskHandles {
+    fn abort_all(&mut self) {
+        self.accept_handle.abort();
+        if let Some(handle) = &mut self.ff_handle {
+            handle.abort();
+        }
+        self.commit_handle.abort();
+        self.periodic_handle.abort();
+    }
 }
 
 pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, ApplicationError>>>(
@@ -1010,7 +1036,7 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
 
     // `TODO`: move this out of the run function, so people can pass the `cursors` to
     // `commit_and_send`.
-    let local_watcher = {
+    let commit_handle = {
         let options = Arc::clone(&options);
         let manager = Arc::clone(&manager);
         let platform = platform.clone();
@@ -1025,7 +1051,7 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
     };
 
     // trigger fast forward
-    {
+    let ff_handle = {
         let mut mgr = manager.lock().await;
         if let Some(msg) = mgr
             .process_fast_forward()
@@ -1039,7 +1065,7 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
             } else {
                 unreachable!("A fast forward message has to have a recipient")
             };
-            P::Rt::spawn(async move {
+            let handle = P::Rt::spawn(async move {
                 let mut pier = pier;
                 loop {
                     P::Rt::sleep(Duration::from_secs(5)).await;
@@ -1076,15 +1102,17 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
                 }
             });
             platform.send(&msg).await?;
+            Some(handle)
         } else {
             drop(mgr);
             // cursors: we hopefully aren't reading this currently
             commit_and_send(&manager, &options, &platform, &changed, &mut []).await?;
+            None
         }
-    }
+    };
     info!("Began fast forwarding.");
 
-    let mut periodic_handle = {
+    let periodic_handle = {
         let options = Arc::clone(&options);
         let mgr = Arc::clone(&manager);
         let platform = platform.clone();
@@ -1096,13 +1124,24 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
 
     let (oneshot_sender, oneshot_receiver) = futures::channel::oneshot::channel();
 
-    P::Rt::spawn(async move {
-        let (result, mut other) = futures::future::select(accept_handle, local_watcher)
-            .await
-            .into_inner();
+    let tasks = Arc::new(std::sync::Mutex::new(TaskHandles {
+        accept_handle,
+        ff_handle,
+        commit_handle,
+        periodic_handle,
+    }));
 
-        periodic_handle.abort();
-        other.abort();
+    let abort_handles = tasks.clone();
+    P::Rt::spawn(async move {
+        let accept = futures::future::poll_fn(|cx| {
+            abort_handles.lock().unwrap().accept_handle.poll_unpin(cx)
+        });
+        let commit = futures::future::poll_fn(|cx| {
+            abort_handles.lock().unwrap().commit_handle.poll_unpin(cx)
+        });
+        let (result, _) = futures::future::select(accept, commit).await.factor_first();
+
+        abort_handles.lock().unwrap().abort_all();
         let result = result.expect("task panicked");
 
         let _ = oneshot_sender.send(result);
@@ -1114,6 +1153,7 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
             options,
             platform,
             changed,
+            tasks,
         },
         waiter: oneshot_receiver,
     })

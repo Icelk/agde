@@ -266,9 +266,11 @@ async fn shutdown<P: Platform>(
     manager: &mut Manager,
     options: &Options<P>,
     platform: &PlatformExt<P>,
+    handle: &StateHandle<P>,
 ) -> Result<(), ApplicationError> {
     // ignore error on send if the connection is closed.
     let _ = platform.send(&manager.process_disconnect()).await;
+    handle.abort_tasks();
 
     let state = options.read_clean().await?;
     if state.map_or(false, |state| &**state != b"y") && !options.public_storage_disabled() {
@@ -345,6 +347,7 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
     let options = Arc::clone(&handle.options);
     let platform = handle.platform.clone();
 
+    let handler_handle = handle.clone();
     let handler = ctrlc::set_handler(move || {
         info!("Caught ctrlc");
         let manager = Arc::clone(&manager);
@@ -355,9 +358,10 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
             .max_blocking_threads(1)
             .build()
             .expect("failed to start tokio when handling ctrlc");
+        let handle = handler_handle.clone();
         let returned = runtime.block_on(async move {
             let mut manager = manager.lock().await;
-            shutdown(&mut manager, &options, &platform).await
+            shutdown(&mut manager, &options, &platform, &handle).await
         });
 
         if let Err(err) = returned {
@@ -374,7 +378,9 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
             if let Some(lock) = lock.as_mut() {
                 {
                     let mut manager = lock.manager.lock().await;
-                    if let Err(err) = shutdown(&mut manager, &lock.options, &lock.platform).await {
+                    if let Err(err) =
+                        shutdown(&mut manager, &lock.options, &lock.platform, &handle).await
+                    {
                         error!("Error when trying to flush previous manager: {err:?}");
                     }
                 }
