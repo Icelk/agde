@@ -270,7 +270,6 @@ async fn shutdown<P: Platform>(
 ) -> Result<(), ApplicationError> {
     // ignore error on send if the connection is closed.
     let _ = platform.send(&manager.process_disconnect()).await;
-    handle.abort_tasks();
 
     let state = options.read_clean().await?;
     if state.map_or(false, |state| &**state != b"y") && !options.public_storage_disabled() {
@@ -334,6 +333,7 @@ async fn shutdown<P: Platform>(
     options.sync_metadata(Storage::Public).await?;
     options.sync_metadata(Storage::Current).await?;
     info!("Successfully flushed caches.");
+    handle.abort_tasks();
 
     // we are clean again!
     options.write_clean("y", true).await?;

@@ -1028,7 +1028,7 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
                     }
                 }
             }
-            Err(ApplicationError::UnexpectedServerClose)
+            Ok(())
         })
     };
 
@@ -1142,9 +1142,12 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
         let (result, _) = futures::future::select(accept, commit).await.factor_first();
 
         abort_handles.lock().unwrap().abort_all();
-        let result = result.expect("task panicked");
-
-        let _ = oneshot_sender.send(result);
+        if let Ok(result) = result {
+            let _ = oneshot_sender.send(result);
+        } else {
+            warn!("Trying to send message to handle that we've finished, but somebody aborted our tasks.");
+            let _ = oneshot_sender.send(Ok(()));
+        }
     });
 
     Ok(Handle {

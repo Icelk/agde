@@ -127,7 +127,6 @@ impl Handle {
                         .expect("shutting down a handle that doesn't exist")
                 };
                 let handle = handle.state();
-                handle.abort_tasks();
                 let platform = &handle.platform;
                 let mut manager = handle.manager.lock().await;
                 let options = &handle.options;
@@ -206,6 +205,7 @@ impl Handle {
                 options.sync_metadata(Storage::Public).await?;
                 options.sync_metadata(Storage::Current).await?;
                 info!("Successfully flushed caches.");
+                handle.abort_tasks();
 
                 // we are clean again!
                 options.write_clean("y", true).await?;
@@ -308,7 +308,7 @@ impl<T> Future for WebTaskHandle<T> {
 impl<T: Send> TaskHandle<T> for WebTaskHandle<T> {
     fn abort(&mut self) {
         if let Some(abort) = self.abort.take() {
-            abort.send(()).unwrap()
+            let _ = abort.send(());
         }
     }
 }
@@ -754,19 +754,25 @@ pub async fn options_js_callback(
                 data
             };
             {
-                let len = data.len();
-                let write = write_callback.lock().await;
-                let base64_data = base64::encode(data.as_slice());
-                let data = JsValue::from_str(&base64_data);
-                // free memory
-                drop(base64_data);
-                let compression = compression.to_str();
-                let compression = JsValue::from_str(compression);
-                let size = JsValue::from_f64(len as f64);
+                let promise = {
+                    let len = data.len();
+                    let write = write_callback.lock().await;
+                    let base64_data = base64::encode(data.as_slice());
+                    let data = JsValue::from_str(&base64_data);
+                    // free memory
+                    drop(base64_data);
+                    let compression = compression.to_str();
+                    let compression = JsValue::from_str(compression);
+                    let size = JsValue::from_f64(len as f64);
 
-                write
-                    .call(&[JsValue::from_str(&path), data, compression, size])
-                    .expect("failed to call write function");
+                    let promise = write
+                        .call(&[JsValue::from_str(&path), data, compression, size])
+                        .expect("failed to call write function");
+                    let promise: Promise =
+                        promise.dyn_into().expect("write fn didn't return promise");
+                    SendPromise::new(JsFuture::from(promise))
+                };
+                promise.await.expect("write promise failed");
             }
 
             storage
