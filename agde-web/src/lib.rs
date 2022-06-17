@@ -1,6 +1,6 @@
 #![allow(clippy::unused_unit)] // wasm_bindgen
 use std::collections::HashMap;
-use std::fmt::{self, Debug};
+use std::fmt::{self, Debug, Display};
 use std::io::{self, Read, Write};
 use std::pin::Pin;
 use std::str::FromStr;
@@ -22,6 +22,39 @@ use wasm_bindgen_futures::JsFuture;
 
 use agde_io::*;
 
+trait JsFromRust {
+    fn into_js_value(self) -> JsValue;
+}
+impl JsFromRust for () {
+    fn into_js_value(self) -> JsValue {
+        JsValue::undefined()
+    }
+}
+impl JsFromRust for JsValue {
+    fn into_js_value(self) -> JsValue {
+        self
+    }
+}
+fn future_to_promise_result<
+    T: JsFromRust,
+    E: Display,
+    F: Future<Output = Result<T, E>> + 'static,
+>(
+    future: F,
+) -> Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        let r = future.await;
+        r.map(|v| v.into_js_value())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    })
+}
+fn future_to_promise<T: JsFromRust>(future: impl Future<Output = T> + 'static) -> Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        let r = future.await;
+        Ok(r.into_js_value())
+    })
+}
+
 #[wasm_bindgen]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Handle {
@@ -29,101 +62,97 @@ pub struct Handle {
 }
 #[wasm_bindgen]
 impl Handle {
-    #[wasm_bindgen]
-    pub async fn wait_for_shutdown(self) -> Self {
-        let handle = {
-            HANDLES
-                .lock()
+    pub fn wait_for_shutdown(&self) -> Promise {
+        let me = self.clone();
+        future_to_promise(async move {
+            let handle = {
+                HANDLES
+                    .lock()
+                    .await
+                    .remove(&me)
+                    .expect("shutting down a handle that doesn't exist")
+            };
+            handle
+                .wait()
                 .await
-                .remove(&self)
-                .expect("shutting down a handle that doesn't exist")
-        };
-        handle
-            .wait()
-            .await
-            .expect("failed to wait for agde shutdown");
-        self
+                .expect("failed to wait for agde shutdown");
+        })
     }
-    #[wasm_bindgen]
-    pub async fn commit_and_send(self, cursors: Box<[JsValue]>) -> Result<JsValue, JsValue> {
-        let handle = {
-            let lock = HANDLES.lock().await;
-            lock.get(&self)
-                .expect("shutting down a handle that doesn't exist")
-                .state()
-                .clone()
-        };
-        let resource_key = JsValue::from_str("resource");
-        let index_key = JsValue::from_str("index");
-        let cursors = cursors
-            .into_vec()
-            .into_iter()
-            .map(|f| {
-                let obj: Object = f.dyn_into().expect("cursors array doesn't contain objects");
-                let resource = Reflect::get(&obj, &resource_key)
-                    .expect("resource item missing from cursor object")
-                    .as_string()
-                    .expect("resource in cursors isn't a string");
-                let index = Reflect::get(&obj, &index_key)
-                    .expect("index item missing from cursor object")
-                    .as_f64()
-                    .expect("index in cursors isn't a string") as usize;
-                (resource, index)
-            })
-            .collect::<Vec<_>>();
-        let mut cursors = cursors
-            .iter()
-            .map(|(res, idx)| Cursor {
-                resource: res,
-                index: *idx,
-            })
-            .collect::<Vec<_>>();
-        handle
-            .commit_and_send(&mut cursors)
-            .await
-            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+    pub fn commit_and_send(&self, cursors: Box<[JsValue]>) -> Promise {
+        let me = self.clone();
+        future_to_promise_result::<_, ApplicationError, _>(async move {
+            let handle = {
+                let lock = HANDLES.lock().await;
+                lock.get(&me)
+                    .expect("shutting down a handle that doesn't exist")
+                    .state()
+                    .clone()
+            };
+            let resource_key = JsValue::from_str("resource");
+            let index_key = JsValue::from_str("index");
+            let cursors = cursors
+                .into_vec()
+                .into_iter()
+                .map(|f| {
+                    let obj: Object = f.dyn_into().expect("cursors array doesn't contain objects");
+                    let resource = Reflect::get(&obj, &resource_key)
+                        .expect("resource item missing from cursor object")
+                        .as_string()
+                        .expect("resource in cursors isn't a string");
+                    let index = Reflect::get(&obj, &index_key)
+                        .expect("index item missing from cursor object")
+                        .as_f64()
+                        .expect("index in cursors isn't a string")
+                        as usize;
+                    (resource, index)
+                })
+                .collect::<Vec<_>>();
+            let mut cursors = cursors
+                .iter()
+                .map(|(res, idx)| Cursor {
+                    resource: res,
+                    index: *idx,
+                })
+                .collect::<Vec<_>>();
+            handle.commit_and_send(&mut cursors).await?;
 
-        let cursors = cursors
-            .iter()
-            .map(|cursor| {
-                let object = Object::new();
-                Reflect::set(&object, &resource_key, &JsValue::from_str(cursor.resource)).unwrap();
-                let index = cursor.index.to_string();
-                Reflect::set(&object, &index_key, &JsValue::from_str(&index)).unwrap();
-                object.dyn_into::<JsValue>().unwrap()
-            })
-            .collect::<Array>();
+            let cursors = cursors
+                .iter()
+                .map(|cursor| {
+                    let object = Object::new();
+                    Reflect::set(&object, &resource_key, &JsValue::from_str(cursor.resource))
+                        .unwrap();
+                    let index = cursor.index.to_string();
+                    Reflect::set(&object, &index_key, &JsValue::from_str(&index)).unwrap();
+                    object.dyn_into::<JsValue>().unwrap()
+                })
+                .collect::<Array>();
 
-        let obj = Object::new();
-        Reflect::set(&obj, &JsValue::from_str("handle"), &self.into()).unwrap();
-        Reflect::set(&obj, &JsValue::from_str("cursors"), &cursors).unwrap();
-
-        Ok(AsRef::<JsValue>::as_ref(&obj).clone())
+            Ok(AsRef::<JsValue>::as_ref(&cursors).clone())
+        })
     }
-    #[wasm_bindgen]
-    pub async fn flush(self) -> Result<Handle, JsValue> {
-        info!("Got flush!");
-        let handle = HANDLES.lock().await;
-        let me = handle
-            .get(&self)
-            .expect("flushing a handle that doesn't exist");
-        info!("Got handle");
-        me.state()
-            .options
-            .flush_out()
-            .await
-            .map_err(|err| JsValue::from_str(&err.to_string()))?;
-        Ok(self)
+    pub fn flush(&self) -> Promise {
+        let me = self.clone();
+        future_to_promise_result::<_, ApplicationError, _>(async move {
+            info!("Got flush!");
+            let handle = HANDLES.lock().await;
+            let me = handle
+                .get(&me)
+                .expect("flushing a handle that doesn't exist");
+            info!("Got handle");
+            me.state().options.flush_out().await?;
+            Ok(())
+        })
     }
-    #[wasm_bindgen]
-    pub async fn shutdown(self) -> Result<Handle, JsValue> {
-        async {
+    pub fn shutdown(&self) -> Promise {
+        let me = self.clone();
+        let future = async move {
             {
                 let handle = {
                     HANDLES
                         .lock()
                         .await
-                        .remove(&self)
+                        .remove(&me)
                         .expect("shutting down a handle that doesn't exist")
                 };
                 let handle = handle.state();
@@ -210,12 +239,10 @@ impl Handle {
                 // we are clean again!
                 options.write_clean("y", true).await?;
 
-                Ok(())
+                Ok::<(), ApplicationError>(())
             }
-        }
-        .await
-        .map_err(|err: ApplicationError| JsValue::from_str(&err.to_string()))
-        .map(|()| self)
+        };
+        future_to_promise_result(future)
     }
 }
 

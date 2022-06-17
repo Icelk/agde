@@ -51,21 +51,20 @@ let handle
 
 async function flush() {
     console.log("Flushing.")
-    handle = await handle.flush()
+    await handle.flush()
     console.log("returned: " + JSON.stringify(handle))
     console.log("Flush complete.")
 }
 async function shutdown() {
     console.log("Shutting down.")
-    handle = await handle.shutdown()
+    await handle.shutdown()
     console.log("We are shut down.")
 }
 
 onmessage = async (msg) => {
     switch (msg.data.action) {
         case "commit":
-            let { cursors: _, handle: new_handle } = await handle.commit_and_send([])
-            handle = new_handle
+            let _cursors = await handle.commit_and_send([])
 
             // send back change event
             break
@@ -80,7 +79,7 @@ onmessage = async (msg) => {
 
         case "get":
             let document = msg.data.document
-            handle = await handle.flush()
+            await handle.flush()
             let data = localforage.getItem(document).data
             data = atob(data)
             postMessage({ document, data })
