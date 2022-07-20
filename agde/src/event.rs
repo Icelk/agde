@@ -153,12 +153,12 @@ impl Create {
 
 macro_rules! event_kind_impl {
     ($type:ty, $enum_name:ident) => {
-        impl<'a> From<$type> for Kind {
+        impl From<$type> for Kind {
             fn from(event: $type) -> Self {
                 Self::$enum_name(event)
             }
         }
-        impl<'a> IntoEvent for $type {
+        impl IntoEvent for $type {
             fn into_ev(self, manager: &Manager) -> Event {
                 Event::new(self.into(), manager)
             }
@@ -180,12 +180,12 @@ impl IntoEvent for Event {
     }
 }
 
-impl<'a, S: ExtendVec + 'static> From<Modify<S>> for Kind<S> {
+impl<S: ExtendVec + 'static> From<Modify<S>> for Kind<S> {
     fn from(event: Modify<S>) -> Self {
         Self::Modify(event)
     }
 }
-impl<'a, S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
+impl<S: ExtendVec + 'static> IntoEvent<S> for Modify<S> {
     fn into_ev(self, manager: &Manager) -> Event<S> {
         Event::new(self.into(), manager)
     }
