@@ -14,8 +14,9 @@ use futures::future::Either;
 use futures::lock::Mutex;
 use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use gloo_net::websocket;
-use js_sys::{Array, Function, Object, Promise, Reflect};
+use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use log::{debug, error, info, warn};
+use wasm_bindgen::convert::{FromWasmAbi, IntoWasmAbi};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -396,16 +397,16 @@ impl Platform for Web {
 // DB: {
 //      [resource: string]:
 //      {
-//          data: string (BASE64),
+//          data: Uint8Array,
 //          compression: string("none"|"snappy"),
 //          mtime: number,
 //          size: number,
 //      }
 //  }
 //
-// async read_callback: (resource): null|{ compression: string, data: string (BASE64) }
+// async read_callback: (resource): null|{ compression: string, data: Uint8Array }
 // this should update the mtime (the number of seconds since UNIX_EPOCH)
-// write_callback: (resource, data: string (base64), compression: string, size: number)
+// write_callback: (resource, data: Uint8Array, compression: string, size: number)
 // delete_callback: (resource)
 // async get_mtime: (resource): null | number (date)
 // async list_all: (): { [resource: string]: { size: number } }
@@ -682,9 +683,9 @@ pub async fn options_js_callback(
             }
             let data = Reflect::get(&file.0, &JsValue::from_str("data"))
                 .expect("read promise didn't return an object with a file property")
-                .as_string()
-                .expect("file property isn't a string");
-            let data = base64::decode(&data).expect("JS promise didn't return what we sent it");
+                .dyn_into::<Uint8Array>()
+                .expect("file property isn't a Uint8Array");
+            let data = data.to_vec();
 
             let buf = if !matches!(storage, Storage::Current) {
                 let compression = Reflect::get(&file.0, &JsValue::from_str("compression"))
@@ -784,10 +785,9 @@ pub async fn options_js_callback(
                 let promise = {
                     let len = data.len();
                     let write = write_callback.lock().await;
-                    let base64_data = base64::encode(data.as_slice());
-                    let data = JsValue::from_str(&base64_data);
-                    // free memory
-                    drop(base64_data);
+                    let data = data.as_slice();
+                    let data = Uint8Array::from(data);
+                    let data = JsValue::from(data);
                     let compression = compression.to_str();
                     let compression = JsValue::from_str(compression);
                     let size = JsValue::from_f64(len as f64);
