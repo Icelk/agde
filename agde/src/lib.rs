@@ -195,7 +195,7 @@ impl Display for Uuid {
 /// The kinds of messages with their data. Part of a [`Message`].
 ///
 /// On direct messages, send a conversation UUID which can be [`Self::Cancelled`].
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum MessageKind {
     /// The client sending this is connecting to the network.
@@ -291,7 +291,7 @@ pub enum MessageKind {
 /// A message to be communicated between clients.
 ///
 /// Contains a [`MessageKind`], sender UUID, and message UUID.
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Message {
     kind: MessageKind,

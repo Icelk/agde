@@ -88,7 +88,7 @@ impl<P: Platform> PlatformExt<P> {
 
 pub type DynError = Box<dyn Error>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ApplicationError {
     UnexpectedServerClose,
     StoragePermissions,
