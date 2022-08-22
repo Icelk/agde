@@ -116,7 +116,7 @@ async fn main() {
     let server = matches.is_present("server");
 
     loop {
-        let options = agde_tokio::options_fs(force, compress)
+        let options = agde_tokio::options_fs(force, compress, "".into())
             .await
             .expect("failed to read file system metadata");
         let mut options = options

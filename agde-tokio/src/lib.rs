@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -20,6 +20,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite;
 
 use agde_io::*;
+
+pub use agde;
+pub use agde_io;
 
 // OK to have lazy_static here since our native implementation only has one agde instance running.
 lazy_static::lazy_static! {
@@ -198,20 +201,24 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncReadBuf<R> {
     }
 }
 
-fn path_from_storage(storage: Storage, resource: &str) -> String {
+fn path_from_storage(storage: Storage, resource: &str, base_path: &Path) -> PathBuf {
+    let mut path = PathBuf::with_capacity(20 + resource.len());
+    path.push(base_path);
     match storage {
-        Storage::Public => format!(".agde/files/{resource}"),
-        Storage::Current => resource.to_owned(),
-        Storage::Meta => format!(".agde/{resource}"),
+        Storage::Public => path.push(".agde/files"),
+        Storage::Current => {}
+        Storage::Meta => path.push(".agde"),
     }
+    path.push(resource);
+    path
 }
 
-async fn metadata_new(storage: Storage) -> Result<Metadata, io::Error> {
+async fn metadata_new(storage: Storage, base_path: PathBuf) -> Result<Metadata, io::Error> {
     let map: Result<HashMap<String, ResourceMeta>, io::Error> =
         tokio::task::spawn_blocking(move || {
             let mut map = HashMap::new();
 
-            let path = path_from_storage(storage, "./");
+            let path = path_from_storage(storage, "./", &base_path);
 
             for entry in walkdir::WalkDir::new(path)
                 .follow_links(false)
@@ -374,19 +381,24 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
     });
     match handler {
         Err(ctrlc::Error::MultipleHandlers) => {
-            let mut lock = STATE.lock().unwrap();
-            if let Some(lock) = lock.as_mut() {
-                {
-                    let mut manager = lock.manager.lock().await;
-                    if let Err(err) =
-                        shutdown(&mut manager, &lock.options, &lock.platform, &handle).await
-                    {
-                        error!("Error when trying to flush previous manager: {err:?}");
-                    }
+            let handle = {
+                let mut state_lock = STATE.lock().unwrap();
+                if let Some(lock) = state_lock.as_mut() {
+                    *lock = handle;
+                    lock.clone()
+                } else {
+                    warn!("Failed to set ctrlc handler: another handler has been set");
+                    return;
                 }
-                *lock = handle;
-            } else {
-                warn!("Failed to set ctrlc handler: another handler has been set");
+            };
+            {
+                let mgr = handle.manager.clone();
+                let mut manager = mgr.lock().await;
+                if let Err(err) =
+                    shutdown(&mut manager, &handle.options, &handle.platform, &handle).await
+                {
+                    error!("Error when trying to flush previous manager: {err:?}");
+                }
             }
         }
         Err(_) => {
@@ -402,10 +414,13 @@ pub async fn catch_ctrlc(handle: StateHandle<Native>) {
 pub async fn options_fs(
     force_pull: bool,
     compression: Compression,
+    base_path: PathBuf,
 ) -> Result<Options<Native>, io::Error> {
-    let read = |resource: String, storage| {
+    let read_base = base_path.clone();
+    let read = move |resource: String, storage| {
+        let read_base = read_base.clone();
         Box::pin(async move {
-            let path = path_from_storage(storage, &resource);
+            let path = path_from_storage(storage, &resource, &read_base);
             tokio::task::spawn_blocking(move || {
                 let mut file = match std::fs::File::open(&path) {
                     Ok(f) => BufReader::new(f),
@@ -478,7 +493,8 @@ pub async fn options_fs(
 
     let metadata = initial_metadata(
         "metadata",
-        || metadata_new(Storage::Current),
+        &base_path,
+        || metadata_new(Storage::Current, base_path.clone()),
         force_pull,
         |res| read(res, Storage::Meta),
     )
@@ -486,6 +502,7 @@ pub async fn options_fs(
     // A metadata cache that is held constant between diff calls.
     let offline_metadata = initial_metadata(
         "metadata-offline",
+        &base_path,
         || {
             // start of empty, as we aren't tracking any files yet.
             let meta = Metadata::new(HashMap::new());
@@ -505,19 +522,25 @@ pub async fn options_fs(
     let diff_metadata = Arc::clone(&metadata);
     let diff_offline_metadata = Arc::clone(&offline_metadata);
 
+    let write_base = base_path.clone();
     let write = move |resource: String, storage: WriteStorage, data: Arc<Vec<u8>>| {
         let metadata = Arc::clone(&write_metadata);
         let offline_metadata = Arc::clone(&write_offline_metadata);
+        let write_base = write_base.clone();
         Box::pin(async move {
-            let path = path_from_storage(storage.to_storage(), &resource);
+            let path = path_from_storage(storage.to_storage(), &resource, &write_base);
 
             if let Some(path) = Path::new(&path).parent() {
                 tokio::fs::create_dir_all(path).await.map_err(|_| ())?;
             }
             if data.len() < 300 {
-                info!("Writing to {path}, {:?}", String::from_utf8_lossy(&data));
+                info!(
+                    "Writing to {}, {:?}",
+                    path.display(),
+                    String::from_utf8_lossy(&data)
+                );
             } else {
-                info!("Writing to {path} with length {}", data.len());
+                info!("Writing to {} with length {}", path.display(), data.len());
             }
 
             let data_len = data.len();
@@ -560,7 +583,7 @@ pub async fn options_fs(
                     resource,
                     data_len,
                     |storage, resource| async move {
-                        let path = path_from_storage(storage, &resource);
+                        let path = path_from_storage(storage, &resource, &write_base);
                         tokio::fs::metadata(path).await.ok().and_then(|m| {
                             m.modified()
                                 .map_err(|_| error!("Failed to get mtime of resource {resource}"))
@@ -573,14 +596,17 @@ pub async fn options_fs(
         }) as WriteFuture
     };
 
+    let remove_base = base_path.clone();
+    let diff_base = base_path.clone();
     Ok(Options::new(
         Box::new(read),
         Box::new(write),
         Box::new(move |resource, storage| {
             let metadata = Arc::clone(&delete_metadata);
             let offline_metadata = Arc::clone(&delete_offline_metadata);
+            let remove_base = remove_base.clone();
             Box::pin(async move {
-                let path = path_from_storage(storage, &resource);
+                let path = path_from_storage(storage, &resource, &remove_base);
                 debug!("Removing {resource} in {storage} from metadata cache.");
                 storage
                     .delete_update_metadata(&metadata, &offline_metadata, &resource)
@@ -604,9 +630,12 @@ pub async fn options_fs(
         Box::new(move || {
             let metadata = Arc::clone(&diff_metadata);
             let offline_metadata = Arc::clone(&diff_offline_metadata);
+            let diff_base = diff_base.clone();
             Box::pin(async move {
                 debug!("Getting diff");
-                let current_metadata = metadata_new(Storage::Current).await.map_err(|_| ())?;
+                let current_metadata = metadata_new(Storage::Current, diff_base.clone())
+                    .await
+                    .map_err(|_| ())?;
                 let mut offline_metadata = offline_metadata.lock().await;
                 let changed = offline_metadata.changes(&current_metadata, true);
                 let mut metadata = metadata.lock().await;
@@ -677,8 +706,8 @@ pub async fn watch_changes<CommitFut: Future<Output = ()> + Send>(
 pub async fn connect_ws(url: &str) -> Result<Native, ApplicationError> {
     info!("Connecting to {url:?}.");
     let result = tokio_tungstenite::connect_async(url).await;
-    let conenction = result.map_err(|err| ApplicationError::ConnectionFailed(err.to_string()))?;
-    let (w, r) = conenction.0.split();
+    let connection = result.map_err(|err| ApplicationError::ConnectionFailed(err.to_string()))?;
+    let (w, r) = connection.0.split();
     Ok(Native(
         Arc::new(Mutex::new(WriteHalf(w))),
         Arc::new(Mutex::new(ReadHalf(r))),
@@ -689,11 +718,12 @@ async fn initial_metadata<
     ReadF: Future<Output = Result<Option<Vec<u8>>, ()>>,
 >(
     name: &str,
+    base_path: &Path,
     new: impl Fn() -> F,
     force_pull: bool,
     read: impl Fn(String) -> ReadF,
 ) -> Result<Metadata, io::Error> {
-    tokio::fs::create_dir_all(".agde").await?;
+    tokio::fs::create_dir_all(base_path.join(".agde")).await?;
     let metadata = read(name.to_owned())
         .then(|data| async move {
             match data {
@@ -716,7 +746,9 @@ async fn initial_metadata<
             let mut metadata: Metadata = metadata;
             let mut differing = Vec::new();
             for (resource, _metadata) in metadata.iter() {
-                let meta = tokio::fs::metadata(format!(".agde/files/{resource}")).await;
+                let mut path = base_path.join(".agde/files");
+                path.push(resource);
+                let meta = tokio::fs::metadata(path).await;
                 match meta {
                     Ok(_meta) => {
                         // don't do metadata checks, as compression changes the size

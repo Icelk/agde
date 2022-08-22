@@ -1,7 +1,11 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <script src="main.js"></script>
+        <!-- <script src="main.js" type="module"></script> -->
+        <script type="module">
+            import { init, put_docuemnt } from "./main.js"
+            init(`ws://${location.host}/agde-ws`)
+        </script>
     </head>
     <body>
         Hi!

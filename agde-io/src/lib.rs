@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::identity;
 use std::error::Error;
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::pin::Pin;
@@ -86,7 +86,7 @@ impl<P: Platform> PlatformExt<P> {
     }
 }
 
-pub type DynError = Box<dyn Error>;
+pub type DynError = Box<dyn Error + Send>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApplicationError {
@@ -109,6 +109,11 @@ impl Display for ApplicationError {
             ),
             Self::ConnectionFailed(err) => write!(f, "connecting to the network failed: {err}"),
         }
+    }
+}
+impl From<ApplicationError> for DynError {
+    fn from(err: ApplicationError) -> Self {
+        Box::new(err)
     }
 }
 
@@ -863,6 +868,24 @@ impl TaskHandles {
     }
 }
 
+struct NotCleanError;
+impl Display for NotCleanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("state not clean")
+    }
+}
+impl Debug for NotCleanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self, f)
+    }
+}
+impl Error for NotCleanError {}
+impl From<NotCleanError> for DynError {
+    fn from(err: NotCleanError) -> Self {
+        Box::new(err)
+    }
+}
+
 pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, ApplicationError>>>(
     mut manager: Manager,
     options: Arc<Options<P>>,
@@ -898,7 +921,7 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
         } else if changes.is_empty() {
             options.write_clean("y", false).await?;
         } else {
-            return Err("state not clean".into());
+            return Err(NotCleanError.into());
         }
     }
 
@@ -2118,16 +2141,15 @@ async fn handle_sync_reply<P: Platform>(
     Ok(())
 }
 
-fn from_compressed_bin(bytes: &[u8]) -> Result<agde::Message, ()> {
+pub fn from_compressed_bin(bytes: &[u8]) -> Result<agde::Message, bincode::error::DecodeError> {
     let read = std::io::Cursor::new(bytes);
     let mut decompressor = snap::read::FrameDecoder::new(read);
     bincode::serde::decode_from_std_read(
         &mut decompressor,
         bincode::config::standard().write_fixed_array_length(),
     )
-    .map_err(|_| ())
 }
-fn to_compressed_bin(message: &agde::Message) -> Vec<u8> {
+pub fn to_compressed_bin(message: &agde::Message) -> Vec<u8> {
     let mut buffer = Vec::new();
     let mut compressor = snap::write::FrameEncoder::new(&mut buffer);
 

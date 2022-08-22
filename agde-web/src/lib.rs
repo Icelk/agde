@@ -16,7 +16,6 @@ use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt}
 use gloo_net::websocket;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use log::{debug, error, info, warn};
-use wasm_bindgen::convert::{FromWasmAbi, IntoWasmAbi};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;

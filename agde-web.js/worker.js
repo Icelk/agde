@@ -8,8 +8,11 @@ async function delay(duration) {
 }
 
 let handle
-;(async () => {
-    await delay(1)
+let lf
+async function init(url) {
+    lf = localforage.createInstance({ name: "agde" })
+
+    await delay(0.5)
 
     await wasm_bindgen("node_modules/agde-web/agde_web_bg.wasm")
     wasm_bindgen.init_agde()
@@ -18,18 +21,18 @@ let handle
         true,
         "none",
         async (path) => {
-            let item = await localforage.getItem(path)
+            let item = await lf.getItem(path)
             return item
         },
         async (path, data, compression, size) => {
-            let obj = { data, compression, size, mtime: new Date() * 1 / 1000 }
-            await localforage.setItem(path, obj)
+            let obj = { data, compression, size, mtime: (new Date() * 1) / 1000 }
+            await lf.setItem(path, obj)
         },
         async (path) => {
-            await localforage.removeItem(path)
+            await lf.removeItem(path)
         },
         async (path) => {
-            let item = await localforage.getItem(path)
+            let item = await lf.getItem(path)
             if (item === null) {
                 return null
             }
@@ -37,34 +40,40 @@ let handle
         },
         async () => {
             let keys = {}
-            await localforage.iterate((value, key) => {
+            await lf.iterate((value, key) => {
                 keys[key] = { size: value.size }
             })
             return keys
         },
-        "ws://localhost:8081",
+        url,
         0
     )
-
-    console.log("Handle after running agde: " + handle.toString())
-})()
+}
 
 async function flush() {
     console.log("Flushing.")
-    await handle.flush()
-    console.log("returned: " + JSON.stringify(handle))
+    if (handle !== undefined) {
+        await handle.flush()
+    }
     console.log("Flush complete.")
 }
 async function shutdown() {
     console.log("Shutting down.")
-    await handle.shutdown()
+    if (handle !== undefined) {
+        await handle.shutdown()
+    }
     console.log("We are shut down.")
 }
 
 onmessage = async (msg) => {
     switch (msg.data.action) {
+        case "init":
+            init(msg.data.url)
+            break
         case "commit":
             let _cursors = await handle.commit_and_send([])
+
+            await handle.flush()
 
             // send back change event
             break
@@ -78,11 +87,19 @@ onmessage = async (msg) => {
             break
 
         case "get":
-            let document = msg.data.document
+            let resource = msg.data.document
             await handle.flush()
-            let data = localforage.getItem(document).data
-            data = atob(data)
-            postMessage({ document, data })
+            let data = lf.getItem(`current/${resource}`).data
+            postMessage({ document: resource, data })
+            break
+
+        case "put":
+            await lf.setItem(`current/${msg.data.document}`, {
+                data: msg.data.data,
+                compression: "none",
+                size: msg.data.data.length,
+                mtime: new Date() / 1000,
+            })
             break
 
         default:

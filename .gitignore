@@ -1,7 +1,7 @@
 **/target
 **/Cargo.lock
+**/.agde
 test-ws-server/node_modules
 test-ws-server/package-lock.json
-**/.agde/**
 agde-web/pkg
 agde-web.js/node_modules
