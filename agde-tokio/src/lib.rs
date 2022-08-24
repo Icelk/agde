@@ -269,7 +269,7 @@ async fn metadata_new(storage: Storage, base_path: PathBuf) -> Result<Metadata, 
     Ok(Metadata::new(map))
 }
 
-async fn shutdown<P: Platform>(
+pub async fn shutdown<P: Platform>(
     manager: &mut Manager,
     options: &Options<P>,
     platform: &PlatformExt<P>,
