@@ -102,6 +102,10 @@ onmessage = async (msg) => {
             })
             break
 
+        case "uuid":
+            postMessage({ uuid: await handle.uuid() })
+            break
+
         default:
             console.error("Received an unexpected message from host: " + msg)
             break

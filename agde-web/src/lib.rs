@@ -244,6 +244,22 @@ impl Handle {
         };
         future_to_promise_result(future)
     }
+    pub fn uuid(&self) -> Promise {
+        let me = self.clone();
+        future_to_promise(async move {
+            let handle = {
+                HANDLES
+                    .lock()
+                    .await
+                    .get(&me)
+                    .expect("getting the UUID for an instance which doesn't exist")
+                    .state()
+                    .clone()
+            };
+            let mgr = handle.manager.lock().await;
+            JsValue::from_str(&mgr.uuid().to_string())
+        })
+    }
 }
 
 lazy_static::lazy_static!(
