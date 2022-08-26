@@ -134,7 +134,7 @@ async fn main() {
 
         let manager = Manager::new(server, 0, log_lifetime, 512);
 
-        match agde_io::run(manager, options, || agde_tokio::connect_ws(url)).await {
+        match agde_io::run(manager, options, || agde_tokio::connect_ws(url, None)).await {
             Ok(handle) => {
                 let watch_handle = Arc::new(handle.state().clone());
                 let mut watcher = agde_tokio::watch_changes(move || {

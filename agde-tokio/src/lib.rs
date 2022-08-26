@@ -703,9 +703,18 @@ pub async fn watch_changes<CommitFut: Future<Output = ()> + Send>(
     watcher
 }
 
-pub async fn connect_ws(url: &str) -> Result<Native, ApplicationError> {
-    info!("Connecting to {url:?}.");
-    let result = tokio_tungstenite::connect_async(url).await;
+/// Use `host` to override the host header for the request.
+pub async fn connect_ws(url: &str, host: Option<&str>) -> Result<Native, ApplicationError> {
+    use tungstenite::client::IntoClientRequest;
+    let mut req = url.into_client_request().unwrap();
+    if let Some(host) = host {
+        req.headers_mut().insert(
+            "host",
+            tungstenite::http::HeaderValue::from_str(host).expect("custom host header is invalid"),
+        );
+    }
+    info!("Connecting to {url:?} with request {req:#?}.");
+    let result = tokio_tungstenite::connect_async(req).await;
     let connection = result.map_err(|err| ApplicationError::ConnectionFailed(err.to_string()))?;
     let (w, r) = connection.0.split();
     Ok(Native(
