@@ -441,7 +441,13 @@ impl Platform for Web {
 pub fn init_agde() {
     fn now_handler() -> SystemTime {
         let s = js_sys::Date::now() / 1000.;
-        SystemTime::UNIX_EPOCH + Duration::from_secs_f64(s)
+        let dur = Duration::from_secs_f64(s);
+        let dur = Duration::new(
+            dur.as_secs(),
+            (dur.subsec_nanos() / 10_000_000) * 10_000_000,
+        );
+
+        SystemTime::UNIX_EPOCH + dur
     }
     wasm_logger::init(wasm_logger::Config::new(log::Level::Info));
     console_error_panic_hook::set_once();
@@ -476,7 +482,8 @@ pub async fn run(
     .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let options = options
         .with_startup_duration(Duration::from_secs(1))
-        .with_periodic_interval(Duration::from_secs(60*60*24*365));
+        .with_sync_interval(Duration::from_secs(60 * 60 * 24 * 365))
+        .with_periodic_interval(Duration::from_secs(30));
     let manager = agde::Manager::new(false, help_desire, Duration::from_secs(60), 512);
     let handle_id = manager.rng().gen();
     let handle = agde_io::run(manager, options.arc(), || connect_ws(&url))
@@ -625,7 +632,12 @@ pub async fn options_js_callback(
                     .0
                     .as_f64()
                     .expect("get_mtime didn't return null or a number");
-                Some(SystemTime::UNIX_EPOCH + Duration::from_secs_f64(seconds))
+                let dur = Duration::from_secs_f64(seconds);
+                let dur = Duration::new(
+                    dur.as_secs(),
+                    (dur.subsec_nanos() / 10_000_000) * 10_000_000,
+                );
+                Some(SystemTime::UNIX_EPOCH + dur)
             }
         }
     };
