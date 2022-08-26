@@ -149,11 +149,12 @@ impl Handle {
         let future = async move {
             {
                 let handle = {
-                    HANDLES
-                        .lock()
-                        .await
-                        .remove(&me)
-                        .expect("shutting down a handle that doesn't exist")
+                    let handle = HANDLES.lock().await.remove(&me);
+                    if let Some(handle) = handle {
+                        handle
+                    } else {
+                        return Ok::<(), ApplicationError>(());
+                    }
                 };
                 let handle = handle.state();
                 let platform = &handle.platform;
@@ -475,7 +476,7 @@ pub async fn run(
     .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let options = options
         .with_startup_duration(Duration::from_secs(1))
-        .with_periodic_interval(Duration::from_secs(10));
+        .with_periodic_interval(Duration::from_secs(60*60*24*365));
     let manager = agde::Manager::new(false, help_desire, Duration::from_secs(60), 512);
     let handle_id = manager.rng().gen();
     let handle = agde_io::run(manager, options.arc(), || connect_ws(&url))
