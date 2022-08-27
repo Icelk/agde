@@ -511,6 +511,9 @@ pub async fn run(
     list_all: Function,
     url: String,
     help_desire: i16,
+    user_data_callback: Function,
+    disconnect_callback: Function,
+    pier_disconnect_callback: Function,
 ) -> Result<Handle, JsValue> {
     use rand::Rng;
 
@@ -532,9 +535,30 @@ pub async fn run(
         .with_periodic_interval(Duration::from_secs(30));
     let manager = agde::Manager::new(false, help_desire, Duration::from_secs(60), 512);
     let handle_id = manager.rng().gen();
-    let handle = agde_io::run(manager, options.arc(), || connect_ws(&url))
-        .await
-        .map_err(|err| JsValue::from_str(&err.to_string()))?;
+    let user_data_callback = JsFn(user_data_callback);
+    let disconnect_callback = JsFn(disconnect_callback);
+    let pier_disconnect_callback = JsFn(pier_disconnect_callback);
+    let handle = agde_io::run(
+        manager,
+        options.arc(),
+        || connect_ws(&url),
+        move |msg| match msg.inner() {
+            agde::MessageKind::Disconnect => {
+                let _ =
+                    pier_disconnect_callback.call(&[JsValue::from_str(&msg.sender().to_string())]);
+            }
+            agde::MessageKind::User { recipient: _, data } => {
+                let _ = user_data_callback
+                    .call(&[js_sys::Uint8Array::from(&**data).dyn_into().unwrap()]);
+            }
+            _ => {}
+        },
+        move || {
+            let _ = disconnect_callback.call(&[]);
+        },
+    )
+    .await
+    .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let handle_id = Handle { id: handle_id };
     HANDLES.lock().await.insert(handle_id.clone(), handle);
     Ok(handle_id)

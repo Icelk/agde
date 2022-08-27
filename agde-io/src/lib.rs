@@ -890,6 +890,8 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
     mut manager: Manager,
     options: Arc<Options<P>>,
     connect: impl FnOnce() -> ConnectFuture,
+    msg_callback: impl Fn(&agde::Message) + Send + Sync + 'static,
+    shutdown_callback: impl FnOnce() + Send + Sync + 'static,
 ) -> Result<Handle<P>, DynError> {
     let state = options.read_clean().await?;
 
@@ -1047,7 +1049,8 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
                             continue;
                         };
 
-                        handle_message(message, &mgr, &options, &platform, &changed).await?;
+                        handle_message(message, &mgr, &options, &platform, &changed, &msg_callback)
+                            .await?;
                     }
                 }
             }
@@ -1164,6 +1167,7 @@ pub async fn run<P: Platform, ConnectFuture: Future<Output = Result<P, Applicati
         });
         let (result, _) = futures::future::select(accept, commit).await.factor_first();
 
+        shutdown_callback();
         abort_handles.lock().unwrap().abort_all();
         if let Ok(result) = result {
             let _ = oneshot_sender.send(result);
@@ -1191,6 +1195,7 @@ async fn handle_message<P: Platform>(
     options: &Options<P>,
     platform: &PlatformExt<P>,
     changed: &Mutex<HashSet<String>>,
+    msg_callback: impl Fn(&agde::Message),
 ) -> Result<(), ApplicationError> {
     let mut manager = mgr.lock().await;
     match message.recipient() {
@@ -1203,6 +1208,7 @@ async fn handle_message<P: Platform>(
     }
     let sender = message.sender();
     let message_uuid = message.uuid();
+    msg_callback(&message);
     match message.into_inner() {
         agde::MessageKind::Hello(hello) => {
             info!("Pier {} joined the network.", hello.uuid());
