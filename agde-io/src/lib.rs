@@ -1583,6 +1583,10 @@ async fn handle_message<P: Platform>(
             info!("Pier {sender} disconnected.");
             manager.apply_disconnect(sender);
         }
+        agde::MessageKind::User {
+            recipient: _,
+            data: _,
+        } => {}
     }
     Ok(())
 }

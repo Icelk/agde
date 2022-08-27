@@ -287,6 +287,15 @@ pub enum MessageKind {
     Cancelled(Uuid),
     /// The sender is disconnecting.
     Disconnect,
+    /// Data sent by the user for other users.
+    /// This can be useful when wanting to send other metadata along with the usual message
+    /// exchange.
+    User {
+        /// The recipient for this message. Will be sent and accepted by all if this is [`None`].
+        recipient: Option<Uuid>,
+        /// The data the user wants to transmit to `recipient`.
+        data: Vec<u8>,
+    },
 }
 /// A message to be communicated between clients.
 ///
@@ -357,6 +366,7 @@ impl Message {
             MessageKind::Cancelled(uuid) => *uuid,
             MessageKind::FastForward(ff) => ff.recipient(),
             MessageKind::FastForwardReply(ff) => ff.recipient(),
+            MessageKind::User { recipient: Some(r), data: _ } => *r,
             _ => return Recipient::All,
         }))
     }
