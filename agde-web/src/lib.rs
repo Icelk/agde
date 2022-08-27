@@ -249,16 +249,45 @@ impl Handle {
         let me = self.clone();
         future_to_promise(async move {
             let handle = {
+                let l = HANDLES.lock().await;
+                let h = l.get(&me);
+                if let Some(h) = h {
+                    h.state().clone()
+                } else {
+                    return JsValue::NULL;
+                }
+            };
+            let mgr = handle.manager.lock().await;
+            JsValue::from_str(&mgr.uuid().to_string())
+        })
+    }
+    pub fn send(&self, msg: Vec<u8>) -> Promise {
+        let me = self.clone();
+        future_to_promise_result::<_, ApplicationError, _>(async move {
+            let handle = {
                 HANDLES
                     .lock()
                     .await
                     .get(&me)
-                    .expect("getting the UUID for an instance which doesn't exist")
+                    .ok_or(ApplicationError::UnexpectedServerClose)?
                     .state()
                     .clone()
             };
-            let mgr = handle.manager.lock().await;
-            JsValue::from_str(&mgr.uuid().to_string())
+            let mut mgr = handle.manager.lock().await;
+            let sender = mgr.uuid();
+            let uuid = mgr.generate_uuid();
+            drop(mgr);
+            handle
+                .platform
+                .send(&agde::Message::new(
+                    agde::MessageKind::User {
+                        recipient: None,
+                        data: msg,
+                    },
+                    sender,
+                    uuid,
+                ))
+                .await
         })
     }
 }
