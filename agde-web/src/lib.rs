@@ -478,7 +478,7 @@ impl Platform for Web {
 // <https://rustwasm.github.io/docs/wasm-bindgen/reference/js-promises-and-rust-futures.html>)
 
 #[wasm_bindgen]
-pub fn init_agde() {
+pub fn init_agde(log_level: Option<String>) {
     fn now_handler() -> SystemTime {
         let s = js_sys::Date::now() / 1000.;
         let dur = Duration::from_secs_f64(s);
@@ -489,7 +489,13 @@ pub fn init_agde() {
 
         SystemTime::UNIX_EPOCH + dur
     }
-    wasm_logger::init(wasm_logger::Config::new(log::Level::Info));
+    wasm_logger::init(wasm_logger::Config::new(log_level.map_or(
+        log::Level::Info,
+        |ll| {
+            ll.parse()
+                .expect("failed to parse log level: expected 'error'|'warn'|'info'|'debug'|'trace'")
+        },
+    )));
     console_error_panic_hook::set_once();
     unsafe { agde::utils::set_now_handler(now_handler) };
 }
