@@ -142,7 +142,7 @@ impl<'a> ResponseBuilder<'a> {
                 RevertTo::Origin => Some(manager.unwinder_to(SystemTime::UNIX_EPOCH)),
                 RevertTo::To(uuid) => Some({
                     let events_start = manager.event_log.cutoff_from_uuid(uuid).unwrap_or(0);
-                    let events = &manager.event_log.list[events_start..];
+                    let events = &manager.event_log.list[events_start + 1..];
                     event::Unwinder::new(events, Some(manager))
                 }),
             },
