@@ -323,14 +323,20 @@ impl Stream for ReadHalf {
         }
     }
 }
-pub struct Sleep(gloo_timers::future::TimeoutFuture);
+pub enum Sleep {
+    Timeout(gloo_timers::future::TimeoutFuture),
+    Forever,
+}
 // these will only be accessed on the JS thread
 unsafe impl Sync for Sleep {}
 unsafe impl Send for Sleep {}
 impl Future for Sleep {
     type Output = ();
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.0.poll_unpin(cx)
+        match &mut *self {
+            Self::Forever => core::future::pending().poll_unpin(cx),
+            Self::Timeout(t) => t.poll_unpin(cx),
+        }
     }
 }
 
@@ -386,7 +392,12 @@ impl Runtime for WebRuntime {
     }
 
     fn sleep(duration: Duration) -> Self::Sleep {
-        Sleep(gloo_timers::future::sleep(duration))
+        // /2 for good measure
+        if duration.as_millis() >= (u32::MAX / 2) as _ {
+            Sleep::Forever
+        } else {
+            Sleep::Timeout(gloo_timers::future::sleep(duration))
+        }
     }
 }
 impl Sender for WriteHalf {}
