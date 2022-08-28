@@ -366,7 +366,10 @@ impl Message {
             MessageKind::Cancelled(uuid) => *uuid,
             MessageKind::FastForward(ff) => ff.recipient(),
             MessageKind::FastForwardReply(ff) => ff.recipient(),
-            MessageKind::User { recipient: Some(r), data: _ } => *r,
+            MessageKind::User {
+                recipient: Some(r),
+                data: _,
+            } => *r,
             _ => return Recipient::All,
         }))
     }

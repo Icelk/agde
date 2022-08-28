@@ -17,8 +17,8 @@ use futures::lock::Mutex;
 use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
-pub use tokio_tungstenite::tungstenite;
 pub use tokio_tungstenite;
+pub use tokio_tungstenite::tungstenite;
 
 use agde_io::*;
 
