@@ -9,13 +9,20 @@ async function delay(duration) {
 
 let handle
 let lf
-async function init(url) {
+/**
+ * @param url{string}
+ * @param user_data_callback{ (user_data: Uint8Array) => any }
+ * @param disconnect_callback{ () => any }
+ * @param pier_disconnect_callback{ (pier: string) => any }
+ * @param log_level{string|undefined}
+ */
+async function init(url, user_data_callback, disconnect_callback, pier_disconnect_callback, log_level) {
     lf = localforage.createInstance({ name: "agde" })
 
     await delay(0.5)
 
     await wasm_bindgen("node_modules/agde-web/agde_web_bg.wasm")
-    wasm_bindgen.init_agde()
+    wasm_bindgen.init_agde(log_level)
 
     handle = await wasm_bindgen.run(
         true,
@@ -46,7 +53,10 @@ async function init(url) {
             return keys
         },
         url,
-        0
+        0,
+        user_data_callback,
+        disconnect_callback,
+        pier_disconnect_callback
     )
 }
 
@@ -68,12 +78,20 @@ async function shutdown() {
 onmessage = async (msg) => {
     switch (msg.data.action) {
         case "init":
-            init(msg.data.url)
+            init(
+                msg.data.url,
+                (user_data) => postMessage({ action: "user_data", user_data }, [user_data.buffer]),
+                () => postMessage({ action: "disconnect" }),
+                (pier) => postMessage({ action: "pier_disconnect", pier }),
+                msg.data.log_level
+            )
             break
         case "commit":
-            let _cursors = await handle.commit_and_send([])
+            let cursors = await handle.commit_and_send(msg.data.cursors ?? [])
 
             await handle.flush()
+
+            postMessage({ committed: true, cursors })
 
             // send back change event
             break
@@ -88,6 +106,9 @@ onmessage = async (msg) => {
 
         case "get":
             let resource = msg.data.document
+            while (handle === undefined) {
+                await delay(0.2)
+            }
             await handle.flush()
             let data = lf.getItem(`current/${resource}`).data
             postMessage({ document: resource, data })
@@ -103,7 +124,18 @@ onmessage = async (msg) => {
             break
 
         case "uuid":
-            postMessage({ uuid: await handle.uuid() })
+            while (handle === undefined) {
+                await delay(0.2)
+            }
+            let uuid = await handle.uuid()
+            postMessage({ uuid })
+            break
+
+        case "send":
+            while (handle === undefined) {
+                await delay(0.5)
+            }
+            await handle.send(msg.data.data)
             break
 
         default:
