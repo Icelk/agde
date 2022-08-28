@@ -17,7 +17,8 @@ use futures::lock::Mutex;
 use futures::{Future, FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::tungstenite;
+pub use tokio_tungstenite::tungstenite;
+pub use tokio_tungstenite;
 
 use agde_io::*;
 
@@ -29,15 +30,61 @@ lazy_static::lazy_static! {
     static ref STATE: std::sync::Mutex<Option<StateHandle<Native>>> = std::sync::Mutex::new(None);
 }
 
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // these are anyway going to be in Arcs, so the size isn't
+                                     // that important!
+pub enum Io {
+    Ws(
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ),
+    Duplex(tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>),
+}
+impl Sink<tungstenite::Message> for Io {
+    type Error = tungstenite::Error;
+    fn start_send(mut self: Pin<&mut Self>, item: tungstenite::Message) -> Result<(), Self::Error> {
+        match &mut *self {
+            Self::Ws(ws) => ws.start_send_unpin(item),
+            Self::Duplex(dx) => dx.start_send_unpin(item),
+        }
+    }
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            Self::Ws(ws) => ws.poll_ready_unpin(cx),
+            Self::Duplex(dx) => dx.poll_ready_unpin(cx),
+        }
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            Self::Ws(ws) => ws.poll_flush_unpin(cx),
+            Self::Duplex(dx) => dx.poll_flush_unpin(cx),
+        }
+    }
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match &mut *self {
+            Self::Ws(ws) => ws.poll_close_unpin(cx),
+            Self::Duplex(dx) => dx.poll_close_unpin(cx),
+        }
+    }
+}
+impl Stream for Io {
+    type Item = tungstenite::Result<tungstenite::Message>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut *self {
+            Self::Ws(ws) => ws.poll_next_unpin(cx),
+            Self::Duplex(dx) => dx.poll_next_unpin(cx),
+        }
+    }
+}
+
 pub struct TokioRuntime;
-pub type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 #[derive(Debug)]
-pub struct WriteHalf(futures::stream::SplitSink<WsStream, tungstenite::Message>);
+pub struct WriteHalf(pub futures::stream::SplitSink<Io, tungstenite::Message>);
 #[derive(Debug)]
-pub struct ReadHalf(futures::stream::SplitStream<WsStream>);
+pub struct ReadHalf(pub futures::stream::SplitStream<Io>);
 impl Sink<Message> for WriteHalf {
-    type Error = <WsStream as Sink<tungstenite::Message>>::Error;
+    type Error = <Io as Sink<tungstenite::Message>>::Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.0.poll_ready_unpin(cx)
@@ -76,7 +123,7 @@ impl Stream for ReadHalf {
 }
 
 #[derive(Debug, Clone)]
-pub struct Native(Arc<Mutex<WriteHalf>>, Arc<Mutex<ReadHalf>>);
+pub struct Native(pub Arc<Mutex<WriteHalf>>, pub Arc<Mutex<ReadHalf>>);
 pub struct TokioTaskHandle<T>(tokio::task::JoinHandle<T>);
 impl<T> Future for TokioTaskHandle<T> {
     type Output = Result<T, JoinError>;
@@ -715,8 +762,9 @@ pub async fn connect_ws(url: &str, host: Option<&str>) -> Result<Native, Applica
     }
     info!("Connecting to {url:?} with request {req:#?}.");
     let result = tokio_tungstenite::connect_async(req).await;
-    let connection = result.map_err(|err| ApplicationError::ConnectionFailed(err.to_string()))?;
-    let (w, r) = connection.0.split();
+    let (connection, _) =
+        result.map_err(|err| ApplicationError::ConnectionFailed(err.to_string()))?;
+    let (w, r) = Io::Ws(connection).split();
     Ok(Native(
         Arc::new(Mutex::new(WriteHalf(w))),
         Arc::new(Mutex::new(ReadHalf(r))),
