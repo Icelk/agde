@@ -83,7 +83,7 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
 use std::collections::{HashMap, VecDeque};
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::hash::{BuildHasher, Hasher};
 use std::ops::Range;
 use xxhash_rust::xxh3::Xxh3;
@@ -1020,7 +1020,7 @@ struct BlockData {
 }
 /// One or more successive blocks found in the common data.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 #[must_use]
 pub struct SegmentRef {
     /// Start of segment with a length of [`Self::block_count`]*[`Signature::block_size`].
@@ -1090,6 +1090,15 @@ impl SegmentRef {
         *self = self.with_blocks(self.block_count() * n);
     }
 }
+impl Debug for SegmentRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.start == 0 {
+            write!(f, "..{}..", self.block_count)
+        } else {
+            write!(f, "{}..{}..", self.start, self.block_count)
+        }
+    }
+}
 /// A segment with unknown contents. This will transmit the data.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(PartialEq, Eq, Clone)]
@@ -1125,24 +1134,14 @@ impl SegmentUnknown {
         self.source
     }
 }
-impl<S: ExtendVec + std::any::Any> Debug for SegmentUnknown<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use std::any::Any;
-        // `TODO`: remove the downcasting when specialization lands.
-        if let Some(vec) = (&self.source as &dyn Any).downcast_ref::<Vec<u8>>() {
-            f.debug_struct("SegmentUnknown")
-                .field("source", &String::from_utf8_lossy(vec))
-                .finish()
-        } else {
-            f.debug_struct("SegmentUnknown")
-                .field("source", &self.source)
-                .finish()
-        }
+impl<S: ExtendVec + AsRef<[u8]>> Debug for SegmentUnknown<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", String::from_utf8_lossy(self.source.as_ref()))
     }
 }
 /// A segment of data corresponding to a multiple of [`Difference::block_size`].
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 #[must_use]
 pub enum Segment<S: ExtendVec + 'static = Vec<u8>> {
     /// Reference to successive block(s) of data.
@@ -1162,6 +1161,14 @@ impl<S: ExtendVec> Segment<S> {
         })
     }
 }
+impl<S: ExtendVec + AsRef<[u8]>> Debug for Segment<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Segment::Ref(seg) => seg.fmt(f),
+            Segment::Unknown(seg) => seg.fmt(f),
+        }
+    }
+}
 impl Segment {
     /// Creates a [`Segment::Unknown`] with `data` as the unknown part.
     ///
@@ -1176,7 +1183,7 @@ impl Segment {
 /// A delta between the local data and the data the [`Signature`] represents.
 #[allow(clippy::unsafe_derive_deserialize)] // See SAFETY notes.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 #[must_use]
 pub struct Difference<S: ExtendVec + 'static = Vec<u8>> {
     segments: Vec<Segment<S>>,
@@ -2025,6 +2032,44 @@ impl<S: ExtendVec> Difference<S> {
         }
 
         true
+    }
+}
+impl<S: ExtendVec + AsRef<[u8]>> Debug for Difference<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[")?;
+        if f.alternate() {
+            f.write_str("\n")?;
+        }
+        for (idx, seg) in self.segments.iter().enumerate() {
+            if f.alternate() {
+                f.write_str("    ")?;
+            }
+            seg.fmt(f)?;
+            if idx + 1 != self.segments.len() {
+                if f.alternate() {
+                    f.write_str(",\n")?;
+                } else {
+                    f.write_str(", ")?;
+                }
+            }
+        }
+        if f.alternate() {
+            f.write_str("\n")?;
+        }
+        f.write_str("]")?;
+        if f.alternate() {
+            f.write_str(",\n")?;
+        } else {
+            f.write_str(", ")?;
+        }
+        write!(f, "block_size: {}", self.block_size)?;
+        if f.alternate() {
+            f.write_str(",\n")?;
+        } else {
+            f.write_str(", ")?;
+        }
+        write!(f, "original_data_len: {}", self.original_data_len)?;
+        Ok(())
     }
 }
 

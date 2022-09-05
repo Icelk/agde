@@ -1227,9 +1227,9 @@ async fn handle_message<P: Platform>(
         agde::MessageKind::InvalidUuid(_) | agde::MessageKind::MismatchingVersions(_) => {}
         agde::MessageKind::Event(event) => {
             info!(
-                "Got event from pier {}: {:?} {event:?}",
+                "Got event from pier {}: {} {event:#?}",
                 sender,
-                agde::utils::now()
+                agde::utils::fmt_dur_display(agde::utils::dur_now()),
             );
             {
                 changed.lock().await.insert(event.resource().to_owned());

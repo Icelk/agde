@@ -1,6 +1,7 @@
 //! Events are a type of message which manipulate a resource.
 
 use std::borrow::Cow;
+use std::fmt::{self, Debug};
 
 use den::{Difference, ExtendVec, Signature};
 
@@ -24,7 +25,7 @@ pub fn diff(base: &[u8], target: &[u8]) -> Difference {
 /// A modification to a resource.
 ///
 /// The resource must be initialised using [`Create`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Modify<S: ExtendVec + 'static = Vec<u8>> {
     pub(crate) resource: String,
@@ -80,10 +81,17 @@ impl<S: ExtendVec + 'static> Modify<S> {
         self.resource = resource;
     }
 }
+impl<S: ExtendVec + AsRef<[u8]> + 'static> Debug for Modify<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "modify {:?} by ", self.resource())?;
+        self.diff.fmt(f)?;
+        Ok(())
+    }
+}
 /// Deletion of a resource.
 ///
 /// The resource must be initialised using [`Create`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Delete {
     resource: String,
@@ -130,10 +138,16 @@ impl Delete {
         self.successor.take()
     }
 }
+impl Debug for Delete {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "delete {:?}", self.resource())?;
+        Ok(())
+    }
+}
 /// The creation of a resource.
 ///
 /// Creates an empty file. Overrides the file if it already exists.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Create {
     resource: String,
@@ -148,6 +162,12 @@ impl Create {
     #[must_use]
     pub fn resource(&self) -> &str {
         &self.resource
+    }
+}
+impl Debug for Create {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "create {:?}", self.resource())?;
+        Ok(())
     }
 }
 
@@ -194,7 +214,7 @@ event_kind_impl!(Create, Create);
 event_kind_impl!(Delete, Delete);
 
 /// The kind of change of data.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub enum Kind<S: ExtendVec + 'static = Vec<u8>> {
     /// Modification.
@@ -227,8 +247,17 @@ impl<S: ExtendVec + 'static> Kind<S> {
         }
     }
 }
+impl<S: ExtendVec + AsRef<[u8]>> Debug for Kind<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Kind::Modify(m) => m.fmt(f),
+            Kind::Create(c) => c.fmt(f),
+            Kind::Delete(d) => d.fmt(f),
+        }
+    }
+}
 /// A change of data.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct Event<S: ExtendVec + 'static = Vec<u8>> {
     kind: Kind<S>,
@@ -315,6 +344,32 @@ impl<S: ExtendVec + 'static> Event<S> {
     #[must_use]
     pub fn latest_event_timestamp(&self) -> SystemTime {
         utils::dur_to_systime(self.latest_event)
+    }
+}
+impl<S: ExtendVec + AsRef<[u8]>> Debug for Event<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner().fmt(f)?;
+        if f.alternate() {
+            f.write_str(",\n")?;
+        } else {
+            f.write_str(", ")?;
+        }
+        write!(f, "timestamp: ")?;
+        utils::fmt_dur(f, self.timestamp)?;
+        if f.alternate() {
+            f.write_str(",\n")?;
+        } else {
+            f.write_str(", ")?;
+        }
+        write!(f, "latest_event: ")?;
+        utils::fmt_dur(f, self.latest_event)?;
+        if f.alternate() {
+            f.write_str(",\n")?;
+        } else {
+            f.write_str(", ")?;
+        }
+        write!(f, "sender: {}", self.sender)?;
+        Ok(())
     }
 }
 

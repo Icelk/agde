@@ -1,5 +1,7 @@
 //! Utilities for working with some datatypes used by agde.
 
+use std::fmt;
+
 use den::{Difference, Segment};
 
 use crate::{utils, Duration, Event, EventKind, SystemTime, UNIX_EPOCH};
@@ -39,6 +41,28 @@ pub fn dur_to_systime(dur: Duration) -> SystemTime {
 #[must_use]
 pub fn systime_to_dur(systime: SystemTime) -> Duration {
     systime.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO)
+}
+
+/// Formats `dur` to `mm:ss`.
+///
+/// # Errors
+///
+/// Any errors writing to the formatter.
+pub fn fmt_dur(fmt: &mut fmt::Formatter<'_>, dur: Duration) -> fmt::Result {
+    let subhour = dur.as_secs() % 3600;
+    write!(fmt, "{}:{}", subhour / 60, subhour % 60)
+}
+/// Same as `fmt_dur` but into an object that implements [`fmt::Display`].
+#[must_use]
+pub fn fmt_dur_display(dur: Duration) -> impl fmt::Display {
+    struct Fmt(Duration);
+    impl fmt::Display for Fmt {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt_dur(f, self.0)
+        }
+    }
+
+    Fmt(dur)
 }
 
 /// `a-b` but with better overflow properties than `a as isize - b as isize`.
