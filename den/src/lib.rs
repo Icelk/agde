@@ -1958,6 +1958,7 @@ impl<S: ExtendVec> Difference<S> {
     /// Returns true if this diff is a no-op.
     #[must_use]
     pub fn is_empty(&self) -> bool {
+        // if segments are empty, the data is removed, so it's not a no-op.
         if self.segments().len() != 1 {
             return false;
         };
@@ -2007,6 +2008,29 @@ impl<S: ExtendVec> Difference<S> {
         }
 
         true
+    }
+    /// Calculates the length of the output of [`Self::apply`] without any allocations.
+    #[must_use]
+    pub fn applied_len(&self, base: &[u8]) -> usize {
+        let block_size = self.block_size();
+        let mut len = 0;
+
+        for segment in self.segments() {
+            match segment {
+                Segment::Ref(ref_segment) => {
+                    let start = ref_segment.start;
+                    let seg_end = ref_segment.end(block_size);
+                    let end = seg_end.min(base.len());
+
+                    len += start.saturating_sub(end);
+                }
+                Segment::Unknown(unknown_segment) => {
+                    let data = &unknown_segment.source;
+                    len += data.len();
+                }
+            }
+        }
+        len
     }
     /// Checks `self` only contains valid references to `base`.
     /// There will not occur any error from apply functions if this returns true.
