@@ -85,9 +85,12 @@ use std::cmp::{self, Ordering};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Debug};
 use std::hash::{BuildHasher, Hasher};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh64::Xxh64;
+
+pub mod parallel;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum LargeHash<K, V> {
@@ -145,7 +148,7 @@ impl HashMap128 {
                                     };
                                     let new = list[idx].1;
                                     let new_dist = new.start.abs_diff(target);
-                                    if new_dist < best_dist {
+                                    if new_dist < best_dist && list[idx].0 == key {
                                         best = new;
                                         best_dist = new_dist;
                                     } else {
@@ -159,7 +162,7 @@ impl HashMap128 {
                                     idx -= 1;
                                     let new = list[idx].1;
                                     let new_dist = new.start.abs_diff(target);
-                                    if new_dist < best_dist {
+                                    if new_dist < best_dist && list[idx].0 == key {
                                         best = new;
                                         best_dist = new_dist;
                                     } else {
@@ -462,6 +465,20 @@ impl HashBuilder {
         }
     }
     #[inline]
+    fn finish(self) -> HashResult {
+        match self {
+            Self::None4(h) => HashResult::B4(h.finish().to_le_bytes()),
+            Self::None8(h) => HashResult::B8(h.finish().to_le_bytes()),
+            Self::None16(h) => HashResult::B16(h.finish().to_le_bytes()),
+            Self::XXH64(h) => HashResult::B8(h.digest().to_le_bytes()),
+            Self::XXH3_64(h) => HashResult::B8(h.digest().to_le_bytes()),
+            Self::XXH3_128(h) => HashResult::B16(h.digest128().to_le_bytes()),
+            Self::CyclicPoly32(mut h) => HashResult::B4(h.finish_reset().to_le_bytes()),
+            Self::CyclicPoly64(mut h) => HashResult::B8(h.finish_reset().to_le_bytes()),
+            Self::Adler32(mut h) => HashResult::B4(h.finish_reset().to_le_bytes()),
+        }
+    }
+    #[inline]
     fn write(&mut self, data: &[u8], position: Option<usize>) {
         match self {
             Self::None4(h) => h.write(data),
@@ -721,6 +738,17 @@ impl SignatureBuilder {
         }
     }
 }
+impl PartialEq for SignatureBuilder {
+    #[allow(clippy::nonminimal_bool)] // you are incorrect
+    fn eq(&self, other: &Self) -> bool {
+        self.algo == other.algo
+            && self.blocks == other.blocks
+            && self.blocks == other.blocks
+            && self.len == other.len
+            && self.total == other.total
+    }
+}
+
 /// A identifier of a file, much smaller than the file itself.
 ///
 /// See [crate-level documentation](crate) for more details.
@@ -813,21 +841,7 @@ impl Signature {
     ///
     /// This will return a struct which when serialized (using e.g. `bincode`) is much smaller than
     /// `data`.
-    #[allow(clippy::too_many_lines)] // well, this is the main implementation
     pub fn diff(&self, data: &[u8]) -> Difference {
-        #[allow(clippy::inline_always)]
-        #[inline(always)]
-        fn push_unknown_data(
-            data: &[u8],
-            last_ref: usize,
-            blocks_pos: usize,
-            segments: &mut Vec<Segment>,
-        ) {
-            let unknown_data = &data[last_ref..blocks_pos - 1];
-            if !unknown_data.is_empty() {
-                segments.push(Segment::unknown(unknown_data));
-            }
-        }
         let mut map = HashMap128::new();
 
         let block_size = self.block_size();
@@ -844,6 +858,7 @@ impl Signature {
                 segments,
                 block_size,
                 original_data_len: data.len(),
+                parallel_data: None,
             };
         }
 
@@ -856,10 +871,45 @@ impl Signature {
             map.insert(bytes, block_data);
         }
 
+        let segments = Self::inner_diff(data, 0, usize::MAX, block_size, &map, self.algorithm());
+
+        Difference {
+            segments,
+            block_size,
+            original_data_len: self.original_data_len,
+            parallel_data: None,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // well, this is the main implementation
+    fn inner_diff(
+        data: &[u8],
+        start: usize,
+        end: usize,
+        block_size: usize,
+        map: &HashMap128,
+        algorithm: HashAlgorithm,
+    ) -> Vec<Segment> {
+        #[allow(clippy::inline_always)]
+        #[inline(always)]
+        fn push_unknown_data(
+            data: &[u8],
+            last_ref: usize,
+            blocks_pos: usize,
+            segments: &mut Vec<Segment>,
+        ) {
+            let unknown_data = &data[last_ref..blocks_pos - 1];
+            if !unknown_data.is_empty() {
+                segments.push(Segment::unknown(unknown_data));
+            }
+        }
+
         let mut blocks = Blocks::new(data, block_size);
+        blocks.advance(start);
 
         let mut segments = Vec::new();
-        let mut last_ref_block = 0;
+        let mut last_ref_block = start;
+        let end_or_left = end.min(data.len());
 
         #[allow(
             clippy::cast_possible_truncation,
@@ -872,11 +922,14 @@ impl Signature {
         // unknown segments.
         let mut lookahead_ignore = 0;
 
-        let mut hasher = self.algorithm().builder(block_size);
+        let mut hasher = algorithm.builder(block_size);
 
         // Iterate over data, in windows. Find hash.
         let mut unknown = 0;
         while let Some(block) = blocks.next() {
+            if blocks.pos() >= end {
+                break;
+            }
             hasher.write(block, Some(blocks.pos() - 1));
             let hash = hasher.finish_reset().to_bytes();
 
@@ -990,13 +1043,15 @@ impl Signature {
 
         // If we want them to get our diff, we send our diff, with the `Unknown`s filled with data.
         // Then, we only send references to their data and our new data.
-        push_unknown_data(data, last_ref_block, blocks.pos() + 1, &mut segments);
-
-        Difference {
-            segments,
-            block_size,
-            original_data_len: self.original_data_len,
+        if data
+            .get(last_ref_block..(blocks.pos() + 1).min(end_or_left))
+            .map_or(false, |d| !d.is_empty())
+        {
+            push_unknown_data(data, last_ref_block, blocks.pos() + 1, &mut segments);
+            println!("last push unknown");
         }
+
+        segments
     }
 }
 impl Debug for Signature {
@@ -1180,6 +1235,13 @@ impl Segment {
         })
     }
 }
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(PartialEq, Eq, Clone, Debug, Copy)]
+struct ParallelData {
+    /// Clamp last ref segment in each block so the block length becomes this.
+    parallel_block_size: NonZeroUsize,
+    last_block_segment_length: usize,
+}
 /// A delta between the local data and the data the [`Signature`] represents.
 #[allow(clippy::unsafe_derive_deserialize)] // See SAFETY notes.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -1189,6 +1251,7 @@ pub struct Difference<S: ExtendVec + 'static = Vec<u8>> {
     segments: Vec<Segment<S>>,
     block_size: usize,
     original_data_len: usize,
+    parallel_data: Option<ParallelData>,
 }
 impl Difference {
     /// Changes the block size to `block_size`, shrinking the [`Segment::Unknown`]s in the process.
@@ -1362,6 +1425,7 @@ impl Difference {
             segments,
             block_size,
             original_data_len: self.original_data_len,
+            parallel_data: None,
         })
     }
 }
@@ -1390,6 +1454,7 @@ impl<S: ExtendVec> Difference<S> {
                 start: 0,
                 block_count,
             })],
+            parallel_data: None,
         }
     }
     /// Returns a reference to all the internal [`Segment`]s.
@@ -1436,6 +1501,7 @@ impl<S: ExtendVec> Difference<S> {
             segments,
             block_size,
             original_data_len,
+            parallel_data: clamp_ref_lengths_to_parallel_block_size,
         } = self;
 
         let mut counter = 0;
@@ -1458,6 +1524,7 @@ impl<S: ExtendVec> Difference<S> {
                 .collect(),
             block_size: *block_size,
             original_data_len: *original_data_len,
+            parallel_data: *clamp_ref_lengths_to_parallel_block_size,
         }
     }
     /// Map the [`ExtendVec`]s of the [`Segment::Unknown`]s with `f`.
@@ -1476,6 +1543,7 @@ impl<S: ExtendVec> Difference<S> {
             segments,
             block_size,
             original_data_len,
+            parallel_data: clamp_ref_lengths_to_parallel_block_size,
         } = self;
 
         let mut counter = 0;
@@ -1499,6 +1567,7 @@ impl<S: ExtendVec> Difference<S> {
                 .collect(),
             block_size,
             original_data_len,
+            parallel_data: clamp_ref_lengths_to_parallel_block_size,
         }
     }
     /// The block size used by this diff.
@@ -1649,16 +1718,28 @@ impl<S: ExtendVec> Difference<S> {
     fn _apply_overlaps(&self, base_len: usize, adaptive_end: bool) -> bool {
         let previous_data_end = self.original_data_len();
         let mut position = 0;
+        let mut block_len = 0;
         let mut found_end = false;
 
-        for segment in self.segments() {
+        for (seg_idx, segment) in self.segments().iter().enumerate() {
             match segment {
                 Segment::Ref(seg) => {
                     if seg.start() < position {
                         return true;
                     }
+                    let mut seg_end = seg.end(self.block_size());
+
+                    block_len += seg_end.saturating_sub(seg.start());
+                    if let Some(clamp) = self.parallel_data {
+                        if block_len >= clamp.parallel_block_size.get()
+                            && seg_idx + clamp.last_block_segment_length < self.segments.len()
+                        {
+                            seg_end -= block_len - clamp.parallel_block_size.get();
+                            block_len = 0;
+                        }
+                    }
+
                     if adaptive_end {
-                        let seg_end = seg.end(self.block_size());
                         // `ref_segment` is to the very end.
                         if seg_end >= previous_data_end {
                             // Then, max out end, even if new end is after the previous data's end.
@@ -1669,10 +1750,11 @@ impl<S: ExtendVec> Difference<S> {
                         }
                     }
 
-                    position += seg.len(self.block_size());
+                    position += seg_end - seg.start();
                 }
                 Segment::Unknown(seg) => {
                     position += seg.source().len();
+                    block_len += seg.source().len();
                 }
             }
         }
@@ -1734,11 +1816,24 @@ impl<S: ExtendVec> Difference<S> {
         let previous_data_end = self.original_data_len();
         let mut found_end = false;
 
-        for segment in self.segments() {
+        let mut block_len = 0;
+
+        for (seg_idx, segment) in self.segments().iter().enumerate() {
             match segment {
                 Segment::Ref(ref_segment) => {
                     let start = ref_segment.start;
-                    let seg_end = ref_segment.end(block_size);
+                    let mut seg_end = ref_segment.end(block_size);
+
+                    block_len += seg_end.saturating_sub(start);
+                    if let Some(clamp) = self.parallel_data {
+                        if block_len >= clamp.parallel_block_size.get()
+                            && seg_idx + clamp.last_block_segment_length < self.segments.len()
+                        {
+                            seg_end -= block_len - clamp.parallel_block_size.get();
+                            block_len = 0;
+                        }
+                    }
+
                     let mut end = seg_end.min(base.len());
 
                     if adaptive_end {
@@ -1755,6 +1850,7 @@ impl<S: ExtendVec> Difference<S> {
                 }
                 Segment::Unknown(unknown_segment) => {
                     let data = &unknown_segment.source;
+                    block_len += data.len();
                     data.extend(out);
                 }
             }
@@ -1840,19 +1936,34 @@ impl<S: ExtendVec> Difference<S> {
         }
         use ApplyError::RefOutOfBounds as Roob;
 
-        // `TODO`: calculate allocation needed before
+        let needed = self.applied_len(base);
+        if needed > base.len() {
+            base.reserve(needed - base.len());
+        }
 
         let block_size = self.block_size();
         let previous_data_end = self.original_data_len();
 
         let mut position = 0;
+        let mut block_len = 0;
         let mut found_end = false;
 
-        for segment in self.segments() {
+        for (seg_idx, segment) in self.segments().iter().enumerate() {
             match segment {
                 Segment::Ref(ref_segment) => {
                     let start = ref_segment.start;
-                    let seg_end = ref_segment.end(block_size);
+                    let mut seg_end = ref_segment.end(block_size);
+
+                    block_len += seg_end.saturating_sub(start);
+                    if let Some(clamp) = self.parallel_data {
+                        if block_len >= clamp.parallel_block_size.get()
+                            && seg_idx + clamp.last_block_segment_length < self.segments.len()
+                        {
+                            seg_end -= block_len - clamp.parallel_block_size.get();
+                            block_len = 0;
+                        }
+                    }
+
                     let mut end = seg_end.min(base.len());
 
                     if adaptive_end {
@@ -1871,6 +1982,7 @@ impl<S: ExtendVec> Difference<S> {
                 }
                 Segment::Unknown(unknown_segment) => {
                     let data = &unknown_segment.source;
+                    block_len += data.len();
                     data.replace(base, position);
                     position += data.len();
                 }
@@ -1928,10 +2040,13 @@ impl<S: ExtendVec> Difference<S> {
         let block_size = self.block_size();
 
         let mut cursor = 0;
-        for segment in self.segments() {
+        let mut block_len = 0;
+
+        for (seg_idx, segment) in self.segments().iter().enumerate() {
             match segment {
                 Segment::Unknown(unknown) => {
                     cursor += unknown.source().len();
+                    block_len += unknown.source().len();
                 }
                 Segment::Ref(seg) => {
                     let end = seg.end(block_size);
@@ -1941,7 +2056,17 @@ impl<S: ExtendVec> Difference<S> {
                         offset = missing.min(block_size);
                     }
                     let current_end = cursor + seg.len(block_size) - offset;
-                    let current_end = current_end.min(current.len());
+                    let mut current_end = current_end.min(current.len());
+                    block_len += current_end - cursor;
+                    if let Some(clamp) = self.parallel_data {
+                        if block_len >= clamp.parallel_block_size.get()
+                            && seg_idx + clamp.last_block_segment_length < self.segments.len()
+                        {
+                            current_end -= block_len - clamp.parallel_block_size.get();
+                            block_len = 0;
+                        }
+                    }
+
                     if current_end > current.len() {
                         return Err(Roob);
                     }
@@ -1958,7 +2083,6 @@ impl<S: ExtendVec> Difference<S> {
     /// Returns true if this diff is a no-op.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        // if segments are empty, the data is removed, so it's not a no-op.
         if self.segments().len() != 1 {
             return false;
         };
@@ -1977,12 +2101,24 @@ impl<S: ExtendVec> Difference<S> {
         let block_size = self.block_size();
 
         let mut cursor = 0;
-        for segment in self.segments() {
+        let mut block_len = 0;
+
+        for (seg_idx, segment) in self.segments().iter().enumerate() {
             match segment {
                 Segment::Ref(ref_segment) => {
                     let start = ref_segment.start;
                     let seg_end = ref_segment.end(block_size);
-                    let end = seg_end.min(base.len());
+                    let mut end = seg_end.min(base.len());
+
+                    block_len += end.saturating_sub(start);
+                    if let Some(clamp) = self.parallel_data {
+                        if block_len >= clamp.parallel_block_size.get()
+                            && seg_idx + clamp.last_block_segment_length < self.segments.len()
+                        {
+                            end -= block_len - clamp.parallel_block_size.get();
+                            block_len = 0;
+                        }
+                    }
 
                     let data = if let Some(data) = base.get(start..end) {
                         data
@@ -2003,6 +2139,7 @@ impl<S: ExtendVec> Difference<S> {
                         return false;
                     }
                     cursor += data.len();
+                    block_len += data.len();
                 }
             }
         }
@@ -2014,18 +2151,42 @@ impl<S: ExtendVec> Difference<S> {
     pub fn applied_len(&self, base: &[u8]) -> usize {
         let block_size = self.block_size();
         let mut len = 0;
+        let mut block_len = 0;
+        // println!("new");
 
-        for segment in self.segments() {
+        for (seg_idx, segment) in self.segments().iter().enumerate() {
             match segment {
                 Segment::Ref(ref_segment) => {
                     let start = ref_segment.start;
                     let seg_end = ref_segment.end(block_size);
-                    let end = seg_end.min(base.len());
+                    let mut end = seg_end.min(base.len());
 
-                    len += start.saturating_sub(end);
+                    let previous_bl = block_len;
+                    block_len += end.saturating_sub(start);
+                    // println!(
+                        // "Adding len {} with previous bl {previous_bl}",
+                        // end.saturating_sub(start)
+                    // );
+                    if let Some(clamp) = self.parallel_data {
+                        if block_len >= clamp.parallel_block_size.get()
+                            && seg_idx + clamp.last_block_segment_length < self.segments.len()
+                        {
+                            end -= block_len - clamp.parallel_block_size.get();
+                            // println!(
+                                // "Reset. Rm: {}, This block: {}",
+                                // block_len - clamp.parallel_block_size.get(),
+                                // previous_bl + end.saturating_sub(start)
+                            // );
+                            block_len = 0;
+                        }
+                    }
+
+                    len += end.saturating_sub(start);
                 }
                 Segment::Unknown(unknown_segment) => {
                     let data = &unknown_segment.source;
+                    block_len += data.len();
+                    // println!("Adding len {} unknown", data.len());
                     len += data.len();
                 }
             }
@@ -2060,6 +2221,20 @@ impl<S: ExtendVec> Difference<S> {
 }
 impl<S: ExtendVec + AsRef<[u8]>> Debug for Difference<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(parallel_data) = self.parallel_data {
+            write!(
+                f,
+                "parallel diff layout (parallel_block_size: {}, last_block_segment_length: {})",
+                parallel_data.parallel_block_size, parallel_data.last_block_segment_length
+            )?;
+        } else {
+            write!(f, "serial diff layout")?;
+        }
+        if f.alternate() {
+            f.write_str(":\n")?;
+        } else {
+            f.write_str(": ")?;
+        }
         f.write_str("[")?;
         if f.alternate() {
             f.write_str("\n")?;

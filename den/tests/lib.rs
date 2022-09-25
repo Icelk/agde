@@ -1,7 +1,9 @@
+use std::time::Instant;
+
 use den::*;
 
 fn lorem_ipsum() -> &'static str {
-    "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna ultrices gravida quis in felis. Mauris ac rutrum enim. Nulla auctor lacus at tellus sagittis dictum non id nunc. Donec ac nisl molestie, egestas dui vitae, consectetur sapien. Vivamus vel aliquet magna, ut malesuada mauris. Curabitur eu erat at lorem rhoncus cursus ac at mauris. Curabitur ullamcorper diam sed leo pellentesque, ac rhoncus quam mattis. Suspendisse potenti. Pellentesque risus ex, egestas in ex nec, sollicitudin accumsan dolor. Donec elementum id odio eget pharetra. Morbi aliquet accumsan vestibulum. Suspendisse eros dui, condimentum sagittis magna non, eleifend egestas dui. Ut pulvinar vestibulum lorem quis laoreet. Nam aliquam ante in placerat volutpat. Sed ac imperdiet ex. Nullam ut neque vel augue dignissim semper."
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna ultrices gravida quis in felis. Mauris ac rutrum enim. Nulla auctor lacus at tellus sagittis dictum non id nunc. Donec ac nisl molestie, egestas dui vitae, consectetur sapien. Vivamus vel aliquet magna, ut malesuada mauris. Curabitur eu erat at lorem rhoncus cursus ac at mauris. Curabitur ullamcorper diam sed leo pellentesque, ac rhoncus quam mattis. Suspendisse potenti. Pellentesque risus ex, egestas in ex nec, sollicitudin accumsan dolor. Donec elementum id odio eget pharetra. Morbi aliquet accumsan vestibulum. Suspendisse eros dui, condimentum sagittis magna non, eleifend egestas dui. Ut pulvinar vestibulum lorem quis laoreet. Nam aliquam ante in placerat volutpat. Sed ac imperdiet ex. Nullam ut neque vel augue dignissim semper.\n\n"
 }
 fn test_sync(base: &[u8], target: &[u8]) {
     let mut signature = Signature::new(128);
@@ -427,4 +429,81 @@ ou?";
             Segment::unknown("!\nou?")
         ]
     )
+}
+
+#[test]
+fn parallel_consistency_difference_1() {
+    let local_data =
+        "Lorem ipsum dolor sit amet, don't really know Rust elit. Cras nec justo eu magna.";
+    let remote_data =
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna.";
+
+    let mut signature = Signature::new(8);
+    signature.write(local_data.as_bytes());
+    let signature = signature.finish();
+
+    let diff = signature.diff(remote_data.as_bytes());
+    let parallel_diff = den::parallel::WORKER_POOL
+        .with(|wp| signature.parallel_diff_with_options(remote_data.as_bytes(), wp, 0, 8));
+    assert_eq!(diff.segments(), parallel_diff.segments());
+}
+#[test]
+fn parallel_consistency_difference_2() {
+    let local_data = str::replacen(
+        &lorem_ipsum().repeat(100),
+        "Cras nec justo",
+        "I don't know",
+        7,
+    );
+    let remote_data = lorem_ipsum().repeat(100);
+
+    let mut signature = Signature::new(128);
+    den::parallel::WORKER_POOL.with(|wp| signature.parallel_write(local_data.as_bytes(), wp));
+    let signature = signature.finish();
+
+    // serial
+    let now = Instant::now();
+    let diff = signature.diff(remote_data.as_bytes());
+    println!("Serial took {}µs", now.elapsed().as_micros());
+
+    //parallel
+    let now = Instant::now();
+    let parallel_diff = den::parallel::WORKER_POOL
+        .with(|wp| signature.parallel_diff_with_options(remote_data.as_bytes(), wp, 0, 512));
+    println!("Parallel took {}µs", now.elapsed().as_micros());
+
+    assert_eq!(diff.applied_len(local_data.as_bytes()), parallel_diff.applied_len(local_data.as_bytes()));
+    assert_eq!(diff, parallel_diff);
+
+    let mut buf = Vec::new();
+    parallel_diff
+        .apply(local_data.as_bytes(), &mut buf)
+        .unwrap();
+    assert_eq!(buf.len(), parallel_diff.applied_len(local_data.as_bytes()));
+    assert_eq!(String::from_utf8_lossy(&buf), remote_data);
+}
+#[test]
+fn parallel_consistency_signature_1() {
+    let data = str::replace(&lorem_ipsum().repeat(100), "Cras nec justo", "I don't know");
+
+    // serial
+    let mut signature = Signature::new(256);
+    let now = Instant::now();
+    signature.write(data.as_bytes());
+    println!("Serial took {}µs", now.elapsed().as_micros());
+    //parallel
+    let mut parallel_sig = Signature::new(256);
+    // make sure it's initiated
+    den::parallel::WORKER_POOL.with(|_wp| {});
+    let now = Instant::now();
+    den::parallel::WORKER_POOL
+        .with(|wp| parallel_sig.parallel_write_with_options(data.as_bytes(), wp, 0, 0));
+    println!("Parallel took {}µs", now.elapsed().as_micros());
+
+    assert_eq!(signature, parallel_sig);
+
+    let signature = signature.finish();
+    let parallel_sig = parallel_sig.finish();
+
+    assert_eq!(signature, parallel_sig);
 }
