@@ -79,6 +79,7 @@
     missing_docs
 )]
 
+use rustc_hash::FxHasher;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, Ordering};
@@ -219,6 +220,7 @@ pub enum HashAlgorithm {
     CyclicPoly32,
     CyclicPoly64,
     Adler32,
+    Fx64,
 }
 impl HashAlgorithm {
     #[inline]
@@ -233,6 +235,7 @@ impl HashAlgorithm {
             Self::CyclicPoly32 => HashBuilder::CyclicPoly32(CyclicPoly32::new(block_size)),
             Self::CyclicPoly64 => HashBuilder::CyclicPoly64(CyclicPoly64::new(block_size)),
             Self::Adler32 => HashBuilder::Adler32(Adler32::new(block_size)),
+            Self::Fx64 => HashBuilder::Fx64(FxHasher::default()),
         }
     }
 }
@@ -408,6 +411,7 @@ enum HashBuilder {
     CyclicPoly32(CyclicPoly32),
     CyclicPoly64(CyclicPoly64),
     Adler32(Adler32),
+    Fx64(FxHasher),
 }
 
 impl Clone for HashBuilder {
@@ -422,6 +426,7 @@ impl Clone for HashBuilder {
             Self::CyclicPoly32(h) => Self::CyclicPoly32(h.clone()),
             Self::CyclicPoly64(h) => Self::CyclicPoly64(h.clone()),
             Self::Adler32(h) => Self::Adler32(h.clone()),
+            Self::Fx64(_) => Self::Fx64(FxHasher::default()),
         }
     }
 }
@@ -462,6 +467,7 @@ impl HashBuilder {
             Self::CyclicPoly32(h) => HashResult::B4(h.finish_reset().to_le_bytes()),
             Self::CyclicPoly64(h) => HashResult::B8(h.finish_reset().to_le_bytes()),
             Self::Adler32(h) => HashResult::B4(h.finish_reset().to_le_bytes()),
+            Self::Fx64(fx) => HashResult::B8(core::mem::take(fx).finish().to_le_bytes()),
         }
     }
     #[inline]
@@ -476,6 +482,7 @@ impl HashBuilder {
             Self::CyclicPoly32(mut h) => HashResult::B4(h.finish_reset().to_le_bytes()),
             Self::CyclicPoly64(mut h) => HashResult::B8(h.finish_reset().to_le_bytes()),
             Self::Adler32(mut h) => HashResult::B4(h.finish_reset().to_le_bytes()),
+            Self::Fx64(fx) => HashResult::B8(fx.finish().to_le_bytes()),
         }
     }
     #[inline]
@@ -489,6 +496,7 @@ impl HashBuilder {
             Self::CyclicPoly32(h) => h.write(data, position),
             Self::CyclicPoly64(h) => h.write(data, position),
             Self::Adler32(h) => h.write(data, position),
+            Self::Fx64(h) => h.write(data),
         }
     }
 }
@@ -790,13 +798,13 @@ impl Signature {
             0..=4 => Signature::with_algorithm(HashAlgorithm::None4, block_size),
             5..=8 => Signature::with_algorithm(HashAlgorithm::None8, block_size),
             9..=16 => Signature::with_algorithm(HashAlgorithm::None16, block_size),
-            // XXH64 is actually faster than XXH3 for sizes of < 64 bytes.
-            17..=64 => Signature::with_algorithm(HashAlgorithm::XXH64, block_size),
+            17..=128 => Signature::with_algorithm(HashAlgorithm::Fx64, block_size),
             // according to imperical results, XXHash is just that much faster than CyclicPoly -
             // XXH3 performs better than CyclicPoly even for rolling hash applications.
             //
             // This is probably due to the requirement of buffers when working with rolling hashes.
-            65..=4096 => Signature::with_algorithm(HashAlgorithm::XXH3_64, block_size),
+            // `TODO`: If we digest the whole data block in one go, we could remove the need for buffers.
+            129..=4096 => Signature::with_algorithm(HashAlgorithm::XXH3_64, block_size),
             // 4096..
             _ => Signature::with_algorithm(HashAlgorithm::XXH3_128, block_size),
         }
@@ -2161,11 +2169,11 @@ impl<S: ExtendVec> Difference<S> {
                     let seg_end = ref_segment.end(block_size);
                     let mut end = seg_end.min(base.len());
 
-                    let previous_bl = block_len;
+                    // let previous_bl = block_len;
                     block_len += end.saturating_sub(start);
                     // println!(
-                        // "Adding len {} with previous bl {previous_bl}",
-                        // end.saturating_sub(start)
+                    // "Adding len {} with previous bl {previous_bl}",
+                    // end.saturating_sub(start)
                     // );
                     if let Some(clamp) = self.parallel_data {
                         if block_len >= clamp.parallel_block_size.get()
@@ -2173,9 +2181,9 @@ impl<S: ExtendVec> Difference<S> {
                         {
                             end -= block_len - clamp.parallel_block_size.get();
                             // println!(
-                                // "Reset. Rm: {}, This block: {}",
-                                // block_len - clamp.parallel_block_size.get(),
-                                // previous_bl + end.saturating_sub(start)
+                            // "Reset. Rm: {}, This block: {}",
+                            // block_len - clamp.parallel_block_size.get(),
+                            // previous_bl + end.saturating_sub(start)
                             // );
                             block_len = 0;
                         }

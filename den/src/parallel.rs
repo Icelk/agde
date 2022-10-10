@@ -297,19 +297,19 @@ impl Signature {
         };
 
         let mut start = 0;
-        let mut tot =0;
+        let mut tot = 0;
         let parallel_segments = wp.scope(|scope| {
             while data.len() > start + parallel_block_size || start == 0 {
                 let end = if data.len() > start + parallel_block_size * 2 {
                     (start + parallel_block_size).min(data.len())
                 } else {
-                    println!("Last seg target {}", data.len()-start);
+                    println!("Last seg target {}", data.len() - start);
                     // last segment
                     // (longer than `parallel_block_size` so the last bit is extended into)
                     usize::MAX
                 };
                 scope.spawn(move || f(start, end));
-                tot += end.min(data.len())-start;
+                tot += end.min(data.len()) - start;
                 start += parallel_block_size;
             }
         });

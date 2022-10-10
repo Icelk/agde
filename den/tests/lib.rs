@@ -472,7 +472,10 @@ fn parallel_consistency_difference_2() {
         .with(|wp| signature.parallel_diff_with_options(remote_data.as_bytes(), wp, 0, 512));
     println!("Parallel took {}µs", now.elapsed().as_micros());
 
-    assert_eq!(diff.applied_len(local_data.as_bytes()), parallel_diff.applied_len(local_data.as_bytes()));
+    assert_eq!(
+        diff.applied_len(local_data.as_bytes()),
+        parallel_diff.applied_len(local_data.as_bytes())
+    );
     assert_eq!(diff, parallel_diff);
 
     let mut buf = Vec::new();

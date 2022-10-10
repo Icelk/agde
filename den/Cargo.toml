@@ -13,10 +13,11 @@ keywords = ["diff", "rdiff", "rsync"]
 categories = ["algorithms"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"], optional = true }
-xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
-cyclic-poly-23 = "0.3"
 adler32 = "1.2"
+cyclic-poly-23 = "0.3"
+serde = { version = "1", features = ["derive"], optional = true }
+rustc-hash = "1.1"
+xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
 
 [package.metadata.docs.rs]
 all-features = true
