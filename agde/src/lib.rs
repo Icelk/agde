@@ -407,7 +407,7 @@ impl Message {
                 self.0
                     .write_all(bytes)
                     .map_err(|err| bincode::error::EncodeError::Io {
-                        error: err,
+                        inner: err,
                         index: 0,
                     })
             }

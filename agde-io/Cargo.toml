@@ -17,7 +17,7 @@ license = "LGPL-3.0-or-later"
 [dependencies]
 agde = { path = "../agde" }
 
-bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
+bincode = { version = "=2.0.0-rc.2", features = ["serde"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 log = "0.4"
 rand = "0.8"
