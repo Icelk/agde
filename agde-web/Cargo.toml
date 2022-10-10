@@ -22,7 +22,7 @@ agde = { path = "../agde" }
 agde-io = { path = "../agde-io" }
 
 base64 = "0.13"
-bincode = { version = "=2.0.0-rc.1", features = ["serde"] }
+bincode = { version = "=2.0.0-rc.2", features = ["serde"] }
 console_error_panic_hook = "0.1.7"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 gloo-net = "0.2"
