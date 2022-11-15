@@ -30,7 +30,7 @@ jobs:
               run: cargo clippy --all-targets --all-features -- -D warnings
             - name: Testing project
               run: cargo test
-            - uses: Icelk/rustdoc-link-check@v1
+            - uses: Icelk/rustdoc-link-check@v2
               with:
                   working-directory: den
                   private: true
