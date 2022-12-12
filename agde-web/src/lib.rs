@@ -199,7 +199,7 @@ impl Handle {
                                         // cursors: we're catching ctrlc, so this isn't our highest
                                         // priority
                                         current = if let Some(current) = agde_io::rewind_current(
-                                            &mut *manager,
+                                            &mut manager,
                                             created,
                                             &resource,
                                             public,

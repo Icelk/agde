@@ -414,9 +414,9 @@ impl Message {
         }
         let heuristic_size = std::mem::size_of_val(&self);
         let mut string = String::with_capacity(heuristic_size);
-        let writer = Writer(base64::write::EncoderStringWriter::from(
+        let writer = Writer(base64::write::EncoderStringWriter::from_consumer(
             &mut string,
-            base64::STANDARD,
+            &base64::engine::DEFAULT_ENGINE,
         ));
         bincode::encode_into_writer(
             bincode::serde::Compat(self),
@@ -445,10 +445,12 @@ impl Message {
         }
         let mut cursor = std::io::Cursor::new(string);
 
-        let reader = Reader(base64::read::DecoderReader::new(
-            &mut cursor,
-            base64::STANDARD,
-        ));
+        let engine = base64::engine::fast_portable::FastPortable::from(
+            &base64::alphabet::STANDARD,
+            base64::engine::fast_portable::FastPortableConfig::new()
+                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+        );
+        let reader = Reader(base64::read::DecoderReader::from(&mut cursor, &engine));
         let decoded: Result<bincode::serde::Compat<Message>, bincode::error::DecodeError> =
             bincode::decode_from_reader(reader, bincode::config::standard());
         decoded.map(|compat| compat.0)
