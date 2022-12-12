@@ -1626,7 +1626,7 @@ async fn commit_and_send<P: Platform>(
                     // `TODO`: Give successor
                     MetadataChange::Delete(res) => agde::Event::new(
                         agde::event::Kind::Delete(agde::event::Delete::new(res.to_owned(), None)),
-                        &*manager,
+                        &manager,
                     ),
                     MetadataChange::Modify(resource, created, _) => {
                         let create_ev = if *created {
