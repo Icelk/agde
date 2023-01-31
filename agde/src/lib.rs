@@ -52,6 +52,12 @@ pub use log::{Check as LogCheck, CheckAction as LogCheckAction};
 /// The current version of this `agde` library.
 pub const VERSION: semver::Version = semver::Version::new(0, 1, 0);
 
+const BASE64_ENGINE: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+);
+
 /// Describes the capabilities and properties of the client. Sent in the initial [`Message`] exchange.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[must_use]
@@ -416,7 +422,7 @@ impl Message {
         let mut string = String::with_capacity(heuristic_size);
         let writer = Writer(base64::write::EncoderStringWriter::from_consumer(
             &mut string,
-            &base64::engine::DEFAULT_ENGINE,
+            &BASE64_ENGINE,
         ));
         bincode::encode_into_writer(
             bincode::serde::Compat(self),
@@ -445,12 +451,10 @@ impl Message {
         }
         let mut cursor = std::io::Cursor::new(string);
 
-        let engine = base64::engine::fast_portable::FastPortable::from(
-            &base64::alphabet::STANDARD,
-            base64::engine::fast_portable::FastPortableConfig::new()
-                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
-        );
-        let reader = Reader(base64::read::DecoderReader::from(&mut cursor, &engine));
+        let reader = Reader(base64::read::DecoderReader::new(
+            &mut cursor,
+            &BASE64_ENGINE,
+        ));
         let decoded: Result<bincode::serde::Compat<Message>, bincode::error::DecodeError> =
             bincode::decode_from_reader(reader, bincode::config::standard());
         decoded.map(|compat| compat.0)
