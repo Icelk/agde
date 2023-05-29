@@ -418,7 +418,7 @@ impl Message {
                     })
             }
         }
-        let heuristic_size = std::mem::size_of_val(&self);
+        let heuristic_size = std::mem::size_of_val(self);
         let mut string = String::with_capacity(heuristic_size);
         let writer = Writer(base64::write::EncoderStringWriter::from_consumer(
             &mut string,
