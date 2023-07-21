@@ -8,24 +8,24 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn validate<T: FromStr>(validate: impl Fn(T) -> bool) -> impl Fn(&str) -> Result<(), String> {
-    move |v| {
-        if let Ok(v) = v.parse::<T>() {
-            if validate(v) {
-                Ok(())
+fn parse_validate<T: FromStr>(
+    validate: impl Fn(&T) -> bool + Clone,
+) -> impl Fn(&str) -> Result<T, String> + Clone
+where
+    <T as FromStr>::Err: ToString,
+{
+    move |s| {
+        s.parse().map_err(|e: T::Err| e.to_string()).and_then(|v| {
+            if validate(&v) {
+                Ok(v)
             } else {
-                Err("Validation failed.".into())
+                Err("failed validation".to_owned())
             }
-        } else {
-            Err(format!(
-                "Failed to parse {v:?} into type {}",
-                std::any::type_name::<T>()
-            ))
-        }
+        })
     }
 }
 
-fn command() -> Command<'static> {
+fn command() -> Command {
     let command = command!();
     command
         .arg(
@@ -47,7 +47,7 @@ fn command() -> Command<'static> {
                 .long("sync-interval")
                 .default_value("10")
                 .help("Number of seconds (float) to wait between committing and syncing.")
-                .validator(validate(|f: f64| f > 0.)),
+                .value_parser(parse_validate::<f64>(|f| *f > 0.)),
         )
         .arg(
             Arg::new("startup")
@@ -58,7 +58,7 @@ fn command() -> Command<'static> {
                     "Number of seconds (float) to wait for piers \
                     to welcome before fast forwarding.",
                 )
-                .validator(validate(|f: f64| f > 0.)),
+                .value_parser(parse_validate::<f64>(|f| *f > 0.)),
         )
         .arg(
             Arg::new("periodic")
@@ -70,13 +70,13 @@ fn command() -> Command<'static> {
                     The in-memory cache flushes each interval. \
                     Event log and hash checks are also sent according to this interval.",
                 )
-                .validator(validate(|f: f64| f > 0.)),
+                .value_parser(parse_validate::<f64>(|f| *f > 0.)),
         )
         .arg(
             Arg::new("compress")
                 .short('c')
                 .long("compress")
-                .possible_values(["none", "snappy", "zstd"])
+                .value_parser(["none", "snappy", "zstd"])
                 .default_value("zstd"),
         )
         .arg(Arg::new("server").long("server").help(
@@ -91,38 +91,39 @@ async fn main() {
 
     let matches = command().get_matches();
 
-    let url = matches.value_of("url").unwrap();
-    let force = matches.is_present("force");
+    let url = matches.get_one::<String>("url").unwrap();
+    let force = matches.get_flag("force");
 
     let sync_interval = matches
-        .value_of_t("sync")
+        .get_one::<f64>("sync")
         .expect("--sync-interval takes a float value");
     let startup_duration = matches
-        .value_of_t("startup")
+        .get_one::<f64>("startup")
         .expect("--startup-duration takes a float value");
     let periodic_interval = matches
-        .value_of_t("periodic")
+        .get_one::<f64>("periodic")
         .expect("--periodic-interval takes a float value");
 
     let compress = match matches
-        .value_of("compress")
+        .get_one::<String>("compress")
         .expect("we passed a default value")
+        .as_str()
     {
         "none" => Compression::None,
         "snappy" => Compression::Snappy,
         "zstd" => Compression::Zstd,
         _ => unreachable!("we've covered all the possible values"),
     };
-    let server = matches.is_present("server");
+    let server = matches.get_flag("server");
 
     loop {
         let options = agde_tokio::options_fs(force, compress, "".into())
             .await
             .expect("failed to read file system metadata");
         let mut options = options
-            .with_startup_duration(Duration::from_secs_f64(startup_duration))
-            .with_sync_interval(Duration::from_secs_f64(sync_interval))
-            .with_periodic_interval(Duration::from_secs_f64(periodic_interval));
+            .with_startup_duration(Duration::from_secs_f64(*startup_duration))
+            .with_sync_interval(Duration::from_secs_f64(*sync_interval))
+            .with_periodic_interval(Duration::from_secs_f64(*periodic_interval));
 
         if server {
             options = options.with_no_public_storage();

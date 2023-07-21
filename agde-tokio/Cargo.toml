@@ -24,13 +24,13 @@ agde = { path = "../agde" }
 agde-io = { path = "../agde-io" }
 
 bincode = { version = "=2.0.0-rc.2", features = ["serde"] }
-clap = { version = "3.1", features = ["cargo"], optional = true }
+clap = { version = "4", features = ["cargo"], optional = true }
 ctrlc = { version = "3.2", features = ["termination"] }
 env_logger = { version = "0.10", default-features = false, features = ["auto-color", "humantime"] }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 lazy_static = "1.4"
 log = "0.4"
-notify = "5"
+notify = "6"
 snap = "1.0.5"
 tokio = { version = ">1.17", features = ["macros", "rt-multi-thread", "parking_lot", "time", "sync", "fs"] }
 tokio-tungstenite = { version = "0.19", features = ["rustls-tls-webpki-roots"] }
