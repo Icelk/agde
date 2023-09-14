@@ -4,6 +4,7 @@ on:
     push:
         paths:
             - "agde/**"
+            - "den/**"
             - "Cargo.toml"
             - ".github/workflows/agde.yml"
 

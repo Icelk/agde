@@ -5,6 +5,7 @@ on:
         paths:
             - "agde-io/**"
             - "agde/**"
+            - "den/**"
             - "Cargo.toml"
             - ".github/workflows/agde-io.yml"
 
