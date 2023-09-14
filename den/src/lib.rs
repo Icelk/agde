@@ -1073,6 +1073,7 @@ impl Debug for Signature {
             .field("algo", &self.algo)
             .field("blocks", &blocks)
             .field("block_size", &self.block_size)
+            .field("original_data_len", &self.original_data_len)
             .finish()
     }
 }

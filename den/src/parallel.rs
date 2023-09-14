@@ -43,6 +43,10 @@ impl WorkerPool {
     /// Kill all the threads of this worker pool.
     /// Does not wait for the threads to finish. [`Self::wait`] can be used after this to achieve
     /// that behaviour.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this method has already been called.
     pub fn kill(&mut self) {
         for _ in 0..self.workers {
             self.sender.send(None).expect("workers are already killed");
