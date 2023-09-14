@@ -579,6 +579,7 @@ impl Manager {
     /// # Memory leaks
     ///
     /// You must call [`Self::assure_log_check`] after calling this.
+    #[allow(clippy::missing_panics_doc)]
     pub fn process_event_log_check(&mut self, count: u32) -> Option<(Message, Uuid)> {
         // after this call, we are guaranteed to have at least 1 event in the log.
         let (pos, cutoff_timestamp) = self.event_log.appropriate_cutoff()?;
@@ -899,7 +900,7 @@ impl Manager {
         if most_popular.1 * 3 < total_reponses * 2 {
             let mut highest = None;
 
-            for (pier, check) in conversation.iter() {
+            for (pier, check) in conversation {
                 if check.hash() != most_popular.0 {
                     continue;
                 }
@@ -998,7 +999,7 @@ impl Manager {
             source: &BTreeMap<String, hash_check::ResponseHash>,
             other: &BTreeMap<String, hash_check::ResponseHash>,
         ) {
-            for (resource, hash) in source.iter() {
+            for (resource, hash) in source {
                 if let Some(other_hash) = other.get(resource) {
                     if hash != other_hash && !matches.contains(resource) {
                         matches.push(resource.clone());

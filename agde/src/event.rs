@@ -10,6 +10,7 @@ use crate::{log, utils, Deserialize, Duration, EventKind, Manager, Serialize, Sy
 /// Creates a granular [`Difference`] between `base` and `target`.
 ///
 /// If you [`Difference::apply`] this on `base`, you **should** get `target`.
+#[allow(clippy::missing_panics_doc)]
 pub fn diff(base: &[u8], target: &[u8]) -> Difference {
     let mut sig = Signature::new(256);
     sig.write(base);
@@ -564,6 +565,7 @@ impl<'a> Unwinder<'a> {
     /// # Errors
     ///
     /// Passes errors from [`Difference::apply`].
+    #[allow(clippy::missing_panics_doc)]
     pub fn rewind(
         &mut self,
         resource: impl Into<Vec<u8>>,
@@ -654,6 +656,7 @@ impl<'a> Rewinder<'a> {
     /// # Errors
     ///
     /// Passes errors from [`Difference::apply`].
+    #[allow(clippy::missing_panics_doc)]
     pub fn rewind_with_modify_diff(
         &mut self,
         resource: &str,
