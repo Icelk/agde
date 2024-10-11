@@ -6,7 +6,7 @@ on:
             - "agde-tokio/**"
             - "agde-io/**"
             - "agde/**"
-            - "den/**"
+            - "dach/**"
             - "Cargo.toml"
             - ".github/workflows/agde-tokio.yml"
 

@@ -6,6 +6,6 @@ updates:
       schedule:
           interval: "daily"
     - package-ecosystem: "cargo"
-      directory: "/den"
+      directory: "/dach"
       schedule:
           interval: "daily"
