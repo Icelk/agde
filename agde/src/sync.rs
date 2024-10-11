@@ -31,7 +31,7 @@ pub(crate) enum RevertTo {
 #[must_use]
 pub struct Request {
     pier: Uuid,
-    signatures: HashMap<String, den::Signature>,
+    signatures: HashMap<String, dach::Signature>,
     log_settings: (Duration, u32),
     revert: RevertTo,
 }
@@ -66,8 +66,8 @@ impl RequestBuilder {
     }
     /// Insert the `resource`'s `signature` to this response.
     ///
-    /// The [`den::Signature`] allows the pier to get the diff for us.
-    pub fn insert(&mut self, resource: String, signature: den::Signature) -> &mut Self {
+    /// The [`dach::Signature`] allows the pier to get the diff for us.
+    pub fn insert(&mut self, resource: String, signature: dach::Signature) -> &mut Self {
         self.req.signatures.insert(resource, signature);
         self
     }
@@ -86,7 +86,7 @@ impl RequestBuilder {
 pub struct Response {
     pier: Uuid,
     log: Vec<log::ReceivedEvent>,
-    diff: Vec<(String, den::Difference)>,
+    diff: Vec<(String, dach::Difference)>,
     delete: Vec<String>,
     revert: RevertTo,
 }
@@ -102,9 +102,9 @@ impl Response {
         self.revert
     }
     /// Returns a list with `(resource, diff)`,
-    /// where you should call [`den::Difference::apply`] on the data
+    /// where you should call [`dach::Difference::apply`] on the data
     /// `resource` holds.
-    pub fn diff(&self) -> &[(impl AsRef<str>, den::Difference)] {
+    pub fn diff(&self) -> &[(impl AsRef<str>, dach::Difference)] {
         &self.diff
     }
     /// Returns a list with `resource`,
@@ -122,10 +122,10 @@ impl Response {
 #[derive(Debug)]
 pub struct ResponseBuilder<'a> {
     request: &'a Request,
-    signature_iter: hash_map::Iter<'a, String, den::Signature>,
+    signature_iter: hash_map::Iter<'a, String, dach::Signature>,
     pier: Uuid,
     /// Binary sorted by String
-    diff: Vec<(String, den::Difference)>,
+    diff: Vec<(String, dach::Difference)>,
 
     unwinder: Option<event::Unwinder<'a>>,
 }
@@ -155,7 +155,7 @@ impl<'a> ResponseBuilder<'a> {
     /// send a delete event then.
     pub fn next_signature(
         &mut self,
-    ) -> Option<(&str, &den::Signature, Option<&mut event::Unwinder<'a>>)> {
+    ) -> Option<(&str, &dach::Signature, Option<&mut event::Unwinder<'a>>)> {
         self.unwinder();
         let unwinder = self.unwinder.as_mut();
         self.signature_iter.next().map(|(k, v)| (&**k, v, unwinder))
@@ -175,7 +175,7 @@ impl<'a> ResponseBuilder<'a> {
     /// # Panics
     ///
     /// Panics if you've called this with the same `resource` before.
-    pub fn add_diff(&mut self, resource: String, diff: den::Difference) -> &mut Self {
+    pub fn add_diff(&mut self, resource: String, diff: dach::Difference) -> &mut Self {
         if let Err(idx) = self.diff.binary_search_by(|item| item.0.cmp(&resource)) {
             self.diff.insert(idx, (resource, diff));
         } else {

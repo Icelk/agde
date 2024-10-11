@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use den::*;
+use dach::*;
 
 fn lorem_ipsum() -> &'static str {
     "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras nec justo eu magna ultrices gravida quis in felis. Mauris ac rutrum enim. Nulla auctor lacus at tellus sagittis dictum non id nunc. Donec ac nisl molestie, egestas dui vitae, consectetur sapien. Vivamus vel aliquet magna, ut malesuada mauris. Curabitur eu erat at lorem rhoncus cursus ac at mauris. Curabitur ullamcorper diam sed leo pellentesque, ac rhoncus quam mattis. Suspendisse potenti. Pellentesque risus ex, egestas in ex nec, sollicitudin accumsan dolor. Donec elementum id odio eget pharetra. Morbi aliquet accumsan vestibulum. Suspendisse eros dui, condimentum sagittis magna non, eleifend egestas dui. Ut pulvinar vestibulum lorem quis laoreet. Nam aliquam ante in placerat volutpat. Sed ac imperdiet ex. Nullam ut neque vel augue dignissim semper.\n\n"
@@ -253,7 +253,7 @@ fn minify() {
     assert_eq!(total, 18);
 }
 fn revert(old: &[u8], new: &[u8]) {
-    let mut sig = den::Signature::new(8);
+    let mut sig = dach::Signature::new(8);
     sig.write(old);
     let sig = sig.finish();
     let diff = sig.diff(new);
@@ -338,7 +338,7 @@ fn apply_adaptive_end_no_ends() {
     let diff = s.diff(s2.as_bytes());
 
     assert_eq!(diff.segments().len(), 1);
-    assert!(matches!(diff.segments()[0], den::Segment::Unknown(_)));
+    assert!(matches!(diff.segments()[0], dach::Segment::Unknown(_)));
 
     {
         let mut vec = s3.as_bytes().to_vec();
@@ -443,7 +443,7 @@ fn parallel_consistency_difference_1() {
     let signature = signature.finish();
 
     let diff = signature.diff(remote_data.as_bytes());
-    let parallel_diff = den::parallel::WORKER_POOL
+    let parallel_diff = dach::parallel::WORKER_POOL
         .with(|wp| signature.parallel_diff_with_options(remote_data.as_bytes(), wp, 0, 8));
     assert_eq!(diff.segments(), parallel_diff.segments());
 }
@@ -458,7 +458,7 @@ fn parallel_consistency_difference_2() {
     let remote_data = lorem_ipsum().repeat(100);
 
     let mut signature = Signature::new(128);
-    den::parallel::WORKER_POOL.with(|wp| signature.parallel_write(local_data.as_bytes(), wp));
+    dach::parallel::WORKER_POOL.with(|wp| signature.parallel_write(local_data.as_bytes(), wp));
     let signature = signature.finish();
 
     // serial
@@ -468,7 +468,7 @@ fn parallel_consistency_difference_2() {
 
     //parallel
     let now = Instant::now();
-    let parallel_diff = den::parallel::WORKER_POOL
+    let parallel_diff = dach::parallel::WORKER_POOL
         .with(|wp| signature.parallel_diff_with_options(remote_data.as_bytes(), wp, 0, 512));
     println!("Parallel took {}µs", now.elapsed().as_micros());
 
@@ -497,9 +497,9 @@ fn parallel_consistency_signature_1() {
     //parallel
     let mut parallel_sig = Signature::new(256);
     // make sure it's initiated
-    den::parallel::WORKER_POOL.with(|_wp| {});
+    dach::parallel::WORKER_POOL.with(|_wp| {});
     let now = Instant::now();
-    den::parallel::WORKER_POOL
+    dach::parallel::WORKER_POOL
         .with(|wp| parallel_sig.parallel_write_with_options(data.as_bytes(), wp, 0, 0));
     println!("Parallel took {}µs", now.elapsed().as_micros());
 

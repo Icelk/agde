@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::fmt::{self, Debug};
 
-use den::{Difference, ExtendVec, Signature};
+use dach::{Difference, ExtendVec, Signature};
 
 use crate::{log, utils, Deserialize, Duration, EventKind, Manager, Serialize, SystemTime, Uuid};
 
@@ -385,7 +385,7 @@ pub enum UnwindError {
     ///
     /// The rewound resource is also returned, if you want to use it.
     /// The diffs which erred aren't applied.
-    Apply(den::ApplyError, Vec<u8>),
+    Apply(dach::ApplyError, Vec<u8>),
 }
 impl UnwindError {
     /// Get the data of this error.
@@ -543,7 +543,7 @@ impl<'a> Unwinder<'a> {
                         other.clear();
                         self.unwound_events.push(diff);
                     } else {
-                        error = Some(den::ApplyError::RefOutOfBounds);
+                        error = Some(dach::ApplyError::RefOutOfBounds);
                     }
                 }
                 EventKind::Delete(_) | EventKind::Create(_) => unreachable!(
@@ -569,7 +569,7 @@ impl<'a> Unwinder<'a> {
     pub fn rewind(
         &mut self,
         resource: impl Into<Vec<u8>>,
-    ) -> Result<Vec<u8>, (den::ApplyError, Vec<u8>)> {
+    ) -> Result<Vec<u8>, (dach::ApplyError, Vec<u8>)> {
         let mut vec = resource.into();
         let mut other = vec![];
         let mut error = None;
@@ -586,7 +586,7 @@ impl<'a> Unwinder<'a> {
                         .expect("we made sure the references were in bounds");
                 }
             } else {
-                error = Some(den::ApplyError::RefOutOfBounds);
+                error = Some(dach::ApplyError::RefOutOfBounds);
             }
         }
         match error {
@@ -615,7 +615,7 @@ pub enum RewindError {
     ///
     /// The rewound resource is also returned, if you want to use it.
     /// The diffs which erred aren't applied.
-    Apply(den::ApplyError, Vec<u8>),
+    Apply(dach::ApplyError, Vec<u8>),
     /// The resource has been destroyed since last commit. Throw away your changes.
     ///
     /// The inner byte array is the `data` supposed to be rewound.
@@ -701,7 +701,7 @@ impl<'a> Rewinder<'a> {
                         .expect("we made sure the references were in bounds");
                 }
             } else {
-                error = Some(den::ApplyError::RefOutOfBounds);
+                error = Some(dach::ApplyError::RefOutOfBounds);
             }
         }
         self.buf = other;

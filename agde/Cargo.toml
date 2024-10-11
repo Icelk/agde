@@ -7,7 +7,8 @@ edition = "2021"
 rust-version = "1.56"
 description = "A general decentralized sync library supporting text and binary."
 readme = "README.md"
-homepage = "https://agde.dev/"
+#homepage = "https://agde.dev/"
+homepage = "https://github.com/Icelk/agde/"
 repository = "https://github.com/Icelk/agde/"
 license = "LGPL-3.0-or-later"
 keywords = ["sync", "rsync", "live-share", "binary sync"]
@@ -16,7 +17,7 @@ categories = ["algorithms"]
 [dependencies]
 base64 = "0.21"
 bincode = { version = "=2.0.0-rc.2", features = ["serde"] }
-den = { path = "../den", features = ["serde"] }
+dach = { path = "../dach", features = ["serde"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

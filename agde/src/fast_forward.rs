@@ -232,7 +232,7 @@ impl Metadata {
     /// apply the [`ResourceMeta::mtime_in_current`] to get `self` to `target`.
     ///
     /// This is here to update the mtime of resources which did not get their mtime updated due to
-    /// the diff being [empty](crate::den::Difference::is_empty).
+    /// the diff being [empty](crate::dach::Difference::is_empty).
     pub fn apply_current_mtime_changes(&mut self, changes: &[MetadataChange]) {
         for change in changes {
             match change {
@@ -274,7 +274,7 @@ pub enum MetadataChange {
     /// It represents the [`ResourceMeta::mtime_in_current`].
     ///
     /// The [`SystemTime`] is here to update the mtime of resources which did not get their mtime updated due to
-    /// the diff being [empty](crate::den::Difference::is_empty).
+    /// the diff being [empty](crate::dach::Difference::is_empty).
     Modify(String, bool, Option<SystemTime>),
     /// The resource was destroyed.
     Delete(String),

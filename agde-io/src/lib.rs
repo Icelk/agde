@@ -1329,7 +1329,7 @@ async fn handle_message<P: Platform>(
                             .read(res, Storage::Public)
                             .await?
                             .unwrap_or_default();
-                        let mut sig = agde::den::Signature::new(128);
+                        let mut sig = agde::dach::Signature::new(128);
                         sig.write(&data);
                         let sig = sig.finish();
                         sync_request.insert(res.clone(), sig);
@@ -1373,7 +1373,7 @@ async fn handle_message<P: Platform>(
                 } else {
                     // if the resource has since been destroyed, return something so they don't
                     // delete ut, but make sure the diff doesn't change anything (`empty`).
-                    builder.add_diff(resource, agde::den::Difference::empty(data_len, 8));
+                    builder.add_diff(resource, agde::dach::Difference::empty(data_len, 8));
                 }
             }
             let response = builder.finish(&manager);
@@ -1523,7 +1523,7 @@ async fn handle_message<P: Platform>(
                             Err(()) => continue,
                         };
 
-                        let mut sig = agde::den::Signature::new(128);
+                        let mut sig = agde::dach::Signature::new(128);
                         sig.write(&data);
                         let sig = sig.finish();
                         sync.insert(resource, sig);
@@ -2175,7 +2175,7 @@ pub fn to_compressed_bin(message: &agde::Message) -> Vec<u8> {
 }
 /// Sanitizes `ev`, treating it as a file system resource.
 /// Returns `true` if allowed.
-pub fn sanitize<S: agde::den::ExtendVec>(ev: &agde::Event<S>) -> bool {
+pub fn sanitize<S: agde::dach::ExtendVec>(ev: &agde::Event<S>) -> bool {
     let resource = ev.resource();
     let path = Path::new(resource);
     path.is_relative() && !resource.contains("../")

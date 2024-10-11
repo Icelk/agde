@@ -2,11 +2,11 @@
 //!
 //! # Performance
 //!
-//! `den` is performant enough for large files and files, exceeding 10MB (when using rolling hashes).
+//! `dach` is performant enough for large files and files, exceeding 10MB (when using rolling hashes).
 //! Please compile with the **release** preset for **10X** the performance.
 //!
 //! Allocating data and keeping it in memory is very fast compared to hashing.
-//! In the future, Den will support reading data bit by bit, greatly reducing the memory usage.
+//! In the future, Dach will support reading data bit by bit, greatly reducing the memory usage.
 //!
 //! # How-to & examples
 //!
@@ -41,7 +41,7 @@
 //! The data segments can be any size. Performance should still be good.
 //!
 //! ```
-//! # use den::*;
+//! # use dach::*;
 //! let base_data = b"This is a document everyone has. It's about some new difference library.";
 //! let target_data = b"This is a document only I have. It's about some new difference library.";
 //!
@@ -1672,7 +1672,7 @@ impl<S: ExtendVec> Difference<S> {
     /// # Examples
     ///
     /// ```
-    /// # use den::*;
+    /// # use dach::*;
     /// let base_data = b"This is a document everyone has. It's about some new difference library.";
     /// let target_data = b"This is a document only I have. It's about some new difference library.";
     /// let mut base_data = base_data.to_vec();

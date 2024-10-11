@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::Duration;
 
-use den::ExtendVec;
+use dach::ExtendVec;
 use serde::{Deserialize, Serialize};
 
 use crate::{event, Manager};
@@ -87,19 +87,19 @@ pub enum Error {
     FastForwardInProgress,
 }
 
-/// An error during [`den::Difference::apply`] and [`crate::log::EventApplier::apply`].
+/// An error during [`dach::Difference::apply`] and [`crate::log::EventApplier::apply`].
 #[derive(Debug)]
 pub enum ApplyError {
     /// A reference in the difference is out of bounds.
-    /// See [`den::ApplyError::RefOutOfBounds`].
+    /// See [`dach::ApplyError::RefOutOfBounds`].
     RefOutOfBounds,
     /// The function called must not be called on the current event.
     InvalidEvent,
 }
-impl From<den::ApplyError> for ApplyError {
-    fn from(err: den::ApplyError) -> Self {
+impl From<dach::ApplyError> for ApplyError {
+    fn from(err: dach::ApplyError) -> Self {
         match err {
-            den::ApplyError::RefOutOfBounds => Self::RefOutOfBounds,
+            dach::ApplyError::RefOutOfBounds => Self::RefOutOfBounds,
         }
     }
 }
@@ -480,7 +480,7 @@ impl<'a> EventApplier<'a> {
                     .expect("we made sure the references were in bounds");
             }
         } else {
-            error = Some(den::ApplyError::RefOutOfBounds);
+            error = Some(dach::ApplyError::RefOutOfBounds);
         }
         let len_diff = utils::sub_usize(resource.len(), len);
         let mut offsets = utils::Offsets::new();

@@ -8,15 +8,15 @@ It can sync whenever, like Git, but doesn't store a history. This means the stor
 
 # Components
 
-## den
+## dach
 
-`den` is the low-level underlying difference algorithm. It works on _general_ data, both binary and text.
+`dach` is the low-level underlying difference algorithm. It works on _general_ data, both binary and text.
 
 It supports both syncing a local file with a remote's using a cheap, rsync-esque algo and obtaining a diff between local files to share with others.
 
 ## agde
 
-`agde` takes the local diff function of [`den`](#den) and builds a framework around it to provide _asynchronous_ arrival of events.
+`agde` takes the local diff function of [`dach`](#dach) and builds a framework around it to provide _asynchronous_ arrival of events.
 This enables unreliable networks (such as the internet) to be used in a live environment, without any data getting lost.
 It also takes care of validating data integrity.
 

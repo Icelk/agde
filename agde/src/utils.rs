@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use den::{Difference, Segment};
+use dach::{Difference, Segment};
 
 use crate::{utils, Duration, Event, EventKind, SystemTime, UNIX_EPOCH};
 
@@ -264,7 +264,7 @@ impl Default for Offsets {
 mod tests {
     #[test]
     fn offsets() {
-        use den::{Segment, SegmentRef, Signature};
+        use dach::{Segment, SegmentRef, Signature};
 
         let diff = {
             let mut sig = Signature::new(8);

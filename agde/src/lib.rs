@@ -9,7 +9,7 @@
 //! - pier - another client on the network.
 //! - help desire - how much a pier wants to help others in the network.
 //! - conversation - a exchange of some related data (e.g. [`MessageKind::LogCheck`]).
-//! - [`den::Difference`] a modification to a resource.
+//! - [`dach::Difference`] a modification to a resource.
 //! - [UUID](Uuid) - a unique identifier for a unit (e.g. conversation, [`Message`])
 //! - log - internal list to compensate for inconsistencies in message arrival time.
 //! - storage - "versions" of the data stored by the implementor
@@ -45,7 +45,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-pub use den;
+pub use dach;
 pub use event::{Event, IntoEvent, Kind as EventKind};
 pub use log::{Check as LogCheck, CheckAction as LogCheckAction};
 
@@ -969,9 +969,9 @@ impl Manager {
         hash_check::ResponseBuilder::new(sender, check, cutoff, unwinder)
     }
     /// If the returned [`sync::RequestBuilder`] is [`Some`], loop over each resource
-    /// in the [`Vec`] next to the `RequestBuilder`. Add all the [`den::Signature`]s for the resources.
+    /// in the [`Vec`] next to the `RequestBuilder`. Add all the [`dach::Signature`]s for the resources.
     /// Before creating the signatures, please unwind them using the [`hash_check::Response::unwinder`].
-    /// Run [`sync::RequestBuilder::finish`] once every [`den::Signature`] has been added.
+    /// Run [`sync::RequestBuilder::finish`] once every [`dach::Signature`] has been added.
     /// Then, execute [`Self::process_sync`] with the [`sync::RequestBuilder`].
     /// If it's [`None`], the data matches.
     ///
