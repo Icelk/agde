@@ -631,10 +631,14 @@ impl<T: AsRef<[u8]> + Debug> ExtendVec for T {
         let slice = self.as_ref();
         // SAFETY: This guarantees `vec.capacity()` >= `vec.len() + slice.len()`
         vec.reserve(slice.len());
-        let len = vec.len();
+
         // SAFETY: We get uninitialized bytes and write to them. This is fine.
         // The length is guaranteed to be allocated from above.
-        let destination = unsafe { vec.get_unchecked_mut(len..len + slice.len()) };
+        let spare = &mut vec.spare_capacity_mut()[..slice.len()];
+        #[allow(clippy::transmute_ptr_to_ptr)]
+        let spare: &mut [u8] = unsafe { core::mem::transmute(spare) };
+
+        let destination = spare;
         destination.copy_from_slice(slice);
         // SAFETY: We set the length to that we've written to above.
         unsafe { vec.set_len(vec.len() + slice.len()) };
@@ -1872,7 +1876,9 @@ impl<S: ExtendVec> Difference<S> {
             //
             // This will only occur if no other ref covered the end
             if !found_end && base.len() > previous_data_end {
-                out.extend_from_slice(&base[previous_data_end..]);
+                let bc = &base[previous_data_end..];
+                println!("{}", bc.len());
+                out.extend_from_slice(bc);
             }
         }
 
