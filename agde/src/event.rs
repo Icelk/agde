@@ -262,9 +262,9 @@ impl<S: ExtendVec + AsRef<[u8]>> Debug for Kind<S> {
 #[must_use]
 pub struct Event<S: ExtendVec + 'static = Vec<u8>> {
     kind: Kind<S>,
-    /// A [`Duration`] of time after UNIX_EPOCH.
+    /// A [`Duration`] of time after `UNIX_EPOCH`.
     timestamp: Duration,
-    /// A [`Duration`] of time after UNIX_EPOCH.
+    /// A [`Duration`] of time after `UNIX_EPOCH`.
     ///
     /// This gives the receiver information about when to modify later events when this event
     /// arrives. If event 2 (stored in the log) has this set to before event 1's `timestamp`, we
@@ -486,7 +486,8 @@ impl<'a> Unwinder<'a> {
     ///     println!("Resource {} changed in some way.", event.resource());
     /// }
     /// ```
-    pub fn events(&self) -> impl Iterator<Item = &Event> + DoubleEndedIterator + '_ {
+    #[must_use]
+    pub fn events(&self) -> impl DoubleEndedIterator<Item = &Event> + '_ {
         self.events.iter().map(|received_ev| &received_ev.event)
     }
     /// Reverts the `resource` with `modern_resource_name` to the bottom of the internal list.
@@ -727,7 +728,8 @@ impl<'a> Rewinder<'a> {
 
     /// Get an iterator over the events stored in this rewinder.
     /// The first item is the oldest one. The last is the most recent.
-    pub fn events(&self) -> impl Iterator<Item = &Event> + DoubleEndedIterator + '_ {
+    #[must_use]
+    pub fn events(&self) -> impl DoubleEndedIterator<Item = &Event> + '_ {
         self.events.iter().map(|received_ev| &received_ev.event)
     }
 

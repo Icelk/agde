@@ -21,12 +21,12 @@ crate-type = ["cdylib"]
 agde = { path = "../agde" }
 agde-io = { path = "../agde-io" }
 
-base64 = "0.13"
+base64 = "0.22"
 bincode = { version = "=2.0.0-rc.2", features = ["serde"] }
 console_error_panic_hook = "0.1.7"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
-gloo-net = "0.2"
-gloo-timers = { version = "0.2", features = ["futures"] }
+gloo-net = "0.6"
+gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "0.3"
 lazy_static = "1.4"
 log = "0.4"

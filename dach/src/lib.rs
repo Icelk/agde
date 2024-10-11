@@ -98,8 +98,6 @@ enum LargeHash<K, V> {
     Single(K, V),
     Multiple(Vec<(K, V)>),
 }
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct LargeHashKey([u8; 8]);
 struct HashMap128Hasher([u8; 8]);
 impl Hasher for HashMap128Hasher {
     fn write(&mut self, bytes: &[u8]) {

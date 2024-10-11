@@ -1,4 +1,4 @@
-//!
+#![allow(missing_docs)]
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -6,7 +6,6 @@ use std::thread;
 use crate::{BlockData, Difference, HashMap128, HashResult, Segment, Signature, SignatureBuilder};
 
 std::thread_local!(
-    ///
     pub static WORKER_POOL: WorkerPool = WorkerPool::new(
         std::thread::available_parallelism()
             .map(std::num::NonZeroUsize::get)
@@ -14,7 +13,6 @@ std::thread_local!(
     );
 );
 type SendableFunction = Option<Box<dyn FnOnce() + Send>>;
-///
 #[derive(Debug)]
 pub struct WorkerPool {
     sender: mpsc::Sender<SendableFunction>,
@@ -41,7 +39,7 @@ impl WorkerPool {
         Self { sender, workers }
     }
     /// Kill all the threads of this worker pool.
-    /// Does not wait for the threads to finish. [`Self::wait`] can be used after this to achieve
+    /// Does not wait for the threads to finish. [`PoolScope::wait`] can be used after this to achieve
     /// that behaviour.
     ///
     /// # Panics
@@ -144,7 +142,6 @@ impl SignatureBuilder {
     pub fn parallel_write(&mut self, data: &[u8], wp: &WorkerPool) {
         self.parallel_write_with_options(data, wp, PARALLEL_DATA_SIZE_THRESHOLD, 200);
     }
-    ///
     pub fn parallel_write_with_options(
         &mut self,
         data: &[u8],

@@ -397,12 +397,11 @@ impl<P: Platform> Options<P> {
         if self.disable_public_storage && storage == Storage::Current {
             storage = Storage::Public;
         }
-        match {
+        let read = {
             let mut lock = self.file_cache.lock().await;
-            let v = lock.read(resource, storage);
-            drop(lock);
-            v
-        } {
+            lock.read(resource, storage)
+        };
+        match read {
             Ok(v) => v,
             Err(res) => {
                 let file = self._read(res.clone(), storage).await?;
@@ -453,12 +452,11 @@ impl<P: Platform> Options<P> {
         if self.disable_public_storage && matches!(storage, WriteStorage::Current(_)) {
             return Ok(());
         }
-        match {
+        let write = {
             let mut lock = self.file_cache.lock().await;
-            let v = lock.write(resource.into(), data, storage, flush, false);
-            drop(lock);
-            v
-        } {
+            lock.write(resource.into(), data, storage, flush, false)
+        };
+        match write {
             Ok(()) => Ok(()),
             Err((res, data)) => self._write(res, storage, data).await,
         }
@@ -482,12 +480,11 @@ impl<P: Platform> Options<P> {
         if self.disable_public_storage && storage == Storage::Current {
             return Ok(());
         }
-        match {
+        let delete = {
             let mut lock = self.file_cache.lock().await;
-            let v = lock.delete(resource, storage);
-            drop(lock);
-            v
-        } {
+            lock.delete(resource, storage)
+        };
+        match delete {
             Ok(()) => Ok(()),
             Err(res) => self._delete(res, storage).await,
         }
@@ -1883,7 +1880,7 @@ pub async fn rewind_current(
 
     let mut rewinder = manager.rewind_from_last_commit();
 
-    let r = match rewinder.rewind_with_modify_diff(resource, current, |diff| {
+    let result = rewinder.rewind_with_modify_diff(resource, current, |diff| {
         let mut diff = diff.clone();
         let original_data_len = diff.original_data_len();
         offsets.apply_single(&mut diff);
@@ -1891,7 +1888,9 @@ pub async fn rewind_current(
         // takes care of that.
         diff.set_original_data_len(original_data_len);
         Cow::Owned(diff)
-    }) {
+    });
+
+    let opt = match result {
         Err(agde::event::RewindError::ResourceDestroyed(_)) => None,
         Err(agde::event::RewindError::Apply(err, vec)) => {
             warn!("Error when rewinding current storage (a stored diff is invalid): {err:?}");
@@ -1901,7 +1900,7 @@ pub async fn rewind_current(
     };
 
     // the resource isn't destroyed
-    if r.is_some() {
+    if opt.is_some() {
         let mut cursors = cursors
             .iter_mut()
             .filter(|c| {
@@ -1926,7 +1925,7 @@ pub async fn rewind_current(
         }
     }
 
-    r
+    opt
 }
 
 async fn handle_sync_reply<P: Platform>(

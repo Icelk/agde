@@ -1499,7 +1499,7 @@ pub enum SyncReplyAction<'a> {
     /// Call the methods on the [`sync::Response`] to actually make changes to the
     /// resources returned before using the `rewinder`.
     FastForward {
-        ///
+        /// Inner state
         rewinder: event::Rewinder<'a>,
         /// Apply this to your public metadata.
         metadata_applier: fast_forward::MetadataApplier,
@@ -1511,7 +1511,7 @@ pub enum SyncReplyAction<'a> {
     /// You only have to do this to the resources returned by the functions on
     /// [`sync::Response`].
     HashCheck {
-        ///
+        /// Inner state
         unwinder: event::Unwinder<'a>,
     },
     /// An unexpected pier sent us a [`Self::HashCheck`] sync message while we are fast forwarding.
