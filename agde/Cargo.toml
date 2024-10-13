@@ -15,7 +15,7 @@ keywords = ["sync", "rsync", "live-share", "binary sync"]
 categories = ["algorithms"]
 
 [dependencies]
-base64 = "0.21"
+base64 = "0.22"
 bincode = { version = "=2.0.0-rc.2", features = ["serde"] }
 dach = { path = "../dach", features = ["serde"] }
 semver = { version = "1", features = ["serde"] }
