@@ -16,7 +16,7 @@ categories = ["algorithms"]
 
 [dependencies]
 base64 = "0.22"
-bincode = { version = "=2.0.0-rc.2", features = ["serde"] }
+bincode = { version = "=2.0.0", features = ["serde"] }
 dach = { path = "../dach", features = ["serde"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
