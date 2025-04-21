@@ -15,7 +15,7 @@ categories = ["algorithms"]
 
 [dependencies]
 adler32 = "1.2"
-cyclic-poly-23 = "0.3"
+cyclic-poly-23 = "0.4"
 serde = { version = "1", features = ["derive"], optional = true }
 rustc-hash = "2"
 xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
